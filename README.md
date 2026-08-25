@@ -44,7 +44,7 @@ interface, served from `templates/` and fed by the v3 recognition core.
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | how the pipeline works, module by module |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | running, deploying, tuning, troubleshooting |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | every measurement, and how to reproduce it |
-| [docs/AUDIT.md](docs/AUDIT.md) | review of the previous `fast_api/` implementation |
+| [docs/AUDIT.md](docs/AUDIT.md) | review of the removed `fast_api/` implementation, kept for its rationale |
 | [docs/UI.md](docs/UI.md) | how the original templates are served from the v3 core |
 | [docs/IMAGE_QUALITY.md](docs/IMAGE_QUALITY.md) | why frames were blurry, what was measured, what was changed |
 | [docs/SCHEDULED_RUN.md](docs/SCHEDULED_RUN.md) | the 2026-08-25 07:00 capture run: what starts, what is saved, retention |
@@ -72,5 +72,7 @@ bench/                 the benchmark and validation scripts
 face_id_users/         enrolment export (54 people)
 ```
 
-`fast_api/` is the previous implementation, kept for reference until v3 reaches
-full parity. Nothing in `app/` imports from it.
+`fast_api/` (the Django-era carry-over) was removed on 2026-08-25 once the last
+importer went away: enrolment now runs natively in `app/`. Its findings live on
+in [docs/AUDIT.md](docs/AUDIT.md), and a guard test asserts the legacy employee
+router is never remounted.

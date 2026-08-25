@@ -15,7 +15,13 @@ from app.core.recognizer import FaceRecognizer
 ROOT = "/home/inomjon/projectAI/face_rec/face_recognition_airi"
 M = f"{ROOT}/models"
 GAL = f"{ROOT}/face_id_users"
-REC = sys.argv[1] if len(sys.argv) > 1 else "adaface_ir101_webface12m_fp16.onnx"
+# Default to the DEPLOYED recognizer. This used to default to the base
+# webface12m model, so the headline d-prime it printed described a model that
+# is not in production - and thresholds do not transfer between these two
+# (the deployed fine-tune compresses impostors: gallery max 0.208 vs 0.392).
+# Pass a filename to compare something else.
+from app.config import settings as _settings
+REC = sys.argv[1] if len(sys.argv) > 1 else _settings.recognizer_model
 
 det = YoloFaceDetector(f"{M}/yolov8n-face.pt", imgsz=1280, conf=0.35)
 ali = FaceAligner(f"{M}/dfa_mobilenet_aligner.onnx")

@@ -50,7 +50,18 @@ for bs in [1,4,8,16]:
 
 print()
 print("="*78); print("4. AdaFace recognizers (ONNX CUDA)"); print("="*78)
-for name in ["adaface_ir101_webface12m.onnx","adaface_ir101_webface12m_fp16.onnx","adaface_ir18_webface4m.onnx"]:
+# Comparison set. Only the deployed recognizer is guaranteed to be present;
+# the rest are optional reference weights (see models/README.md), so skip any
+# that are absent rather than aborting the whole benchmark.
+from app.config import settings as _settings
+_candidates = [_settings.recognizer_model,
+               "adaface_ir101_webface12m_fp16.onnx",
+               "adaface_ir18_webface4m.onnx"]
+_present = [n for n in dict.fromkeys(_candidates)
+            if os.path.exists(os.path.join(MODELS, n))]
+for _missing in [n for n in dict.fromkeys(_candidates) if n not in _present]:
+    print(f"  (skipped, not on disk: {_missing})")
+for name in _present:
     try:
         s = sess(name); prov = s.get_providers()[0].replace("ExecutionProvider","")
         inp = s.get_inputs()[0]; dt = np.float16 if "float16" in inp.type else np.float32

@@ -15,7 +15,9 @@ from app.core.recognizer import FaceRecognizer
 ROOT = "/home/inomjon/projectAI/face_rec/face_recognition_airi"
 GAL = f"{ROOT}/face_id_users"
 det = build_detector("yolo", f"{ROOT}/models/yolov8n-face.pt", imgsz=1280, conf=0.35)
-rec = FaceRecognizer(f"{ROOT}/models/adaface_ir101_webface12m_fp16.onnx")
+# The deployed recognizer, so margin sweeps describe production behaviour.
+from app.config import settings as _settings
+rec = FaceRecognizer(f"{ROOT}/models/{_settings.recognizer_model}")
 
 people = sorted(d for d in os.listdir(GAL) if os.path.isdir(f"{GAL}/{d}") and not d.startswith("_"))
 imgs = []

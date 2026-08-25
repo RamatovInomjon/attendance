@@ -3,8 +3,9 @@
 Reviewed 2026-08-19, 3,360 LOC. Full write-up with diagrams:
 <https://claude.ai/code/artifact/82d968c0-4985-4dc3-8c6f-7ce560ca7fcd>
 
-This is kept because several findings explain *why* `app/` is built the way it
-is, and because `fast_api/` is still on disk.
+The package itself was deleted on 2026-08-25. This audit is kept because
+several findings explain *why* `app/` is built the way it is - the design
+choices here are reactions to the problems listed below.
 
 ## Blocking — could not start
 
@@ -57,5 +58,8 @@ tests, no Dockerfile, no README.
 
 ## Status
 
-`app/` supersedes it. `fast_api/` can be deleted once v3 has run in production
-for a week; nothing in `app/` imports from it.
+`app/` superseded it, and `fast_api/` was **deleted on 2026-08-25**. The last
+live dependency - the employee-enrolment router - was replaced by a native v3
+enrolment path; all 15 remaining modules were unreachable from both entrypoints.
+`tests/test_ui_pages.py` keeps a guard asserting the legacy router is never
+remounted, so the boundary cannot quietly come back.
