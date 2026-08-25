@@ -45,3 +45,5 @@ Task 6: fix round 1/5 (4 addressed, 0 open — stale state, attendance WS, unava
 Task 6: complete (review clean; 32 tests reported passed; 2 deferred minors)
 Task 7: fix round 1/5 (3 addressed, 2 open — v3 face enrollment remains disconnected; native submit ends on JSON)
 Task 7: Ruling: Fix Round 2's native v3 transactional enrollment design is within the already approved spec and plan; no second user approval is required. Cost if wrong: enrollment integration may need rework, mitigated by v3 persistence/rollback tests and scoped review.
+Task 7: Ruling: user explicitly added multi-image upload as an alternative to camera capture; uploaded images use the same active enrollment pipeline and transactional persistence. Cost if wrong: larger Task 7 surface, mitigated by type/size/count limits and stubbed multipart tests.
+Task 7: fix round 2/5 (2 original findings addressed, 5 open — camera multipart field limit; pre-parse upload limits; signature/pixel validation; controlled DB errors; HTML gallery warning)

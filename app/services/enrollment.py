@@ -14,25 +14,271 @@ of quietly dragging the centroid toward a different face.
 """
 from __future__ import annotations
 
+import base64
+import binascii
+from io import BytesIO
 import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+import uuid
 
 import cv2
 import numpy as np
+from PIL import Image, UnidentifiedImageError
 from sqlalchemy import delete, select
 
 from app.config import settings
 from app.core.aligner import FaceAligner
 from app.core.detector import build_detector
 from app.core.gallery import Gallery
-from app.core.quality import estimate_pose, sharpness_of
+from app.core.quality import assess, sharpness_of
 from app.core.recognizer import FaceRecognizer
 from app.db.models import Employee, FaceEmbedding
 from app.db.session import session_scope
 
 log = logging.getLogger(__name__)
+
+MAX_BROWSER_CAPTURES = 32
+MAX_CAPTURE_BYTES = 4 * 1024 * 1024
+MAX_ENROLLMENT_BODY_BYTES = 10 * 1024 * 1024
+MAX_ENROLLMENT_FIELDS = 12
+MAX_ENROLLMENT_FIELD_BYTES = 64 * 1024
+MAX_IMAGE_WIDTH = 4096
+MAX_IMAGE_HEIGHT = 4096
+MAX_IMAGE_PIXELS = 12_000_000
+UPLOAD_TYPES = {
+    "image/jpeg": {".jpg", ".jpeg"},
+    "image/png": {".png"},
+    "image/webp": {".webp"},
+}
+CANONICAL_IMAGE_SUFFIX = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
+IMAGE_FORMATS = {
+    "JPEG": ("image/jpeg", {".jpg", ".jpeg"}),
+    "PNG": ("image/png", {".png"}),
+    "WEBP": ("image/webp", {".webp"}),
+}
+
+
+class EnrollmentCaptureError(ValueError):
+    """A browser capture could not safely produce a gallery embedding."""
+
+    def __init__(self, message: str, rejections=()):
+        super().__init__(message)
+        self.rejections = tuple(rejections)
+
+
+@dataclass(frozen=True)
+class EnrollmentImage:
+    source_file: str
+    image_bgr: np.ndarray | None = None
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class EnrollmentRejection:
+    source_file: str
+    error: str
+
+
+@dataclass(frozen=True)
+class CaptureEmbedding:
+    vector: np.ndarray
+    quality: float
+
+
+@dataclass(frozen=True)
+class EnrollmentResult:
+    employee_id: int
+    external_id: str
+    embeddings: int
+    rejected: tuple[EnrollmentRejection, ...] = ()
+
+
+def decode_browser_captures(captured_images: str, captured_image: str = "") -> list[EnrollmentImage]:
+    """Decode the registration form's data URLs into OpenCV BGR frames."""
+    values = None
+    if captured_images:
+        try:
+            values = json.loads(captured_images)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise EnrollmentCaptureError(
+                "Yuz namunalari formati noto'g'ri. Namunalarni qayta olib, yana yuboring."
+            ) from exc
+        if not isinstance(values, list):
+            raise EnrollmentCaptureError(
+                "Yuz namunalari ro'yxat ko'rinishida yuborilmadi. Namunalarni qayta oling."
+            )
+    elif captured_image:
+        values = [captured_image]
+    else:
+        values = []
+
+    frames: list[EnrollmentImage] = []
+    for index, value in enumerate(values, start=1):
+        source_file = f"browser/{index:03d}.jpg"
+        if index > MAX_BROWSER_CAPTURES:
+            frames.append(EnrollmentImage(
+                source_file,
+                error=f"Ko'pi bilan {MAX_BROWSER_CAPTURES} ta rasm yuborish mumkin.",
+            ))
+            continue
+        if not isinstance(value, str) or "," not in value:
+            frames.append(EnrollmentImage(
+                source_file, error="Rasm ma'lumoti to'liq emas. Namunani qayta oling."
+            ))
+            continue
+        header, encoded = value.split(",", 1)
+        mime_type = header.removeprefix("data:").split(";", 1)[0].lower()
+        if mime_type not in UPLOAD_TYPES or ";base64" not in header:
+            frames.append(EnrollmentImage(
+                source_file, error="Rasm formati qo'llab-quvvatlanmaydi. JPEG, PNG yoki WebP ishlating."
+            ))
+            continue
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error):
+            frames.append(EnrollmentImage(
+                source_file, error="Rasm ma'lumoti buzilgan. Namunani qayta oling."
+            ))
+            continue
+        suffix = CANONICAL_IMAGE_SUFFIX[mime_type]
+        source_file = f"browser/{index:03d}{suffix}"
+        frames.append(_decode_image_payload(
+            raw,
+            source_file=source_file,
+            filename=f"capture{suffix}",
+            content_type=mime_type,
+        ))
+    return frames
+
+
+def _signature_matches(raw: bytes, format_name: str) -> bool:
+    if format_name == "JPEG":
+        return raw.startswith(b"\xff\xd8\xff")
+    if format_name == "PNG":
+        return raw.startswith(b"\x89PNG\r\n\x1a\n")
+    if format_name == "WEBP":
+        return len(raw) >= 12 and raw.startswith(b"RIFF") and raw[8:12] == b"WEBP"
+    return False
+
+
+def _decode_image_payload(
+    raw: bytes,
+    *,
+    source_file: str,
+    filename: str,
+    content_type: str,
+) -> EnrollmentImage:
+    """Inspect a bounded image header before handing bytes to OpenCV."""
+    if not raw or len(raw) > MAX_CAPTURE_BYTES:
+        return EnrollmentImage(
+            source_file,
+            error="Rasm hajmi 4 MB limitdan katta yoki fayl bo'sh.",
+        )
+
+    safe_name = Path(filename).name
+    declared_mime = (content_type or "").split(";", 1)[0].lower()
+    declared_suffix = Path(safe_name).suffix.lower()
+    try:
+        with Image.open(BytesIO(raw)) as image:
+            actual_format = (image.format or "").upper()
+            width, height = image.size
+            if actual_format not in IMAGE_FORMATS or not _signature_matches(raw, actual_format):
+                return EnrollmentImage(
+                    source_file,
+                    error=(
+                        "Faylning haqiqiy formati JPEG, PNG yoki WebP emas. "
+                        "Mos formatdagi boshqa rasmni tanlang."
+                    ),
+                )
+            expected_mime, expected_suffixes = IMAGE_FORMATS[actual_format]
+            if declared_mime != expected_mime or declared_suffix not in expected_suffixes:
+                return EnrollmentImage(
+                    source_file,
+                    error=(
+                        "Fayl nomi yoki turi uning haqiqiy formati bilan mos emas. "
+                        "Rasmni JPEG, PNG yoki WebP sifatida qayta saqlang."
+                    ),
+                )
+            pixels = width * height
+            if (
+                width <= 0
+                or height <= 0
+                or width > MAX_IMAGE_WIDTH
+                or height > MAX_IMAGE_HEIGHT
+                or pixels > MAX_IMAGE_PIXELS
+            ):
+                return EnrollmentImage(
+                    source_file,
+                    error=(
+                        "Rasm o'lchami xavfsiz piksel limitidan katta. "
+                        f"Ko'pi bilan {MAX_IMAGE_WIDTH}x{MAX_IMAGE_HEIGHT} va "
+                        f"{MAX_IMAGE_PIXELS:,} piksel rasm tanlang."
+                    ),
+                )
+            image.verify()
+    except (Image.DecompressionBombError, UnidentifiedImageError, OSError, SyntaxError, ValueError):
+        return EnrollmentImage(
+            source_file,
+            error="Rasm sarlavhasi yoki fayl ma'lumoti buzilgan. Boshqa rasmni tanlang.",
+        )
+
+    frame = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if frame is None or frame.size == 0:
+        return EnrollmentImage(
+            source_file,
+            error="Rasmni o'qib bo'lmadi. Boshqa JPEG, PNG yoki WebP faylini tanlang.",
+        )
+    height, width = frame.shape[:2]
+    if width > MAX_IMAGE_WIDTH or height > MAX_IMAGE_HEIGHT or width * height > MAX_IMAGE_PIXELS:
+        return EnrollmentImage(
+            source_file,
+            error="Dekodlangan rasm xavfsiz piksel limitidan katta. Kichikroq rasmni tanlang.",
+        )
+    return EnrollmentImage(source_file, image_bgr=frame)
+
+
+def decode_uploaded_capture(
+    raw: bytes,
+    *,
+    filename: str,
+    content_type: str,
+    index: int,
+    source_file: str | None = None,
+) -> EnrollmentImage:
+    """Validate the real format and decode one multipart JPEG/PNG/WebP image."""
+    safe_name = Path(filename or f"image-{index}").name
+    source_file = source_file or f"upload/{index:03d}_{safe_name}"
+    mime_type = (content_type or "").split(";", 1)[0].lower()
+    suffix = Path(safe_name).suffix.lower()
+    if mime_type not in UPLOAD_TYPES or suffix not in UPLOAD_TYPES[mime_type]:
+        return EnrollmentImage(
+            source_file,
+            error="Rasm turi qo'llab-quvvatlanmaydi. JPEG, PNG yoki WebP faylini tanlang.",
+        )
+    return _decode_image_payload(
+        raw,
+        source_file=source_file,
+        filename=safe_name,
+        content_type=mime_type,
+    )
+
+
+def _quality_guidance(reason: str) -> str:
+    if reason.startswith("small"):
+        return "Yuz juda kichik. Kameraga yaqinroq turing va yuzni kadr markaziga olib qayta oling."
+    if reason.startswith("aligner"):
+        return "Yuzni tekislash bahosi past. Kameraga to'g'ri qarab, yuzni berkitmasdan qayta oling."
+    if reason.startswith("blur"):
+        return "Rasm xira. Linzani arting, yorug'likni oshiring va qimirlamasdan qayta oling."
+    if reason.startswith("yaw") or reason.startswith("pitch"):
+        return "Yuz holati juda qiya. Kameraga to'g'riroq qarab namunani qayta oling."
+    return "Yuz sifati yetarli emas. Yorug'lik va yuz holatini tuzatib, namunani qayta oling."
 
 
 @dataclass
@@ -89,6 +335,50 @@ class Enroller:
         emb = self.recognizer.embed(f.aligned[None])[0]
         face_px = float(max(d.box[2] - d.box[0], d.box[3] - d.box[1]))
         return emb, f.score, sharpness_of(f.aligned), face_px
+
+    def embed_capture(self, image_bgr: np.ndarray) -> CaptureEmbedding:
+        """Validate and embed one browser capture with the active pipeline gates."""
+        dets = self.detector.detect(image_bgr)
+        if not dets:
+            raise EnrollmentCaptureError(
+                "Yuz topilmadi. Yuzni kadr markaziga olib, namunani qayta oling."
+            )
+        detection = max(
+            dets,
+            key=lambda item: (item.box[2] - item.box[0]) * (item.box[3] - item.box[1]),
+        )
+        faces = self.aligner.align(image_bgr, [detection.box], is_bgr=True)
+        if not faces:
+            raise EnrollmentCaptureError(
+                "Yuzni tekislab bo'lmadi. Kameraga to'g'ri qarab, namunani qayta oling."
+            )
+        face = faces[0]
+        quality = assess(
+            detection.box,
+            face.aligned,
+            face.landmarks,
+            face.score,
+            min_face_px=settings.min_face_px,
+            min_laplacian_var=settings.min_laplacian_var,
+            min_aligner_score=settings.min_aligner_score,
+            max_yaw_deg=settings.max_yaw_deg,
+            max_pitch_deg=settings.max_pitch_deg,
+        )
+        if not quality.ok:
+            raise EnrollmentCaptureError(_quality_guidance(quality.reason))
+
+        try:
+            vector = self.recognizer.embed(face.aligned[None])[0]
+        except Exception as exc:
+            raise EnrollmentCaptureError(
+                "Embedding yaratilmadi. Namunani qayta oling; muammo takrorlansa administratorga murojaat qiling."
+            ) from exc
+        vector = np.asarray(vector, dtype=np.float32).reshape(-1)
+        if not vector.size or not np.isfinite(vector).all():
+            raise EnrollmentCaptureError(
+                "Embedding natijasi yaroqsiz. Namunani qayta oling; muammo takrorlansa administratorga murojaat qiling."
+            )
+        return CaptureEmbedding(vector=vector, quality=float(quality.aligner_score))
 
     # -- full gallery -----------------------------------------------------
     def run(self, gallery_dir: Path | None = None, outlier_threshold: float = 0.35,
@@ -159,6 +449,112 @@ class Enroller:
                 log.info("enrolled %-28s %d images", folder.name, len(rows))
 
         return rep
+
+
+def enroll_employee_captures(
+    *,
+    full_name: str,
+    position: str,
+    department: str,
+    phone_number: str,
+    captures: list[EnrollmentImage],
+    enroller: Enroller,
+) -> EnrollmentResult:
+    """Create one employee transaction from the valid subset of all input images."""
+    name = full_name.strip()
+    if not name:
+        raise EnrollmentCaptureError("Xodimning to'liq ismini kiriting.")
+    if not captures:
+        raise EnrollmentCaptureError(
+            "Hech qanday yuz namunasi yuborilmadi. Namunalarni qayta olib, yana yuboring."
+        )
+
+    embedded: list[tuple[str, CaptureEmbedding]] = []
+    rejected: list[EnrollmentRejection] = []
+    for index, capture in enumerate(captures, start=1):
+        if index > MAX_BROWSER_CAPTURES:
+            rejected.append(EnrollmentRejection(
+                source_file=capture.source_file,
+                error=(
+                    f"{index}-namuna rad etildi: jami ko'pi bilan "
+                    f"{MAX_BROWSER_CAPTURES} ta rasm yuborish mumkin."
+                ),
+            ))
+            continue
+        if capture.error:
+            rejected.append(EnrollmentRejection(
+                source_file=capture.source_file,
+                error=f"{index}-namuna rad etildi: {capture.error}",
+            ))
+            continue
+        try:
+            result = enroller.embed_capture(capture.image_bgr)
+        except EnrollmentCaptureError as exc:
+            rejected.append(EnrollmentRejection(
+                source_file=capture.source_file,
+                error=f"{index}-namuna rad etildi: {exc}",
+            ))
+            continue
+        except Exception as exc:
+            log.exception("capture extraction failed for %s", capture.source_file)
+            rejected.append(EnrollmentRejection(
+                source_file=capture.source_file,
+                error=(
+                    f"{index}-namuna rad etildi: namunani qayta ishlab bo'lmadi. "
+                    "Namunani qayta oling; muammo takrorlansa administratorga murojaat qiling."
+                ),
+            ))
+            continue
+
+        vector = np.asarray(result.vector, dtype=np.float32).reshape(-1)
+        if not vector.size or not np.isfinite(vector).all():
+            rejected.append(EnrollmentRejection(
+                source_file=capture.source_file,
+                error=f"{index}-namuna rad etildi: embedding natijasi yaroqsiz. Namunani qayta oling.",
+            ))
+            continue
+        embedded.append((
+            capture.source_file,
+            CaptureEmbedding(vector=vector, quality=float(result.quality)),
+        ))
+
+    if not embedded:
+        raise EnrollmentCaptureError(
+            "Hech bir yuz namunasi yaroqli embedding bermadi. Quyidagi xatolarni tuzatib qayta yuboring.",
+            rejected,
+        )
+
+    external_id = f"WEB-{uuid.uuid4().hex[:12].upper()}"
+    with session_scope() as session:
+        employee = Employee(
+            external_id=external_id,
+            full_name=name,
+            department=department.strip(),
+            position=position.strip(),
+            phone=phone_number.strip(),
+            is_active=True,
+        )
+        session.add(employee)
+        session.flush()
+        session.add_all([
+            FaceEmbedding(
+                employee_id=employee.id,
+                source_file=source_file,
+                vector=item.vector.tobytes(),
+                dim=int(item.vector.shape[0]),
+                model_name=settings.recognizer_model,
+                quality=item.quality,
+            )
+            for source_file, item in embedded
+        ])
+        session.flush()
+        result = EnrollmentResult(
+            employee_id=int(employee.id),
+            external_id=external_id,
+            embeddings=len(embedded),
+            rejected=tuple(rejected),
+        )
+    return result
 
 
 def load_gallery() -> Gallery:

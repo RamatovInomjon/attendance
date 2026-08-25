@@ -1525,6 +1525,49 @@ body.app-shell {
 .enrollment-quality ul { padding-left: 1.1rem; }
 .enrollment-quality li + li { margin-top: .3rem; }
 
+.enrollment-upload {
+    padding: 1rem;
+    border: 1px dashed color-mix(in srgb, var(--airi-accent) 48%, var(--airi-border));
+    border-radius: .9rem;
+    background: color-mix(in srgb, var(--airi-accent) 6%, var(--airi-surface));
+}
+
+.enrollment-upload__previews {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: .75rem;
+}
+
+.enrollment-upload__preview {
+    display: grid;
+    grid-template-columns: 4.5rem minmax(0, 1fr) auto;
+    align-items: center;
+    gap: .75rem;
+    min-width: 0;
+    padding: .6rem;
+    border: 1px solid var(--airi-border);
+    border-radius: .75rem;
+    background: var(--airi-surface-elevated);
+}
+
+.enrollment-upload__preview img {
+    width: 4.5rem;
+    height: 4.5rem;
+    border-radius: .55rem;
+    object-fit: cover;
+}
+
+.enrollment-upload__preview-details {
+    display: grid;
+    min-width: 0;
+}
+
+.enrollment-upload__preview-details strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .unknown-review { padding: 0; overflow: hidden; }
 .unknown-review__grid {
     display: grid;
@@ -1608,6 +1651,7 @@ body.app-shell {
 
 @media (max-width: 575.98px) {
     .enrollment-workflow__steps,
+    .enrollment-upload__previews,
     .camera-diagnostics__groups { grid-template-columns: 1fr; }
     .enrollment-stage__header,
     .unknown-review__toolbar,

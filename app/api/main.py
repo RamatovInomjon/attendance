@@ -22,7 +22,6 @@ from app.runtime import runtime
 from app.services.attendance import business_date
 from app.api import pages as pages_router
 from app.api import ws as ws_router
-from fast_api.routers import employees as enrollment_router
 
 log = logging.getLogger(__name__)
 
@@ -47,9 +46,6 @@ if _static.is_dir():
 # HTML pages (original Bootstrap templates) and the live-view WebSocket.
 app.include_router(pages_router.router)
 app.include_router(ws_router.router)
-# The registration template submits to the established employee-create API;
-# mount that existing handler rather than maintaining a second implementation.
-app.include_router(enrollment_router.router)
 
 
 def _local(dt):

@@ -21,10 +21,43 @@
                 <i class="bi bi-person-vcard enrollment-stage__icon" aria-hidden="true"></i>
             </div>
             <div class="enrollment-stage__body">
-                <form method="post" action="/api/employees/" id="registrationForm">
+                <form method="post" action="/api/employees/" enctype="multipart/form-data" id="registrationForm">
 
                     <input type="hidden" name="captured_image" id="id_captured_image" value="">
                     <input type="hidden" name="captured_images" id="id_captured_images" value="">
+                    <div id="enrollmentResult" class="mb-3" role="status" aria-live="polite">
+                        {% if enrollment_error %}
+                        <div class="alert alert-danger" role="alert">
+                            <strong>Ro'yxatdan o'tkazilmadi.</strong> {{ enrollment_error }}
+                        </div>
+                        {% endif %}
+                        {% if enrollment_success %}
+                        <div class="alert alert-success">
+                            <strong>Ro'yxatdan o'tkazildi.</strong> {{ enrollment_success }}
+                            {% if enrollment_redirect_url %}
+                            <a class="alert-link d-block mt-2" href="{{ enrollment_redirect_url }}">Xodim sahifasini ochish</a>
+                            {% endif %}
+                        </div>
+                        {% endif %}
+                        {% if enrollment_warning %}
+                        <div class="alert alert-warning" role="alert">
+                            <strong>Diqqat.</strong> {{ enrollment_warning }}
+                            {% if enrollment_redirect_url %}
+                            <a class="alert-link d-block mt-2" href="{{ enrollment_redirect_url }}">Xodim sahifasini ochish</a>
+                            {% endif %}
+                        </div>
+                        {% endif %}
+                        {% if enrollment_rejections %}
+                        <div class="alert alert-warning" role="alert">
+                            <strong>Rad etilgan rasmlar:</strong>
+                            <ul class="mb-0 mt-2">
+                                {% for rejection in enrollment_rejections %}
+                                <li><strong>{{ rejection.source_file }}</strong>: {{ rejection.error }}</li>
+                                {% endfor %}
+                            </ul>
+                        </div>
+                        {% endif %}
+                    </div>
                     <div class="row g-3">
                         <div class="col-12">
                             <label for="full_name" class="form-label fw-semibold">
@@ -90,6 +123,34 @@
                 </div>
             </div>
             <div class="enrollment-stage__body text-center">
+                <section class="enrollment-upload text-start mb-4" aria-labelledby="uploadImagesTitle">
+                    <div class="d-flex align-items-start gap-3">
+                        <i class="bi bi-images enrollment-stage__icon" aria-hidden="true"></i>
+                        <div class="flex-grow-1">
+                            <h3 id="uploadImagesTitle" class="h6 mb-1">Rasm yuklash</h3>
+                            <p class="text-muted small mb-3">
+                                Kameraga qo'shimcha yoki uning o'rniga bir nechta JPEG, PNG yoki WebP yuz rasmini tanlang.
+                                Jami 32 tagacha, har biri ko'pi bilan 4 MB; barcha rasmlar birga 10 MB dan oshmasin.
+                            </p>
+                            <label for="uploadedImages" class="form-label fw-semibold">Yuz rasmlarini tanlang</label>
+                            <input class="form-control" type="file" name="uploaded_images" id="uploadedImages"
+                                accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" multiple
+                                form="registrationForm">
+                            <div id="uploadSelectionError" class="small text-danger mt-2 d-none" role="alert"
+                                aria-live="polite"></div>
+                            <div id="uploadPreviewList" class="enrollment-upload__previews mt-3"
+                                aria-live="polite"></div>
+                            <noscript>
+                                <p class="small text-muted mt-2 mb-0">JavaScript o'chirilgan: fayllarni olib tashlash uchun tanlovni qayta oching.</p>
+                            </noscript>
+                        </div>
+                    </div>
+                </section>
+                <div class="d-flex align-items-center gap-2 mb-3" aria-hidden="true">
+                    <span class="flex-grow-1 border-top"></span>
+                    <span class="small text-muted fw-semibold">yoki kameradan oling</span>
+                    <span class="flex-grow-1 border-top"></span>
+                </div>
                 {% if use_ip_camera %}
                 <div class="mb-3">
                     <label class="form-label fw-semibold">
@@ -199,6 +260,10 @@
     const angleInstructionText = document.getElementById('angleInstructionText');
     const captureTimer = document.getElementById('captureTimer');
     const cameraSelector = document.getElementById('cameraSelector');
+    const uploadedImages = document.getElementById('uploadedImages');
+    const uploadPreviewList = document.getElementById('uploadPreviewList');
+    const uploadSelectionError = document.getElementById('uploadSelectionError');
+    const enrollmentResult = document.getElementById('enrollmentResult');
 
     // Check if using IP camera
     const useIpCamera = {{ use_ip_camera| yesno("true,false") }};
@@ -231,10 +296,128 @@
     const MIN_REQUIRED_CAPTURES = 20; // Minimum 20 valid captures required
     const CAPTURE_DELAY = 1500; // 1.5 seconds between captures (medium speed, not too fast for better accuracy)
     const COUNTDOWN_SECONDS = 3;
+    const MAX_ENROLLMENT_IMAGES = 32;
+    const MAX_UPLOAD_SIZE = 4 * 1024 * 1024;
+    const MAX_ENROLLMENT_BODY_SIZE = 10 * 1024 * 1024;
+    const MULTIPART_SIZE_RESERVE = 64 * 1024;
+    const MAX_CAPTURE_EDGE = 960;
+    const ALLOWED_UPLOAD_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
     let activeStream = null;
     let captureTimerInterval = null;
     let timerStart = null;
     let angleStepIndex = 0;
+    let selectedUploadFiles = [];
+    let uploadPreviewUrls = [];
+
+    function setUploadSelectionError(messages) {
+        if (!uploadSelectionError) return;
+        uploadSelectionError.textContent = messages.join(' ');
+        uploadSelectionError.classList.toggle('d-none', messages.length === 0);
+    }
+
+    function syncUploadedImagesInput() {
+        if (!uploadedImages || typeof DataTransfer === 'undefined') return;
+        const transfer = new DataTransfer();
+        selectedUploadFiles.forEach(file => transfer.items.add(file));
+        uploadedImages.files = transfer.files;
+    }
+
+    function renderUploadPreviews() {
+        if (!uploadPreviewList) return;
+        uploadPreviewUrls.forEach(url => URL.revokeObjectURL(url));
+        uploadPreviewUrls = [];
+        uploadPreviewList.replaceChildren();
+
+        selectedUploadFiles.forEach((file, index) => {
+            const card = document.createElement('article');
+            card.className = 'enrollment-upload__preview';
+
+            const image = document.createElement('img');
+            const imageUrl = URL.createObjectURL(file);
+            uploadPreviewUrls.push(imageUrl);
+            image.src = imageUrl;
+            image.alt = `${file.name} rasmi`;
+
+            const details = document.createElement('div');
+            details.className = 'enrollment-upload__preview-details';
+            const name = document.createElement('strong');
+            name.textContent = file.name;
+            const size = document.createElement('small');
+            size.className = 'text-muted';
+            size.textContent = `${(file.size / (1024 * 1024)).toFixed(1)} MB`;
+            details.append(name, size);
+
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.className = 'btn btn-sm btn-outline-danger';
+            remove.textContent = "Olib tashlash";
+            remove.setAttribute('aria-label', `${file.name} rasmini olib tashlash`);
+            remove.addEventListener('click', () => {
+                selectedUploadFiles.splice(index, 1);
+                syncUploadedImagesInput();
+                renderUploadPreviews();
+                setUploadSelectionError([]);
+            });
+
+            card.append(image, details, remove);
+            uploadPreviewList.appendChild(card);
+        });
+    }
+
+    function selectUploadFiles(files) {
+        const errors = [];
+        const accepted = [];
+        Array.from(files).forEach(file => {
+            if (!ALLOWED_UPLOAD_TYPES.has(file.type)) {
+                errors.push(`${file.name}: faqat JPEG, PNG yoki WebP qabul qilinadi.`);
+            } else if (file.size > MAX_UPLOAD_SIZE) {
+                errors.push(`${file.name}: fayl 4 MB limitdan katta.`);
+            } else {
+                accepted.push(file);
+            }
+        });
+        if (accepted.length > MAX_ENROLLMENT_IMAGES) {
+            errors.push(`Ko'pi bilan ${MAX_ENROLLMENT_IMAGES} ta rasm tanlash mumkin.`);
+            accepted.length = MAX_ENROLLMENT_IMAGES;
+        }
+        selectedUploadFiles = accepted;
+        syncUploadedImagesInput();
+        renderUploadPreviews();
+        setUploadSelectionError(errors);
+    }
+
+    function showEnrollmentResult(kind, message, redirectUrl = '', rejected = []) {
+        if (!enrollmentResult) return;
+        enrollmentResult.replaceChildren();
+        const alertBox = document.createElement('div');
+        alertBox.className = `alert alert-${kind}`;
+        if (kind === 'danger' || kind === 'warning' || rejected.length) alertBox.setAttribute('role', 'alert');
+
+        const summary = document.createElement('p');
+        summary.className = rejected.length ? 'mb-2' : 'mb-0';
+        summary.textContent = message;
+        alertBox.appendChild(summary);
+
+        if (rejected.length) {
+            const list = document.createElement('ul');
+            list.className = 'mb-0';
+            rejected.forEach(item => {
+                const entry = document.createElement('li');
+                entry.textContent = `${item.source_file}: ${item.error}`;
+                list.appendChild(entry);
+            });
+            alertBox.appendChild(list);
+        }
+        if (redirectUrl) {
+            const link = document.createElement('a');
+            link.className = 'alert-link d-block mt-2';
+            link.href = redirectUrl;
+            link.textContent = 'Xodim sahifasini ochish';
+            alertBox.appendChild(link);
+        }
+        enrollmentResult.appendChild(alertBox);
+        enrollmentResult.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
 
     function resizeCanvasToVideo() {
         if (!webcam.videoWidth) {
@@ -519,6 +702,10 @@
 
     function captureFrame() {
         const context = canvas.getContext('2d');
+        let source;
+        let sourceWidth;
+        let sourceHeight;
+        let smooth = true;
 
         if (useIpCamera) {
             // For IP camera, capture from img element or canvas
@@ -529,20 +716,18 @@
                     console.warn('IP camera canvas not ready');
                     return null;
                 }
-                canvas.width = ipCanvas.width || 1280;
-                canvas.height = ipCanvas.height || 720;
-                context.imageSmoothingEnabled = true;
-                context.drawImage(ipCanvas, 0, 0, canvas.width, canvas.height);
+                source = ipCanvas;
+                sourceWidth = ipCanvas.width;
+                sourceHeight = ipCanvas.height;
             } else if (ipCameraStream && !ipCameraStream.classList.contains('d-none')) {
                 // Using img element (simple approach)
                 if (!ipCameraStream.complete || !ipCameraStream.naturalWidth) {
                     console.warn('IP camera stream not ready');
                     return null;
                 }
-                canvas.width = ipCameraStream.naturalWidth || 1280;
-                canvas.height = ipCameraStream.naturalHeight || 720;
-                context.imageSmoothingEnabled = true;
-                context.drawImage(ipCameraStream, 0, 0, canvas.width, canvas.height);
+                source = ipCameraStream;
+                sourceWidth = ipCameraStream.naturalWidth;
+                sourceHeight = ipCameraStream.naturalHeight;
             } else {
                 console.warn('IP camera element not found');
                 return null;
@@ -552,12 +737,31 @@
             if (!webcam.videoWidth) {
                 resizeCanvasToVideo();
             }
-            context.imageSmoothingEnabled = false;
-            context.drawImage(webcam, 0, 0, canvas.width || 640, canvas.height || 480);
+            source = webcam;
+            sourceWidth = webcam.videoWidth || canvas.width || 640;
+            sourceHeight = webcam.videoHeight || canvas.height || 480;
+            smooth = false;
         }
 
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.98); // Very high quality (98%) for better detection accuracy
-        return dataUrl;
+        const scale = Math.min(1, MAX_CAPTURE_EDGE / Math.max(sourceWidth, sourceHeight));
+        canvas.width = Math.max(1, Math.round(sourceWidth * scale));
+        canvas.height = Math.max(1, Math.round(sourceHeight * scale));
+        context.imageSmoothingEnabled = smooth;
+        context.drawImage(source, 0, 0, canvas.width, canvas.height);
+        return canvas.toDataURL('image/jpeg', 0.82);
+    }
+
+    function cameraDataUrlToBlob(dataUrl) {
+        const separator = dataUrl.indexOf(',');
+        if (separator < 0 || !dataUrl.slice(0, separator).includes(';base64')) {
+            throw new Error("Kamera rasmi buzilgan. Namunalarni qayta oling.");
+        }
+        const binary = atob(dataUrl.slice(separator + 1));
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index++) {
+            bytes[index] = binary.charCodeAt(index);
+        }
+        return new Blob([bytes], { type: 'image/jpeg' });
     }
 
     function updateProgress(current, total) {
@@ -646,13 +850,9 @@
             captureTimer.classList.remove('d-none');
         }
 
-        // Store images as JSON array
-        hiddenImagesInput.value = JSON.stringify(capturedImages);
-
-        // Also set the first image for backward compatibility
-        if (capturedImages.length > 0) {
-            hiddenInput.value = capturedImages[0];
-        }
+        // Keep legacy field names without serializing multi-megabyte camera data into text parts.
+        hiddenImagesInput.value = '';
+        hiddenInput.value = '';
     }
 
     function cancelCapture() {
@@ -675,28 +875,91 @@
         updateProgress(0, TOTAL_CAPTURES);
     }
 
-    // Form submission validation
-    registrationForm?.addEventListener('submit', function (e) {
+    uploadedImages?.addEventListener('change', event => {
+        selectUploadFiles(event.target.files);
+    });
+
+    // Form submission validation and HTML-friendly fetch response.
+    registrationForm?.addEventListener('submit', async function (e) {
         console.log('Form submission started');
         console.log('Captured images count:', capturedImages.length);
-        console.log('Hidden images input value length:', hiddenImagesInput.value ? hiddenImagesInput.value.length : 0);
 
-        if (!hiddenImagesInput.value || capturedImages.length < MIN_REQUIRED_CAPTURES) {
+        if (selectedUploadFiles.length === 0 && capturedImages.length < MIN_REQUIRED_CAPTURES) {
             e.preventDefault();
-            alert(`Please capture at least ${MIN_REQUIRED_CAPTURES} images (multi-angle). Currently captured: ${capturedImages.length}`);
+            const message = `Kamida bitta rasm yuklang yoki kameradan ${MIN_REQUIRED_CAPTURES} ta namuna oling. Hozir: ${capturedImages.length} ta kamera namunasi.`;
+            showEnrollmentResult('danger', message);
             return false;
         }
 
-        // Ensure the JSON is properly set
-        if (hiddenImagesInput.value && !hiddenImagesInput.value.startsWith('[')) {
-            // If it's not JSON array, try to set it
-            if (capturedImages.length > 0) {
-                hiddenImagesInput.value = JSON.stringify(capturedImages);
-                console.log('Set captured images to hidden input');
-            }
+        if (selectedUploadFiles.length + capturedImages.length > MAX_ENROLLMENT_IMAGES) {
+            e.preventDefault();
+            showEnrollmentResult('danger', `Jami ko'pi bilan ${MAX_ENROLLMENT_IMAGES} ta rasm yuborish mumkin.`);
+            return false;
         }
 
-        console.log('Form submission proceeding...');
+        e.preventDefault();
+        const submitButton = registrationForm.querySelector('button[type="submit"]');
+        if (submitButton) submitButton.disabled = true;
+        showEnrollmentResult('info', 'Yuz namunalari tekshirilmoqda va embeddinglar yaratilmoqda...');
+
+        try {
+            const formData = new FormData(registrationForm);
+            formData.delete('captured_image');
+            formData.delete('captured_images');
+            formData.delete('uploaded_images');
+            selectedUploadFiles.forEach(file => formData.append('uploaded_images', file, file.name));
+            const cameraFiles = capturedImages.map((dataUrl, index) => ({
+                blob: cameraDataUrlToBlob(dataUrl),
+                name: `camera-${String(index + 1).padStart(3, '0')}.jpg`
+            }));
+            const allFiles = [...selectedUploadFiles, ...cameraFiles.map(item => item.blob)];
+            if (allFiles.some(file => file.size > MAX_UPLOAD_SIZE)) {
+                throw new Error('Kamera rasmi 4 MB limitdan katta. Kamerani qayta ishga tushirib, yana oling.');
+            }
+            const totalBytes = allFiles.reduce((total, file) => total + file.size, 0);
+            if (totalBytes > MAX_ENROLLMENT_BODY_SIZE - MULTIPART_SIZE_RESERVE) {
+                throw new Error("Barcha rasmlar hajmi 10 MB limitdan katta. Ayrim rasmlarni olib tashlang.");
+            }
+            cameraFiles.forEach(item => formData.append('camera_images', item.blob, item.name));
+            const response = await fetch(registrationForm.action, {
+                method: 'POST',
+                body: formData,
+                headers: { 'Accept': 'application/json' }
+            });
+            let result = {};
+            try {
+                result = await response.json();
+            } catch (_error) {
+                result = { error: 'Server tushunarli javob qaytarmadi. Qayta urinib ko\'ring.' };
+            }
+            if (!response.ok) {
+                showEnrollmentResult(
+                    'danger',
+                    result.error || 'Ro\'yxatdan o\'tkazib bo\'lmadi.',
+                    '',
+                    result.rejected || []
+                );
+                return;
+            }
+
+            const warning = result.warning ? ` ${result.warning}` : '';
+            showEnrollmentResult(
+                (result.rejected?.length || result.warning) ? 'warning' : 'success',
+                `Xodim saqlandi va ${result.embeddings} ta embedding galleryga qo'shildi.${warning}`,
+                result.redirect_url,
+                result.rejected || []
+            );
+            statusBadge.textContent = 'Embedding saqlandi';
+            statusBadge.className = 'status-in';
+        } catch (error) {
+            console.error('Enrollment submission failed:', error);
+            showEnrollmentResult(
+                'danger',
+                error.message || 'Server bilan bog\'lanib bo\'lmadi. Internet ulanishini tekshirib, qayta yuboring.'
+            );
+        } finally {
+            if (submitButton) submitButton.disabled = false;
+        }
     });
 
     startCaptureBtn?.addEventListener('click', () => {

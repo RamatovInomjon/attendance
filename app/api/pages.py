@@ -12,8 +12,11 @@ from datetime import date, datetime, timedelta
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import func, or_, select
+from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import FormData, UploadFile
+from starlette.formparsers import FormParser, MultiPartException, MultiPartParser
 
 from app.config import settings
 from app.db.models import (
@@ -22,6 +25,19 @@ from app.db.models import (
 from app.db.session import session_scope
 from app.runtime import runtime
 from app.services.attendance import business_date
+from app.services.enrollment import (
+    Enroller,
+    EnrollmentImage,
+    EnrollmentCaptureError,
+    MAX_BROWSER_CAPTURES,
+    MAX_CAPTURE_BYTES,
+    MAX_ENROLLMENT_BODY_BYTES,
+    MAX_ENROLLMENT_FIELD_BYTES,
+    MAX_ENROLLMENT_FIELDS,
+    decode_browser_captures,
+    decode_uploaded_capture,
+    enroll_employee_captures,
+)
 from app.web.django_compat import build_env
 from app.web.viewmodels import DailyVM, EmployeeVM, EventVM, Page
 
@@ -263,14 +279,318 @@ def employees_list(request: Request, query: str | None = None, department: str |
 
 # Declared before /employees/{employee_id}: a path param would otherwise
 # swallow "add" and fail int conversion with a 422.
-@router.get("/employees/add", response_class=HTMLResponse)
-def employee_add(request: Request):
+def _employee_registration_page(
+    request: Request,
+    *,
+    employee=None,
+    enrollment_error: str = "",
+    enrollment_rejections=(),
+    enrollment_success: str = "",
+    enrollment_warning: str = "",
+    enrollment_redirect_url: str = "",
+    status_code: int = 200,
+) -> HTMLResponse:
     with session_scope() as s:
         cams = [{"id": c.id, "label": c.name, "url": c.rtsp_url, "role": c.role.value}
                 for c in s.execute(select(Camera)).scalars()]
-    return render("employees/register.html", request=request, current_view="employees:register", employee=None, action="add",
-                  cameras=cams, available_cameras=cams, use_ip_camera=bool(cams),
-                  default_camera_url=cams[0]["url"] if cams else "")
+    response = render(
+        "employees/register.html",
+        request=request,
+        current_view="employees:register",
+        employee=employee,
+        action="add",
+        cameras=cams,
+        available_cameras=cams,
+        use_ip_camera=bool(cams),
+        default_camera_url=cams[0]["url"] if cams else "",
+        enrollment_error=enrollment_error,
+        enrollment_rejections=enrollment_rejections,
+        enrollment_success=enrollment_success,
+        enrollment_warning=enrollment_warning,
+        enrollment_redirect_url=enrollment_redirect_url,
+    )
+    response.status_code = status_code
+    return response
+
+
+@router.get("/employees/add", response_class=HTMLResponse)
+def employee_add(request: Request):
+    return _employee_registration_page(request)
+
+
+def _enrollment_wants_json(request: Request) -> bool:
+    return "application/json" in request.headers.get("accept", "").lower()
+
+
+ENROLLMENT_LIMIT_MESSAGE = (
+    "So'rov limiti oshib ketdi. Jami ko'pi bilan 32 ta rasm, har bir fayl "
+    "4 MB va barcha yuboriladigan ma'lumot 10 MB dan oshmasligi kerak."
+)
+ENROLLMENT_PERSISTENCE_MESSAGE = (
+    "Xodimni saqlab bo'lmadi. Qayta urinib ko'ring; muammo takrorlansa "
+    "administratorga murojaat qiling."
+)
+
+
+class EnrollmentRequestTooLarge(MultiPartException):
+    """A bounded enrollment body exceeded a documented request limit."""
+
+
+class EnrollmentRequestMalformed(ValueError):
+    """The request body could not be interpreted as an enrollment form."""
+
+
+class _EnrollmentMultiPartParser(MultiPartParser):
+    """Starlette parser with a file-part cap enforced before spooled writes."""
+
+    def __init__(self, *args, max_file_size: int, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.max_file_size = max_file_size
+        self._current_file_size = 0
+
+    def on_part_begin(self) -> None:
+        super().on_part_begin()
+        self._current_file_size = 0
+
+    def on_headers_finished(self) -> None:
+        try:
+            super().on_headers_finished()
+        except MultiPartException as exc:
+            if str(exc).startswith("Too many"):
+                raise EnrollmentRequestTooLarge(ENROLLMENT_LIMIT_MESSAGE) from exc
+            raise
+
+    def on_part_data(self, data: bytes, start: int, end: int) -> None:
+        part_size = end - start
+        if self._current_part.file is not None:
+            self._current_file_size += part_size
+            if self._current_file_size > self.max_file_size:
+                raise EnrollmentRequestTooLarge(ENROLLMENT_LIMIT_MESSAGE)
+        try:
+            super().on_part_data(data, start, end)
+        except MultiPartException as exc:
+            if "maximum size" in str(exc):
+                raise EnrollmentRequestTooLarge(ENROLLMENT_LIMIT_MESSAGE) from exc
+            raise
+
+
+async def _limited_enrollment_stream(request: Request):
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > MAX_ENROLLMENT_BODY_BYTES:
+            raise EnrollmentRequestTooLarge(ENROLLMENT_LIMIT_MESSAGE)
+        yield chunk
+
+
+async def _parse_enrollment_form(request: Request) -> FormData:
+    raw_length = request.headers.get("content-length")
+    if raw_length:
+        try:
+            content_length = int(raw_length)
+        except ValueError as exc:
+            raise EnrollmentRequestMalformed("Content-Length noto'g'ri.") from exc
+        if content_length < 0:
+            raise EnrollmentRequestMalformed("Content-Length noto'g'ri.")
+        if content_length > MAX_ENROLLMENT_BODY_BYTES:
+            raise EnrollmentRequestTooLarge(ENROLLMENT_LIMIT_MESSAGE)
+
+    content_type = request.headers.get("content-type", "").lower()
+    stream = _limited_enrollment_stream(request)
+    if content_type.startswith("multipart/form-data"):
+        parser = _EnrollmentMultiPartParser(
+            request.headers,
+            stream,
+            max_files=MAX_BROWSER_CAPTURES,
+            max_fields=MAX_ENROLLMENT_FIELDS,
+            max_part_size=MAX_ENROLLMENT_FIELD_BYTES,
+            max_file_size=MAX_CAPTURE_BYTES,
+        )
+        return await parser.parse()
+    if content_type.startswith("application/x-www-form-urlencoded"):
+        form = await FormParser(request.headers, stream).parse()
+        if len(form.multi_items()) > MAX_ENROLLMENT_FIELDS:
+            raise EnrollmentRequestTooLarge(ENROLLMENT_LIMIT_MESSAGE)
+        return form
+    raise EnrollmentRequestMalformed(
+        "Forma turi noto'g'ri. Sahifani yangilab, rasmlarni qayta yuboring."
+    )
+
+
+def _enrollment_error_response(
+    request: Request,
+    message: str,
+    *,
+    status_code: int,
+    employee=None,
+    rejections=(),
+):
+    if _enrollment_wants_json(request):
+        payload = {"ok": False, "error": message}
+        if rejections:
+            payload["rejected"] = list(rejections)
+        return JSONResponse(payload, status_code=status_code)
+    return _employee_registration_page(
+        request,
+        employee=employee,
+        enrollment_error=message,
+        enrollment_rejections=rejections,
+        status_code=status_code,
+    )
+
+
+def _form_text(form: FormData, name: str) -> str:
+    value = form.get(name, "")
+    return value if isinstance(value, str) else ""
+
+
+async def _decode_enrollment_form_images(form: FormData) -> list[EnrollmentImage]:
+    all_files = [item for _, item in form.multi_items() if isinstance(item, UploadFile)]
+    try:
+        captures = decode_browser_captures(
+            _form_text(form, "captured_images"),
+            _form_text(form, "captured_image"),
+        )
+        camera_uploads = [
+            item for item in form.getlist("camera_images") if isinstance(item, UploadFile)
+        ]
+        for index, uploaded in enumerate(camera_uploads, start=1):
+            raw = await uploaded.read()
+            captures.append(decode_uploaded_capture(
+                raw,
+                filename=uploaded.filename or f"camera-{index:03d}.jpg",
+                content_type=uploaded.content_type or "",
+                index=index,
+                source_file=f"browser/{index:03d}.jpg",
+            ))
+
+        upload_files = [
+            item for item in form.getlist("uploaded_images") if isinstance(item, UploadFile)
+        ]
+        for index, uploaded in enumerate(upload_files, start=1):
+            raw = await uploaded.read()
+            captures.append(decode_uploaded_capture(
+                raw,
+                filename=uploaded.filename or f"image-{index}",
+                content_type=uploaded.content_type or "",
+                index=index,
+            ))
+        return captures
+    finally:
+        for uploaded in all_files:
+            await uploaded.close()
+
+
+@router.post("/api/employees/")
+async def employee_enroll(request: Request):
+    """Create a v3 employee and gallery embeddings from browser captures."""
+    try:
+        form = await _parse_enrollment_form(request)
+    except EnrollmentRequestTooLarge as exc:
+        return _enrollment_error_response(request, str(exc), status_code=413)
+    except (EnrollmentRequestMalformed, MultiPartException) as exc:
+        log.warning("invalid enrollment request: %s", exc)
+        return _enrollment_error_response(
+            request,
+            "Forma ma'lumotlarini o'qib bo'lmadi. Sahifani yangilab, qayta yuboring.",
+            status_code=400,
+        )
+    except Exception:
+        log.exception("unexpected enrollment multipart parsing failure")
+        return _enrollment_error_response(
+            request,
+            "Forma ma'lumotlarini o'qib bo'lmadi. Sahifani yangilab, qayta yuboring.",
+            status_code=400,
+        )
+
+    form_values = {
+        name: _form_text(form, name)
+        for name in ("full_name", "position", "department", "phone_number", "email", "notes")
+    }
+    try:
+        captures = await _decode_enrollment_form_images(form)
+        enroller = await run_in_threadpool(Enroller)
+        result = await run_in_threadpool(
+            enroll_employee_captures,
+            full_name=form_values["full_name"],
+            position=form_values["position"],
+            department=form_values["department"],
+            phone_number=form_values["phone_number"],
+            captures=captures,
+            enroller=enroller,
+        )
+    except EnrollmentCaptureError as exc:
+        message = str(exc)
+        rejections = [
+            {"source_file": item.source_file, "error": item.error}
+            for item in exc.rejections
+        ]
+        return _enrollment_error_response(
+            request,
+            employee=form_values,
+            message=message,
+            rejections=rejections,
+            status_code=422,
+        )
+    except Exception:
+        log.exception("native v3 employee enrollment persistence failed")
+        return _enrollment_error_response(
+            request,
+            ENROLLMENT_PERSISTENCE_MESSAGE,
+            employee=form_values,
+            status_code=500,
+        )
+
+    warning = ""
+    try:
+        gallery = await run_in_threadpool(runtime.reload_gallery)
+        gallery_summary = {"embeddings": len(gallery), "people": gallery.n_people}
+    except Exception:
+        log.exception("employee %s saved but runtime gallery reload failed", result.employee_id)
+        gallery_summary = None
+        warning = (
+            "Xodim saqlandi, ammo ishchi gallery yangilanmadi. "
+            "Tanib olish xizmatini qayta ishga tushiring."
+        )
+
+    redirect_url = f"/employees/{result.employee_id}"
+    if _enrollment_wants_json(request):
+        return JSONResponse(
+            {
+                "ok": True,
+                "employee_id": result.employee_id,
+                "external_id": result.external_id,
+                "embeddings": result.embeddings,
+                "redirect_url": redirect_url,
+                "gallery": gallery_summary,
+                "warning": warning,
+                "rejected": [
+                    {"source_file": item.source_file, "error": item.error}
+                    for item in result.rejected
+                ],
+            },
+            status_code=201,
+        )
+    if result.rejected or warning:
+        return _employee_registration_page(
+            request,
+            employee=form_values,
+            enrollment_rejections=[
+                {"source_file": item.source_file, "error": item.error}
+                for item in result.rejected
+            ],
+            enrollment_success=(
+                f"Xodim saqlandi va {result.embeddings} ta embedding galleryga qo'shildi."
+            ),
+            enrollment_warning=warning,
+            enrollment_redirect_url=redirect_url,
+            status_code=201,
+        )
+    return HTMLResponse(
+        f'<!doctype html><title>Xodim saqlandi</title><a href="{redirect_url}">Xodim sahifasi</a>',
+        status_code=303,
+        headers={"Location": redirect_url},
+    )
 
 
 @router.get("/employees/{employee_id}", response_class=HTMLResponse)

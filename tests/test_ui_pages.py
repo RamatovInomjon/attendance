@@ -5,6 +5,7 @@ import base64
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from html import unescape
+import io
 import json
 from pathlib import Path
 import re
@@ -15,10 +16,12 @@ import warnings
 import cv2
 import numpy as np
 import pytest
+from PIL import Image
 from fastapi import FastAPI
 from fastapi import Request
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -103,6 +106,7 @@ def test_enrollment_page_keeps_submission_and_capture_contracts(monkeypatch):
         ("email", "email"), ("notes", "notes"),
         ("captured_image", "id_captured_image"),
         ("captured_images", "id_captured_images"),
+        ("uploaded_images", "uploadedImages"),
     ):
         assert f'name="{name}"' in html
         assert f'id="{element_id}"' in html
@@ -111,17 +115,62 @@ def test_enrollment_page_keeps_submission_and_capture_contracts(monkeypatch):
         "ipCameraCanvas", "snapshot", "previewContainer", "previewImage",
         "progressContainer", "progressBar", "progressText", "angleInstruction",
         "angleInstructionText", "captureTimer", "startCaptureBtn", "cancelCaptureBtn",
-        "captureComplete", "captureCount",
+        "captureComplete", "captureCount", "enrollmentResult",
+        "uploadSelectionError", "uploadPreviewList",
     ):
         assert f'id="{element_id}"' in html
+    assert "fetch(registrationForm.action" in html
+    assert 'aria-live="polite"' in html
+    assert "image/jpeg,image/png,image/webp" in html
+    assert "renderUploadPreviews" in html
+    assert "Olib tashlash" in html
+    assert "cameraDataUrlToBlob" in html
+    assert "formData.append('camera_images'" in html
+    assert "hiddenImagesInput.value = JSON.stringify(capturedImages)" not in html
+
+
+def test_enrollment_inline_script_has_valid_javascript(monkeypatch):
+    """The rendered capture/upload workflow must remain parseable by a real JS engine."""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        _isolated_employee_session(monkeypatch, session)
+        response = pages.employee_add(_employee_page_request("/employees/add"))
+
+    scripts = re.findall(r"<script(?:\s[^>]*)?>(.*?)</script>", response.body.decode(), re.DOTALL)
+    result = subprocess.run(
+        ["node", "--check", "-"], input="\n".join(scripts), capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def _capture_data_url(pixel: int) -> str:
     """Return a real decodable JPEG while keeping inference stubbed in route tests."""
+    payload = _encoded_test_image(".jpg", pixel)
+    return "data:image/jpeg;base64," + base64.b64encode(payload).decode("ascii")
+
+
+def _encoded_test_image(extension: str, pixel: int) -> bytes:
     image = np.full((8, 8, 3), pixel, dtype=np.uint8)
-    encoded, payload = cv2.imencode(".jpg", image)
+    encoded, payload = cv2.imencode(extension, image)
     assert encoded
-    return "data:image/jpeg;base64," + base64.b64encode(payload.tobytes()).decode("ascii")
+    return payload.tobytes()
+
+
+def _realistic_camera_jpeg() -> bytes:
+    """Return a production-shaped camera JPEG large enough to exercise multipart limits."""
+    image = np.random.default_rng(7).integers(0, 256, (540, 960, 3), dtype=np.uint8)
+    encoded, payload = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 75])
+    assert encoded
+    raw = payload.tobytes()
+    assert 100 * 1024 < len(raw) < enrollment_service.MAX_CAPTURE_BYTES
+    return raw
+
+
+def _pillow_image(format_name: str, size: tuple[int, int]) -> bytes:
+    output = io.BytesIO()
+    Image.new("RGB", size, (80, 120, 160)).save(output, format=format_name)
+    return output.getvalue()
 
 
 def _registration_payload(images: list[str]) -> dict[str, str]:
@@ -163,14 +212,16 @@ def _isolated_enrollment_database(monkeypatch, tmp_path):
 class _StubCaptureEnroller:
     """Inference boundary double; decoding, persistence, and HTTP behavior stay real."""
 
-    def __init__(self, reject_at: int | None = None):
-        self.reject_at = reject_at
+    def __init__(self, reject_at: int | set[int] | None = None):
+        if isinstance(reject_at, int):
+            reject_at = {reject_at}
+        self.reject_at = reject_at or set()
         self.calls = 0
 
     def embed_capture(self, image_bgr):
         self.calls += 1
-        assert image_bgr.shape == (8, 8, 3)
-        if self.calls == self.reject_at:
+        assert image_bgr.ndim == 3 and image_bgr.shape[2] == 3
+        if self.calls in self.reject_at:
             raise enrollment_service.EnrollmentCaptureError(
                 "Yuz topilmadi. Yuzni kadr markaziga olib, namunani qayta oling."
             )
@@ -183,7 +234,7 @@ def test_native_enrollment_persists_v3_embeddings_and_returns_fetch_json(monkeyp
     """A fetch submission must persist real v3 rows instead of legacy metadata only."""
     session_factory = _isolated_enrollment_database(monkeypatch, tmp_path)
     extractor = _StubCaptureEnroller()
-    monkeypatch.setattr(pages, "Enroller", lambda: extractor)
+    monkeypatch.setattr(pages, "Enroller", lambda: extractor, raising=False)
     reloads = []
 
     def reload_gallery():
@@ -232,8 +283,8 @@ def test_native_enrollment_persists_v3_embeddings_and_returns_fetch_json(monkeyp
 def test_native_enrollment_rolls_back_and_renders_html_on_capture_rejection(monkeypatch, tmp_path):
     """A rejected capture must leave no employee/embedding rows and explain recovery in HTML."""
     session_factory = _isolated_enrollment_database(monkeypatch, tmp_path)
-    extractor = _StubCaptureEnroller(reject_at=2)
-    monkeypatch.setattr(pages, "Enroller", lambda: extractor)
+    extractor = _StubCaptureEnroller(reject_at={1, 2})
+    monkeypatch.setattr(pages, "Enroller", lambda: extractor, raising=False)
     reloads = []
     monkeypatch.setattr(pages.runtime, "reload_gallery", lambda: reloads.append(True))
     api = FastAPI()
@@ -257,10 +308,40 @@ def test_native_enrollment_rolls_back_and_renders_html_on_capture_rejection(monk
     assert reloads == []
 
 
+def test_native_enrollment_database_failure_rolls_back_employee_and_embeddings(monkeypatch, tmp_path):
+    """A FaceEmbedding write failure after employee flush must roll back the whole v3 transaction."""
+    session_factory = _isolated_enrollment_database(monkeypatch, tmp_path)
+    real_face_embedding = enrollment_service.FaceEmbedding
+
+    def invalid_face_embedding(**values):
+        values["vector"] = None
+        return real_face_embedding(**values)
+
+    monkeypatch.setattr(enrollment_service, "FaceEmbedding", invalid_face_embedding)
+    capture = enrollment_service.EnrollmentImage(
+        source_file="browser/001.jpg",
+        image_bgr=np.full((8, 8, 3), 80, dtype=np.uint8),
+    )
+
+    with pytest.raises(IntegrityError):
+        enrollment_service.enroll_employee_captures(
+            full_name="Rollback Employee",
+            position="Tester",
+            department="QA",
+            phone_number="+998900000000",
+            captures=[capture],
+            enroller=_StubCaptureEnroller(),
+        )
+
+    with session_factory() as session:
+        assert session.execute(select(Employee)).scalars().all() == []
+        assert session.execute(select(FaceEmbedding)).scalars().all() == []
+
+
 def test_native_enrollment_no_js_submission_redirects_to_v3_detail(monkeypatch, tmp_path):
     """A regular HTML form post must redirect to a rendered detail page, never raw JSON."""
     session_factory = _isolated_enrollment_database(monkeypatch, tmp_path)
-    monkeypatch.setattr(pages, "Enroller", _StubCaptureEnroller)
+    monkeypatch.setattr(pages, "Enroller", _StubCaptureEnroller, raising=False)
     monkeypatch.setattr(pages.runtime, "reload_gallery", enrollment_service.load_gallery)
     api = FastAPI()
     api.include_router(router)
@@ -283,12 +364,395 @@ def test_native_enrollment_no_js_submission_redirects_to_v3_detail(monkeypatch, 
     assert embedding.employee_id == employee.id
 
 
+def test_multipart_uploads_persist_v3_embeddings_through_the_capture_service(monkeypatch, tmp_path):
+    """JPEG/PNG/WebP uploads must use the same extractor and v3 embedding transaction."""
+    session_factory = _isolated_enrollment_database(monkeypatch, tmp_path)
+    extractor = _StubCaptureEnroller()
+    monkeypatch.setattr(pages, "Enroller", lambda: extractor, raising=False)
+    monkeypatch.setattr(pages.runtime, "reload_gallery", enrollment_service.load_gallery)
+    api = FastAPI()
+    api.include_router(router)
+    files = [
+        ("uploaded_images", ("front.jpg", _encoded_test_image(".jpg", 40), "image/jpeg")),
+        ("uploaded_images", ("left.png", _encoded_test_image(".png", 90), "image/png")),
+        ("uploaded_images", ("right.webp", _encoded_test_image(".webp", 180), "image/webp")),
+    ]
+
+    with TestClient(api) as test_client:
+        response = test_client.post(
+            "/api/employees/",
+            data=_registration_payload([]),
+            files=files,
+            headers={"Accept": "application/json"},
+        )
+
+    assert response.status_code == 201
+    assert response.json()["embeddings"] == 3
+    assert response.json()["rejected"] == []
+    with session_factory() as session:
+        employee = session.execute(select(Employee)).scalar_one()
+        embeddings = session.execute(
+            select(FaceEmbedding).order_by(FaceEmbedding.id)
+        ).scalars().all()
+    assert employee.full_name == "Aziza Karimova"
+    assert [row.source_file for row in embeddings] == [
+        "upload/001_front.jpg", "upload/002_left.png", "upload/003_right.webp",
+    ]
+    assert extractor.calls == 3
+
+
+def test_camera_captures_submit_24_realistic_jpeg_file_parts(monkeypatch, tmp_path):
+    """The production camera count must reach the route without a 1 MiB text-field failure."""
+    session_factory = _isolated_enrollment_database(monkeypatch, tmp_path)
+    extractor = _StubCaptureEnroller()
+    monkeypatch.setattr(pages, "Enroller", lambda: extractor, raising=False)
+    monkeypatch.setattr(pages.runtime, "reload_gallery", enrollment_service.load_gallery)
+    api = FastAPI()
+    api.include_router(router)
+    camera_jpeg = _realistic_camera_jpeg()
+    files = [
+        ("camera_images", (f"camera-{index:03d}.jpg", camera_jpeg, "image/jpeg"))
+        for index in range(1, 25)
+    ]
+
+    with TestClient(api) as test_client:
+        response = test_client.post(
+            "/api/employees/",
+            data=_registration_payload([]),
+            files=files,
+            headers={"Accept": "application/json"},
+        )
+
+    assert response.status_code == 201
+    assert response.json()["embeddings"] == 24
+    assert extractor.calls == 24
+    with session_factory() as session:
+        embeddings = session.execute(
+            select(FaceEmbedding).order_by(FaceEmbedding.id)
+        ).scalars().all()
+    assert len(embeddings) == 24
+    assert embeddings[0].source_file == "browser/001.jpg"
+    assert embeddings[-1].source_file == "browser/024.jpg"
+
+
+def test_enrollment_parser_rejects_more_than_32_files_before_inference(monkeypatch, tmp_path):
+    """The multipart parser itself must stop excess files instead of spooling 1000 of them."""
+    session_factory = _isolated_enrollment_database(monkeypatch, tmp_path)
+    monkeypatch.setattr(pages, "Enroller", lambda: pytest.fail("inference must not start"))
+    api = FastAPI()
+    api.include_router(router)
+    files = [
+        ("uploaded_images", (f"face-{index}.jpg", _encoded_test_image(".jpg", index), "image/jpeg"))
+        for index in range(33)
+    ]
+
+    with TestClient(api) as test_client:
+        response = test_client.post(
+            "/api/employees/",
+            data=_registration_payload([]),
+            files=files,
+            headers={"Accept": "application/json"},
+        )
+
+    assert response.status_code == 413
+    assert response.json()["ok"] is False
+    assert "32" in response.json()["error"]
+    with session_factory() as session:
+        assert session.execute(select(Employee)).scalars().all() == []
+
+
+def test_enrollment_parser_rejects_a_file_over_4_mib_with_accessible_html(monkeypatch, tmp_path):
+    """Per-file enforcement must happen while parsing and return a controlled HTML 413."""
+    session_factory = _isolated_enrollment_database(monkeypatch, tmp_path)
+    monkeypatch.setattr(pages, "Enroller", lambda: pytest.fail("inference must not start"))
+    api = FastAPI()
+    api.include_router(router)
+
+    with TestClient(api) as test_client:
+        response = test_client.post(
+            "/api/employees/",
+            data=_registration_payload([]),
+            files=[("uploaded_images", (
+                "oversize.jpg",
+                b"x" * (enrollment_service.MAX_CAPTURE_BYTES + 1),
+                "image/jpeg",
+            ))],
+            headers={"Accept": "text/html"},
+        )
+
+    assert response.status_code == 413
+    assert response.headers["content-type"].startswith("text/html")
+    assert 'role="alert"' in response.text
+    assert "4 MB" in response.text
+    with session_factory() as session:
+        assert session.execute(select(Employee)).scalars().all() == []
+
+
+def test_enrollment_parser_streaming_total_limit_without_content_length(monkeypatch, tmp_path):
+    """Chunked bodies must be capped at 10 MiB even when Content-Length is unavailable."""
+    session_factory = _isolated_enrollment_database(monkeypatch, tmp_path)
+    monkeypatch.setattr(pages, "Enroller", lambda: pytest.fail("inference must not start"))
+    api = FastAPI()
+    api.include_router(router)
+    boundary = "airi-stream-limit"
+    chunks = [
+        (
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"full_name\""
+            "\r\n\r\nAziza Karimova\r\n"
+        ).encode(),
+    ]
+    for index in range(3):
+        chunks.extend([
+            (
+                f"--{boundary}\r\nContent-Disposition: form-data; name=\"uploaded_images\"; "
+                f"filename=\"face-{index}.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n"
+            ).encode(),
+            b"x" * 3_600_000,
+            b"\r\n",
+        ])
+    chunks.append(f"--{boundary}--\r\n".encode())
+
+    with TestClient(api) as test_client:
+        response = test_client.post(
+            "/api/employees/",
+            content=iter(chunks),
+            headers={
+                "Accept": "application/json",
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            },
+        )
+
+    assert response.status_code == 413
+    assert "10 MB" in response.json()["error"]
+    with session_factory() as session:
+        assert session.execute(select(Employee)).scalars().all() == []
+
+
+def test_enrollment_content_length_over_10_mib_short_circuits_before_parsing(monkeypatch, tmp_path):
+    """A declared oversized body must get a controlled 413 without parser or inference work."""
+    session_factory = _isolated_enrollment_database(monkeypatch, tmp_path)
+    monkeypatch.setattr(pages, "Enroller", lambda: pytest.fail("inference must not start"))
+    api = FastAPI()
+    api.include_router(router)
+
+    with TestClient(api) as test_client:
+        response = test_client.post(
+            "/api/employees/",
+            content=b"",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "multipart/form-data; boundary=unused",
+                "Content-Length": str(enrollment_service.MAX_ENROLLMENT_BODY_BYTES + 1),
+            },
+        )
+
+    assert response.status_code == 413
+    assert "10 MB" in response.json()["error"]
+    with session_factory() as session:
+        assert session.execute(select(Employee)).scalars().all() == []
+
+
+@pytest.mark.parametrize(
+    ("filename", "content_type", "payload", "expected_error"),
+    [
+        ("disguised.jpg", "image/jpeg", _pillow_image("TIFF", (8, 8)), "haqiqiy formati"),
+        ("huge.png", "image/png", _pillow_image("PNG", (5000, 3000)), "piksel"),
+    ],
+    ids=["disguised-tiff", "high-pixel-png"],
+)
+def test_enrollment_rejects_disguised_or_high_pixel_images_before_inference(
+    monkeypatch, tmp_path, filename, content_type, payload, expected_error,
+):
+    """Header validation must reject spoofed formats and decompression-bomb dimensions."""
+    session_factory = _isolated_enrollment_database(monkeypatch, tmp_path)
+    extractor = _StubCaptureEnroller()
+    monkeypatch.setattr(pages, "Enroller", lambda: extractor, raising=False)
+    reloads = []
+    monkeypatch.setattr(pages.runtime, "reload_gallery", lambda: reloads.append(True))
+    api = FastAPI()
+    api.include_router(router)
+
+    with TestClient(api) as test_client:
+        response = test_client.post(
+            "/api/employees/",
+            data=_registration_payload([]),
+            files=[("uploaded_images", (filename, payload, content_type))],
+            headers={"Accept": "application/json"},
+        )
+
+    assert response.status_code == 422
+    assert expected_error in response.json()["rejected"][0]["error"]
+    assert extractor.calls == 0
+    assert reloads == []
+    with session_factory() as session:
+        assert session.execute(select(Employee)).scalars().all() == []
+        assert session.execute(select(FaceEmbedding)).scalars().all() == []
+
+
+@pytest.mark.parametrize("accept", ["application/json", "text/html"])
+def test_enrollment_route_sanitizes_persistence_failure_and_skips_reload(
+    monkeypatch, tmp_path, accept,
+):
+    """A failed embedding insert must roll back and never leak database internals to either client."""
+    session_factory = _isolated_enrollment_database(monkeypatch, tmp_path)
+    monkeypatch.setattr(pages, "Enroller", _StubCaptureEnroller, raising=False)
+    real_face_embedding = enrollment_service.FaceEmbedding
+
+    def invalid_face_embedding(**values):
+        values["vector"] = None
+        return real_face_embedding(**values)
+
+    monkeypatch.setattr(enrollment_service, "FaceEmbedding", invalid_face_embedding)
+    reloads = []
+    monkeypatch.setattr(pages.runtime, "reload_gallery", lambda: reloads.append(True))
+    api = FastAPI()
+    api.include_router(router)
+
+    with TestClient(api, raise_server_exceptions=False) as test_client:
+        response = test_client.post(
+            "/api/employees/",
+            data=_registration_payload([]),
+            files=[("uploaded_images", ("face.jpg", _encoded_test_image(".jpg", 90), "image/jpeg"))],
+            headers={"Accept": accept},
+        )
+
+    assert response.status_code == 500
+    assert "NOT NULL" not in response.text
+    assert "IntegrityError" not in response.text
+    if accept == "application/json":
+        assert response.json() == {
+            "ok": False,
+            "error": "Xodimni saqlab bo'lmadi. Qayta urinib ko'ring; muammo takrorlansa administratorga murojaat qiling.",
+        }
+    else:
+        assert response.headers["content-type"].startswith("text/html")
+        assert 'role="alert"' in response.text
+        assert "Xodimni saqlab bo&#39;lmadi" in response.text
+    with session_factory() as session:
+        assert session.execute(select(Employee)).scalars().all() == []
+        assert session.execute(select(FaceEmbedding)).scalars().all() == []
+    assert reloads == []
+
+
+@pytest.mark.parametrize("accept", ["application/json", "text/html"])
+def test_gallery_reload_failure_is_visible_after_successful_commit(monkeypatch, tmp_path, accept):
+    """Operators must see a reload warning in both fetch JSON and normal HTML workflows."""
+    session_factory = _isolated_enrollment_database(monkeypatch, tmp_path)
+    monkeypatch.setattr(pages, "Enroller", _StubCaptureEnroller, raising=False)
+
+    def failed_reload():
+        raise RuntimeError("private gallery detail")
+
+    monkeypatch.setattr(pages.runtime, "reload_gallery", failed_reload)
+    api = FastAPI()
+    api.include_router(router)
+
+    with TestClient(api) as test_client:
+        response = test_client.post(
+            "/api/employees/",
+            data=_registration_payload([]),
+            files=[("uploaded_images", ("face.jpg", _encoded_test_image(".jpg", 120), "image/jpeg"))],
+            headers={"Accept": accept},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 201
+    assert "private gallery detail" not in response.text
+    if accept == "application/json":
+        assert response.json()["ok"] is True
+        assert "gallery yangilanmadi" in response.json()["warning"]
+    else:
+        assert response.headers["content-type"].startswith("text/html")
+        assert "Location" not in response.headers
+        assert 'role="alert"' in response.text
+        assert "gallery yangilanmadi" in response.text
+        assert "Xodim sahifasini ochish" in response.text
+    with session_factory() as session:
+        assert session.execute(select(Employee)).scalars().all()
+        assert session.execute(select(FaceEmbedding)).scalars().all()
+
+
+def test_multipart_uploads_report_unsupported_and_oversize_images_safely(monkeypatch, tmp_path):
+    """Bad uploads must be reported per file while valid images still enroll."""
+    session_factory = _isolated_enrollment_database(monkeypatch, tmp_path)
+    extractor = _StubCaptureEnroller()
+    monkeypatch.setattr(pages, "Enroller", lambda: extractor, raising=False)
+    monkeypatch.setattr(pages.runtime, "reload_gallery", enrollment_service.load_gallery)
+    monkeypatch.setattr(enrollment_service, "MAX_CAPTURE_BYTES", 1024)
+    monkeypatch.setattr(enrollment_service, "MAX_BROWSER_CAPTURES", 3)
+    api = FastAPI()
+    api.include_router(router)
+    files = [
+        ("uploaded_images", ("valid.jpg", _encoded_test_image(".jpg", 70), "image/jpeg")),
+        ("uploaded_images", ("animation.gif", b"GIF89a", "image/gif")),
+        ("uploaded_images", ("huge.png", b"x" * 1025, "image/png")),
+        ("uploaded_images", ("extra.webp", _encoded_test_image(".webp", 130), "image/webp")),
+    ]
+
+    with TestClient(api) as test_client:
+        response = test_client.post(
+            "/api/employees/",
+            data=_registration_payload([]),
+            files=files,
+            headers={"Accept": "application/json"},
+        )
+
+    assert response.status_code == 201
+    assert response.json()["embeddings"] == 1
+    rejected = response.json()["rejected"]
+    assert [item["source_file"] for item in rejected] == [
+        "upload/002_animation.gif", "upload/003_huge.png", "upload/004_extra.webp",
+    ]
+    assert "JPEG, PNG yoki WebP" in rejected[0]["error"]
+    assert "hajmi" in rejected[1]["error"]
+    assert "ko'pi bilan 3 ta" in rejected[2]["error"]
+    with session_factory() as session:
+        assert session.execute(select(Employee)).scalars().all()
+        embeddings = session.execute(select(FaceEmbedding)).scalars().all()
+    assert len(embeddings) == 1
+    assert embeddings[0].source_file == "upload/001_valid.jpg"
+    assert extractor.calls == 1
+
+
+def test_multipart_uploads_render_all_rejections_and_leave_no_employee(monkeypatch, tmp_path):
+    """When every upload fails, HTML must explain each failure and the transaction stays empty."""
+    session_factory = _isolated_enrollment_database(monkeypatch, tmp_path)
+    extractor = _StubCaptureEnroller(reject_at=1)
+    monkeypatch.setattr(pages, "Enroller", lambda: extractor, raising=False)
+    reloads = []
+    monkeypatch.setattr(pages.runtime, "reload_gallery", lambda: reloads.append(True))
+    api = FastAPI()
+    api.include_router(router)
+    files = [
+        ("uploaded_images", ("wrong.gif", b"GIF89a", "image/gif")),
+        ("uploaded_images", ("no-face.jpg", _encoded_test_image(".jpg", 110), "image/jpeg")),
+    ]
+
+    with TestClient(api) as test_client:
+        response = test_client.post(
+            "/api/employees/",
+            data=_registration_payload([]),
+            files=files,
+            headers={"Accept": "text/html"},
+        )
+
+    assert response.status_code == 422
+    assert 'role="alert"' in response.text
+    assert "Hech bir yuz namunasi yaroqli embedding bermadi" in response.text
+    assert "wrong.gif" in response.text
+    assert "no-face.jpg" in response.text
+    assert "Yuz topilmadi" in response.text
+    with session_factory() as session:
+        assert session.execute(select(Employee)).scalars().all() == []
+        assert session.execute(select(FaceEmbedding)).scalars().all() == []
+    assert reloads == []
+
+
 def test_v3_app_does_not_mount_the_legacy_employee_router():
     """The v3 app must not expose the metadata-only legacy database boundary."""
-    from fast_api.routers import employees as legacy_employee_api
-
     assert not any(
-        getattr(route, "original_router", None) is legacy_employee_api.router
+        getattr(getattr(route, "endpoint", None), "__module__", "")
+        == "fast_api.routers.employees"
         for route in api_main.app.routes
     )
 
