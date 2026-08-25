@@ -1,0 +1,985 @@
+{% extends "base.html" %}
+{% block title %}Xodimni ro'yxatdan o'tkazish{% endblock %}
+{% block content %}
+<section class="page-header enrollment-workflow__header">
+    <p class="eyebrow mb-2">Ikki bosqichli ro'yxatdan o'tkazish</p>
+    <h1>Xodimni ro'yxatdan o'tkazish</h1>
+    <p class="mb-0 text-muted">Avval xodim ma'lumotlarini kiriting, keyin bir nechta sifatli yuz namunasini oling.</p>
+</section>
+<ol class="enrollment-workflow__steps" aria-label="Ro'yxatdan o'tkazish bosqichlari">
+    <li class="is-current"><span>1</span><div><strong>Ma'lumotlar</strong><small>Xodim profili</small></div></li>
+    <li><span>2</span><div><strong>Yuz namunasi</strong><small>Olish va tekshirish</small></div></li>
+</ol>
+<div class="row g-4 justify-content-center">
+    <div class="col-12 col-lg-10 col-xl-8">
+        <section class="airi-card enrollment-stage">
+            <div class="enrollment-stage__header">
+                <div>
+                    <p class="eyebrow mb-1">1-bosqich</p>
+                    <h2 class="h5 mb-0">1. Xodim ma'lumotlari</h2>
+                </div>
+                <i class="bi bi-person-vcard enrollment-stage__icon" aria-hidden="true"></i>
+            </div>
+            <div class="enrollment-stage__body">
+                <form method="post" action="/api/employees/" id="registrationForm">
+
+                    <input type="hidden" name="captured_image" id="id_captured_image" value="">
+                    <input type="hidden" name="captured_images" id="id_captured_images" value="">
+                    <div class="row g-3">
+                        <div class="col-12">
+                            <label for="full_name" class="form-label fw-semibold">
+                                <i class="bi bi-person me-2"></i>To'liq ism
+                            </label>
+                            <input type="text" name="full_name" id="full_name" class="form-control" required
+                                value="{{ employee.full_name|default('') if employee else '' }}">
+                        </div>
+                        <div class="col-md-6">
+                            <label for="position" class="form-label fw-semibold">
+                                <i class="bi bi-briefcase me-2"></i>Lavozim
+                            </label>
+                            <input type="text" name="position" id="position" class="form-control"
+                                value="{{ employee.position|default('') if employee else '' }}">
+                        </div>
+                        <div class="col-md-6">
+                            <label for="department" class="form-label fw-semibold">
+                                <i class="bi bi-building me-2"></i>Bo'lim
+                            </label>
+                            <input type="text" name="department" id="department" class="form-control"
+                                value="{{ employee.department|default('') if employee else '' }}">
+                        </div>
+                        <div class="col-md-6">
+                            <label for="phone_number" class="form-label fw-semibold">
+                                <i class="bi bi-telephone me-2"></i>Telefon raqami
+                            </label>
+                            <input type="tel" name="phone_number" id="phone_number" class="form-control"
+                                value="{{ employee.phone_number|default('') if employee else '' }}">
+                        </div>
+                        <div class="col-md-6">
+                            <label for="email" class="form-label fw-semibold">
+                                <i class="bi bi-envelope me-2"></i>Email
+                            </label>
+                            <input type="email" name="email" id="email" class="form-control"
+                                value="{{ employee.email|default('') if employee else '' }}">
+                        </div>
+                        <div class="col-12">
+                            <label for="notes" class="form-label fw-semibold">
+                                <i class="bi bi-sticky me-2"></i>Izoh
+                            </label>
+                            <textarea name="notes" id="notes" class="form-control"
+                                rows="3">{{ employee.notes|default('') if employee else '' }}</textarea>
+                        </div>
+                    </div>
+                    <div class="d-flex justify-content-end mt-4">
+                        <button type="submit" class="btn btn-primary btn-lg">
+                            <i class="bi bi-check-circle me-2"></i>Xodimni saqlash
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </section>
+    </div>
+    <div class="col-12 col-lg-10 col-xl-8">
+        <section class="airi-card enrollment-stage">
+            <div class="enrollment-stage__header">
+                <div>
+                    <p class="eyebrow mb-1">2-bosqich</p>
+                    <h2 class="h5 mb-0">2. Yuz namunasini olish</h2>
+                </div>
+                <div class="recognition-status">
+                    <span class="status-in" id="captureStatus">Kutilmoqda...</span>
+                </div>
+            </div>
+            <div class="enrollment-stage__body text-center">
+                {% if use_ip_camera %}
+                <div class="mb-3">
+                    <label class="form-label fw-semibold">
+                        <i class="bi bi-camera-video me-2"></i>Select Camera
+                    </label>
+                    <select id="cameraSelector" class="form-select mb-3">
+                        {% for camera in available_cameras %}
+                        <option value="{{ camera.url }}" {% if camera.url==default_camera_url %}selected{% endif %}>
+                            {{ camera.label }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                    <div class="alert alert-info mb-0">
+                        <i class="bi bi-info-circle"></i> <strong>IP Camera:</strong> Select camera and wait 1-2 seconds
+                        for connection.
+                    </div>
+                </div>
+                {% else %}
+                <div class="alert alert-info alert-dismissible fade show mb-3" id="permissionHint"
+                    style="display: none;">
+                    <i class="bi bi-info-circle"></i> <strong>Camera Permission:</strong> Please click
+                    <strong>"Allow"</strong> when your browser asks for camera permission.
+                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                </div>
+                {% endif %}
+                <video id="webcam" width="100%" autoplay playsinline muted class="rounded mb-3 shadow-sm"></video>
+                <img id="ipCameraStream" width="100%" class="rounded mb-3 shadow-sm d-none" alt="IP Camera Stream">
+                <canvas id="ipCameraCanvas" width="1280" height="720" class="rounded mb-3 shadow-sm d-none"
+                    style="max-width: 100%; height: auto;"></canvas>
+                <canvas id="snapshot" width="640" height="480" class="d-none"></canvas>
+                <div id="previewContainer" class="mb-3 d-none">
+                    <img id="previewImage" class="img-fluid rounded" alt="Preview">
+                </div>
+                <aside class="enrollment-quality" aria-labelledby="qualityGuidance">
+                    <div class="d-flex align-items-start gap-2 text-start">
+                        <i class="bi bi-shield-check" aria-hidden="true"></i>
+                        <div>
+                            <h3 id="qualityGuidance" class="h6">Sifat tekshiruvi</h3>
+                            <p class="mb-2">Rad etilgan namuna uchun quyidagini tekshiring. Bu sahifa yangi backend tekshiruvini qo'shmaydi.</p>
+                            <ul class="mb-0">
+                                <li><strong>Xiralik:</strong> linzani arting, yorug'likni oshiring va qayta oling.</li>
+                                <li><strong>Yuz hajmi:</strong> yuz kadr markazida va yetarlicha katta bo'lsin.</li>
+                                <li><strong>Pozitsiya:</strong> ko'rsatmaga mos sekin buriling, yuzni berkitmang.</li>
+                                <li><strong>Alignment bahosi:</strong> natija past bo'lsa, to'g'ridan-to'g'ri qarab yangi namuna oling.</li>
+                                <li><strong>Dublikat xavfi:</strong> boshqa xodimga o'xshashlik haqida xabar chiqsa, profilni tekshiring.</li>
+                            </ul>
+                        </div>
+                    </div>
+                </aside>
+                <div id="progressContainer" class="mb-3 d-none">
+                    <div class="progress mb-2" style="height: 25px;">
+                        <div id="progressBar" class="progress-bar progress-bar-striped progress-bar-animated"
+                            role="progressbar" style="width: 0%">
+                            <span id="progressText">0 / 20</span>
+                        </div>
+                    </div>
+                    <p class="text-muted small mb-0">
+                        <strong>Ko'rsatmalar:</strong><br>
+                        • Yuzingiz kameraga to'g'ri qarab turing<br>
+                        • Yaxshi yorug'likda bo'ling<br>
+                        • Yuzingiz kadr markazida bo'lsin<br>
+                        • Boshni biroz harakatlantiring va ifodani o'zgartiring
+                    </p>
+                </div>
+                <div id="angleInstruction" class="alert alert-secondary text-start d-none">
+                    <div class="fw-semibold text-uppercase small text-muted mb-1">Angle guide</div>
+                    <p class="mb-0" id="angleInstructionText">Keep your face centred.</p>
+                </div>
+                <div id="captureTimer" class="text-muted small fw-semibold d-none">
+                    00:00
+                </div>
+                <div id="buttonGroup">
+                    <button class="btn btn-primary me-2" type="button" id="startCaptureBtn">Ko'p burchakli olishni boshlash</button>
+                    <button class="btn btn-outline-secondary" type="button" id="cancelCaptureBtn" disabled>Bekor qilish</button>
+                </div>
+                <div id="captureComplete" class="mt-3 d-none">
+                    <div class="alert alert-success">
+                        <i class="bi bi-check-circle"></i> <span id="captureCount">0</span> ta namuna olindi.
+                        Embedding natijasi saqlash jarayonida tekshiriladi.
+                    </div>
+                </div>
+            </div>
+        </section>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    const webcam = document.getElementById('webcam');
+    const ipCameraStream = document.getElementById('ipCameraStream');
+    const canvas = document.getElementById('snapshot');
+    const previewContainer = document.getElementById('previewContainer');
+    const previewImage = document.getElementById('previewImage');
+    const statusBadge = document.getElementById('captureStatus');
+    const hiddenInput = document.getElementById('id_captured_image');
+    const hiddenImagesInput = document.getElementById('id_captured_images');
+    const startCaptureBtn = document.getElementById('startCaptureBtn');
+    const cancelCaptureBtn = document.getElementById('cancelCaptureBtn');
+    const progressContainer = document.getElementById('progressContainer');
+    const progressBar = document.getElementById('progressBar');
+    const progressText = document.getElementById('progressText');
+    const captureComplete = document.getElementById('captureComplete');
+    const captureCount = document.getElementById('captureCount');
+    const registrationForm = document.getElementById('registrationForm');
+    const angleInstruction = document.getElementById('angleInstruction');
+    const angleInstructionText = document.getElementById('angleInstructionText');
+    const captureTimer = document.getElementById('captureTimer');
+    const cameraSelector = document.getElementById('cameraSelector');
+
+    // Check if using IP camera
+    const useIpCamera = {{ use_ip_camera| yesno("true,false") }};
+
+    const VIDEO_CONSTRAINTS = {
+        video: {
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            facingMode: "user",
+            frameRate: { ideal: 30 }
+        },
+        audio: false
+    };
+
+    let capturedImages = [];
+    let isCapturing = false;
+    let captureInterval = null;
+    const ANGLE_STEPS = [
+        { label: "Face Forward", hint: "Look straight into the camera with a neutral face." },
+        { label: "Turn Left", hint: "Slowly rotate your head ~20° to the left." },
+        { label: "Turn Right", hint: "Rotate your head to the right, keep eyes on the lens." },
+        { label: "Tilt Up", hint: "Tilt your head slightly up." },
+        { label: "Tilt Down", hint: "Tilt your head slightly down." },
+        { label: "Turn Left More", hint: "Turn your head ~30° to the left." },
+        { label: "Turn Right More", hint: "Turn your head ~30° to the right." },
+        { label: "Smile", hint: "Smile naturally while looking at camera." },
+    ];
+    const CAPTURES_PER_STEP = 3; // 3 captures per angle step (24 total: 8 angles × 3 = 24)
+    const TOTAL_CAPTURES = 24; // 24 different angle captures for better training
+    const MIN_REQUIRED_CAPTURES = 20; // Minimum 20 valid captures required
+    const CAPTURE_DELAY = 1500; // 1.5 seconds between captures (medium speed, not too fast for better accuracy)
+    const COUNTDOWN_SECONDS = 3;
+    let activeStream = null;
+    let captureTimerInterval = null;
+    let timerStart = null;
+    let angleStepIndex = 0;
+
+    function resizeCanvasToVideo() {
+        if (!webcam.videoWidth) {
+            return;
+        }
+        canvas.width = webcam.videoWidth;
+        canvas.height = webcam.videoHeight;
+    }
+
+    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+    function showAngleInstruction(stepIndex) {
+        if (!angleInstruction || !angleInstructionText) return;
+        const step = ANGLE_STEPS[Math.min(stepIndex, ANGLE_STEPS.length - 1)];
+        angleInstruction.classList.remove('d-none');
+        angleInstructionText.textContent = `${step.label}: ${step.hint}`;
+    }
+
+    function hideAngleInstruction() {
+        if (!angleInstruction) return;
+        angleInstruction.classList.add('d-none');
+    }
+
+    function formatDuration(ms) {
+        if (!ms || ms < 0) return "00:00";
+        const totalSeconds = Math.floor(ms / 1000);
+        const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, '0');
+        const seconds = String(totalSeconds % 60).padStart(2, '0');
+        return `${minutes}:${seconds}`;
+    }
+
+    function resetTimerIndicator() {
+        if (!captureTimer) return;
+        captureTimer.textContent = "00:00";
+        captureTimer.classList.add('d-none');
+    }
+
+    function updateCaptureTimer() {
+        if (!timerStart || !captureTimer) return;
+        const elapsed = performance.now() - timerStart;
+        captureTimer.textContent = formatDuration(elapsed);
+    }
+
+    function startTimerTick() {
+        if (!captureTimer) return;
+        captureTimer.classList.remove('d-none');
+        updateCaptureTimer();
+        stopTimerTick();
+        captureTimerInterval = setInterval(updateCaptureTimer, 500);
+    }
+
+    function stopTimerTick() {
+        if (captureTimerInterval) {
+            clearInterval(captureTimerInterval);
+            captureTimerInterval = null;
+        }
+    }
+
+    async function runCountdown(seconds) {
+        for (let remaining = seconds; remaining > 0; remaining--) {
+            if (!isCapturing) return;
+            statusBadge.textContent = `Capturing in ${remaining}...`;
+            statusBadge.className = 'status-in';
+            await sleep(1000);
+        }
+    }
+
+    function addRetryButton() {
+        // Check if retry button already exists
+        const existingRetry = document.getElementById('retryCameraBtn');
+        if (existingRetry) {
+            return;
+        }
+
+        const retryBtn = document.createElement('button');
+        retryBtn.id = 'retryCameraBtn';
+        retryBtn.className = 'btn btn-primary mt-2';
+        retryBtn.innerHTML = '<i class="bi bi-arrow-clockwise me-2"></i>Retry Camera';
+        retryBtn.onclick = () => {
+            // Stop existing stream if any
+            if (activeStream) {
+                activeStream.getTracks().forEach(track => track.stop());
+                activeStream = null;
+            }
+            // Clear error alerts
+            const alerts = webcam.parentElement.querySelectorAll('.alert');
+            alerts.forEach(alert => alert.remove());
+            // Remove retry button
+            retryBtn.remove();
+            // Reset status
+            statusBadge.textContent = 'Initializing...';
+            statusBadge.className = 'status-in';
+            // Retry initialization
+            initCamera();
+        };
+
+        webcam.parentElement.appendChild(retryBtn);
+    }
+
+    async function initCamera() {
+        // Check if getUserMedia is supported
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            statusBadge.textContent = 'Camera API not supported';
+            statusBadge.className = 'status-unknown';
+            console.error('getUserMedia is not supported in this browser');
+            addRetryButton();
+            return;
+        }
+
+        // Show permission hint briefly
+        const permissionHint = document.getElementById('permissionHint');
+        if (permissionHint) {
+            permissionHint.style.display = 'block';
+            setTimeout(() => {
+                if (permissionHint) {
+                    permissionHint.style.display = 'none';
+                }
+            }, 5000);
+        }
+
+        try {
+            // Check permissions first (optional, some browsers support this)
+            if (navigator.permissions && navigator.permissions.query) {
+                try {
+                    const permissionStatus = await navigator.permissions.query({ name: 'camera' });
+                    console.log('Camera permission status:', permissionStatus.state);
+
+                    if (permissionStatus.state === 'denied') {
+                        throw new Error('PermissionDeniedError');
+                    }
+                } catch (permError) {
+                    // Permissions API might not be fully supported, continue anyway
+                    console.log('Permissions API check skipped:', permError);
+                }
+            }
+
+            // Try with ideal constraints first
+            activeStream = await navigator.mediaDevices.getUserMedia(VIDEO_CONSTRAINTS);
+            const [track] = activeStream.getVideoTracks();
+
+            // Log camera info
+            const settings = track.getSettings();
+            console.log('Camera settings:', {
+                width: settings.width,
+                height: settings.height,
+                frameRate: settings.frameRate,
+                deviceId: settings.deviceId
+            });
+
+            if (track && track.getCapabilities()?.focusMode?.includes("continuous")) {
+                track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(() => { });
+            }
+
+            webcam.srcObject = activeStream;
+
+            if (webcam.readyState >= 2) {
+                resizeCanvasToVideo();
+            } else {
+                webcam.addEventListener('loadedmetadata', () => {
+                    resizeCanvasToVideo();
+                }, { once: true });
+            }
+
+            await webcam.play();
+            statusBadge.textContent = 'Ready';
+            statusBadge.className = 'status-in';
+
+            // Remove any retry buttons if camera succeeds
+            const retryBtn = document.getElementById('retryCameraBtn');
+            if (retryBtn) {
+                retryBtn.remove();
+            }
+
+            // Show success message
+            console.log('✅ Camera initialized successfully');
+
+        } catch (error) {
+            console.error('Camera error:', error);
+            let errorMessage = 'Camera unavailable';
+
+            // Provide specific error messages
+            if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+                errorMessage = 'Camera permission denied. Click the camera icon in the browser address bar to allow access.';
+            } else if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') {
+                errorMessage = 'No camera found. Please connect a camera device.';
+            } else if (error.name === 'NotReadableError' || error.name === 'TrackStartError') {
+                errorMessage = 'Camera is being used by another application. Please close other applications using the camera.';
+            } else if (error.name === 'OverconstrainedError' || error.name === 'ConstraintNotSatisfiedError') {
+                errorMessage = 'Camera does not support required settings. Trying with basic settings...';
+                // Try with minimal constraints
+                try {
+                    const basicConstraints = {
+                        video: { facingMode: "user" },
+                        audio: false
+                    };
+                    activeStream = await navigator.mediaDevices.getUserMedia(basicConstraints);
+                    webcam.srcObject = activeStream;
+                    await webcam.play();
+                    statusBadge.textContent = 'Ready (basic mode)';
+                    statusBadge.className = 'status-in';
+                    console.log('✅ Camera initialized with basic settings');
+
+                    // Remove any retry buttons if camera succeeds
+                    const retryBtn = document.getElementById('retryCameraBtn');
+                    if (retryBtn) {
+                        retryBtn.remove();
+                    }
+                    return;
+                } catch (fallbackError) {
+                    console.error('Fallback camera initialization failed:', fallbackError);
+                    errorMessage = 'Camera initialization failed. Please check your camera settings and permissions.';
+                }
+            } else {
+                errorMessage = `Camera error: ${error.message || error.name}`;
+            }
+
+            statusBadge.textContent = errorMessage;
+            statusBadge.className = 'status-unknown';
+
+            // Show error alert with detailed instructions for permission errors
+            const errorAlert = document.createElement('div');
+            errorAlert.className = 'alert alert-warning alert-dismissible fade show mt-2';
+
+            let alertContent = `<i class="bi bi-exclamation-triangle"></i> <strong>Camera Error:</strong> ${errorMessage}`;
+
+            // Add detailed instructions for permission errors
+            if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+                const isChrome = navigator.userAgent.includes('Chrome') && !navigator.userAgent.includes('Edg');
+                const isFirefox = navigator.userAgent.includes('Firefox');
+                const isEdge = navigator.userAgent.includes('Edg');
+                const isSafari = navigator.userAgent.includes('Safari') && !navigator.userAgent.includes('Chrome');
+
+                let instructions = '<div class="mt-2"><strong>How to enable camera access:</strong><ul class="mb-0 mt-2">';
+
+                if (isChrome) {
+                    instructions += `
+                    <li>Click the <strong>camera icon (🚫)</strong> or <strong>lock icon (🔒)</strong> in the browser address bar</li>
+                    <li>Select <strong>"Allow"</strong> next to Camera</li>
+                    <li>Or go to <strong>Settings → Privacy and security → Site settings → Camera</strong></li>
+                    <li>Add <strong>${window.location.hostname}</strong> to allowed sites</li>
+                `;
+                } else if (isFirefox) {
+                    instructions += `
+                    <li>Click the <strong>shield icon</strong> or <strong>lock icon</strong> in the address bar</li>
+                    <li>Click <strong>"Allow"</strong> for camera permissions</li>
+                    <li>Or go to <strong>Settings → Privacy & Security → Permissions → Camera</strong></li>
+                    <li>Click <strong>"Settings"</strong> and add <strong>${window.location.hostname}</strong></li>
+                `;
+                } else if (isEdge) {
+                    instructions += `
+                    <li>Click the <strong>lock icon (🔒)</strong> in the address bar</li>
+                    <li>Change Camera from <strong>"Block"</strong> to <strong>"Allow"</strong></li>
+                    <li>Or go to <strong>Settings → Cookies and site permissions → Camera</strong></li>
+                    <li>Add <strong>${window.location.hostname}</strong> to allowed sites</li>
+                `;
+                } else if (isSafari) {
+                    instructions += `
+                    <li>Go to <strong>Safari → Settings → Websites → Camera</strong></li>
+                    <li>Find <strong>${window.location.hostname}</strong> and select <strong>"Allow"</strong></li>
+                `;
+                } else {
+                    instructions += `
+                    <li>Look for a camera or lock icon in the browser address bar</li>
+                    <li>Click it and select <strong>"Allow"</strong> for camera access</li>
+                    <li>Or check your browser's privacy/security settings</li>
+                `;
+                }
+
+                instructions += '</ul></div>';
+                alertContent += instructions;
+            }
+
+            errorAlert.innerHTML = alertContent + `
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+        `;
+            webcam.parentElement.appendChild(errorAlert);
+
+            // Add retry button
+            setTimeout(addRetryButton, 500);
+        }
+    }
+
+    function captureFrame() {
+        const context = canvas.getContext('2d');
+
+        if (useIpCamera) {
+            // For IP camera, capture from img element or canvas
+            const ipCanvas = document.getElementById('ipCameraCanvas');
+            if (ipCanvas && !ipCanvas.classList.contains('d-none')) {
+                // Using canvas (fetch API fallback)
+                if (ipCanvas.width === 0 || ipCanvas.height === 0) {
+                    console.warn('IP camera canvas not ready');
+                    return null;
+                }
+                canvas.width = ipCanvas.width || 1280;
+                canvas.height = ipCanvas.height || 720;
+                context.imageSmoothingEnabled = true;
+                context.drawImage(ipCanvas, 0, 0, canvas.width, canvas.height);
+            } else if (ipCameraStream && !ipCameraStream.classList.contains('d-none')) {
+                // Using img element (simple approach)
+                if (!ipCameraStream.complete || !ipCameraStream.naturalWidth) {
+                    console.warn('IP camera stream not ready');
+                    return null;
+                }
+                canvas.width = ipCameraStream.naturalWidth || 1280;
+                canvas.height = ipCameraStream.naturalHeight || 720;
+                context.imageSmoothingEnabled = true;
+                context.drawImage(ipCameraStream, 0, 0, canvas.width, canvas.height);
+            } else {
+                console.warn('IP camera element not found');
+                return null;
+            }
+        } else {
+            // For laptop camera, capture from video element
+            if (!webcam.videoWidth) {
+                resizeCanvasToVideo();
+            }
+            context.imageSmoothingEnabled = false;
+            context.drawImage(webcam, 0, 0, canvas.width || 640, canvas.height || 480);
+        }
+
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.98); // Very high quality (98%) for better detection accuracy
+        return dataUrl;
+    }
+
+    function updateProgress(current, total) {
+        const percentage = (current / total) * 100;
+        progressBar.style.width = percentage + '%';
+        progressText.textContent = `${current} / ${total}`;
+    }
+
+    async function startMultiCapture() {
+        if (isCapturing) return;
+
+        capturedImages = [];
+        isCapturing = true;
+        angleStepIndex = 0;
+        startCaptureBtn.disabled = true;
+        cancelCaptureBtn.disabled = false;
+        progressContainer.classList.remove('d-none');
+        captureComplete.classList.add('d-none');
+        previewContainer.classList.add('d-none');
+        updateProgress(0, TOTAL_CAPTURES);
+        resetTimerIndicator();
+        showAngleInstruction(angleStepIndex);
+
+        statusBadge.textContent = 'Preparing camera...';
+        statusBadge.className = 'status-in';
+
+        await runCountdown(COUNTDOWN_SECONDS);
+        if (!isCapturing) return;
+
+        statusBadge.textContent = 'Capturing...';
+        statusBadge.className = 'status-in';
+
+        let captureIndex = 0;
+        timerStart = performance.now();
+        startTimerTick();
+
+        const captureAndStore = () => {
+            const image = captureFrame();
+            if (!image) {
+                console.warn('Capture skipped: missing frame data');
+                return;
+            }
+            capturedImages.push(image);
+            previewImage.src = image;
+            previewContainer.classList.remove('d-none');
+            captureIndex++;
+            updateProgress(captureIndex, TOTAL_CAPTURES);
+
+            if (captureIndex % CAPTURES_PER_STEP === 0 && captureIndex < TOTAL_CAPTURES) {
+                angleStepIndex = Math.min(ANGLE_STEPS.length - 1, Math.floor(captureIndex / CAPTURES_PER_STEP));
+                showAngleInstruction(angleStepIndex);
+            }
+        };
+
+        captureAndStore();
+
+        captureInterval = setInterval(() => {
+            if (!isCapturing) {
+                finishCapture();
+                return;
+            }
+            if (captureIndex >= TOTAL_CAPTURES) {
+                finishCapture();
+                return;
+            }
+
+            captureAndStore();
+        }, CAPTURE_DELAY);
+    }
+
+    function finishCapture() {
+        clearInterval(captureInterval);
+        captureInterval = null;
+        stopTimerTick();
+        isCapturing = false;
+        startCaptureBtn.disabled = false;
+        cancelCaptureBtn.disabled = true;
+        progressContainer.classList.add('d-none');
+        captureComplete.classList.remove('d-none');
+        captureCount.textContent = capturedImages.length;
+        statusBadge.textContent = `Captured ${capturedImages.length} images`;
+        statusBadge.className = 'status-in';
+        hideAngleInstruction();
+        if (timerStart && captureTimer) {
+            captureTimer.textContent = formatDuration(performance.now() - timerStart);
+            captureTimer.classList.remove('d-none');
+        }
+
+        // Store images as JSON array
+        hiddenImagesInput.value = JSON.stringify(capturedImages);
+
+        // Also set the first image for backward compatibility
+        if (capturedImages.length > 0) {
+            hiddenInput.value = capturedImages[0];
+        }
+    }
+
+    function cancelCapture() {
+        clearInterval(captureInterval);
+        captureInterval = null;
+        stopTimerTick();
+        resetTimerIndicator();
+        isCapturing = false;
+        capturedImages = [];
+        startCaptureBtn.disabled = false;
+        cancelCaptureBtn.disabled = true;
+        progressContainer.classList.add('d-none');
+        captureComplete.classList.add('d-none');
+        previewContainer.classList.add('d-none');
+        hideAngleInstruction();
+        hiddenImagesInput.value = '';
+        hiddenInput.value = '';
+        statusBadge.textContent = 'Cancelled';
+        statusBadge.className = 'status-out';
+        updateProgress(0, TOTAL_CAPTURES);
+    }
+
+    // Form submission validation
+    registrationForm?.addEventListener('submit', function (e) {
+        console.log('Form submission started');
+        console.log('Captured images count:', capturedImages.length);
+        console.log('Hidden images input value length:', hiddenImagesInput.value ? hiddenImagesInput.value.length : 0);
+
+        if (!hiddenImagesInput.value || capturedImages.length < MIN_REQUIRED_CAPTURES) {
+            e.preventDefault();
+            alert(`Please capture at least ${MIN_REQUIRED_CAPTURES} images (multi-angle). Currently captured: ${capturedImages.length}`);
+            return false;
+        }
+
+        // Ensure the JSON is properly set
+        if (hiddenImagesInput.value && !hiddenImagesInput.value.startsWith('[')) {
+            // If it's not JSON array, try to set it
+            if (capturedImages.length > 0) {
+                hiddenImagesInput.value = JSON.stringify(capturedImages);
+                console.log('Set captured images to hidden input');
+            }
+        }
+
+        console.log('Form submission proceeding...');
+    });
+
+    startCaptureBtn?.addEventListener('click', () => {
+        startMultiCapture().catch(err => console.error('Capture error', err));
+    });
+    cancelCaptureBtn?.addEventListener('click', cancelCapture);
+
+    // Initialize camera when page loads
+    if (useIpCamera) {
+        // Use IP camera stream
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initIpCamera);
+        } else {
+            initIpCamera();
+        }
+    } else {
+        // Use laptop camera
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initCamera);
+        } else {
+            initCamera();
+        }
+    }
+
+    function initIpCamera() {
+        statusBadge.textContent = 'Connecting to camera...';
+        statusBadge.className = 'status-in';
+
+        // Use WebSocket for registration (same as recognition system)
+        if (webcam) {
+            webcam.style.display = 'none';
+        }
+        const canvas = document.getElementById('ipCameraCanvas');
+        if (canvas) {
+            canvas.classList.remove('d-none');
+        }
+        ipCameraStream.classList.add('d-none');
+
+        // Connect via WebSocket (same infrastructure as recognition)
+        initRegistrationWebSocket(canvas);
+
+        // Handle camera selector change
+        if (cameraSelector) {
+            cameraSelector.addEventListener('change', function () {
+                const newCameraUrl = this.value;
+                statusBadge.textContent = 'Switching camera...';
+                statusBadge.className = 'status-in';
+
+                // Restart stream with new camera URL
+                if (window.registrationWS) {
+                    window.registrationWS.close();
+                }
+                // Note: Camera URL change requires server-side restart of stream manager
+                // For now, just reconnect to same WebSocket
+                setTimeout(() => {
+                    initRegistrationWebSocket(canvas);
+                }, 500);
+            });
+        }
+    }
+
+    function initRegistrationWebSocket(canvas) {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/ws/camera/registration/`;
+
+        console.log('🔌 Connecting to registration WebSocket:', wsUrl);
+
+        const ws = new WebSocket(wsUrl);
+        window.registrationWS = ws;
+        const ctx = canvas.getContext('2d');
+
+        ws.onopen = () => {
+            console.log('✅ Registration WebSocket connected');
+            statusBadge.textContent = 'Camera Ready';
+            statusBadge.className = 'status-in';
+        };
+
+        ws.onmessage = (event) => {
+            try {
+                // Handle binary frames (same as recognition)
+                if (event.data instanceof Blob || event.data instanceof ArrayBuffer) {
+                    const blob = event.data instanceof Blob ? event.data : new Blob([event.data], { type: 'image/jpeg' });
+                    const img = new Image();
+                    img.onload = function () {
+                        ctx.clearRect(0, 0, canvas.width, canvas.height);
+                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                        URL.revokeObjectURL(img.src);
+                    };
+                    img.onerror = () => console.warn('Failed to load frame');
+                    img.src = URL.createObjectURL(blob);
+                    return;
+                }
+
+                // JSON metadata
+                const data = JSON.parse(event.data);
+                if (data.type === 'connected') {
+                    console.log('Registration camera ready');
+                } else if (data.type === 'frame') {
+                    // Frame metadata - binary frame will follow or already received
+                }
+            } catch (error) {
+                console.error('Error processing WebSocket message:', error);
+            }
+        };
+
+        ws.onerror = (error) => {
+            console.error('Registration WebSocket error:', error);
+            statusBadge.textContent = 'Connection Error';
+            statusBadge.className = 'status-unknown';
+        };
+
+        ws.onclose = () => {
+            console.log('Registration WebSocket closed');
+            statusBadge.textContent = 'Disconnected';
+            statusBadge.className = 'status-out';
+        };
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (ws) {
+                ws.close();
+            }
+        });
+    }
+
+    // Cleanup on page unload - stop WebSocket and stream manager
+    window.addEventListener('beforeunload', function () {
+        // Close WebSocket connection
+        if (window.registrationWS) {
+            window.registrationWS.close();
+            window.registrationWS = null;
+        }
+
+        // Stop stream manager (optional - will cleanup automatically)
+        // The stream manager will stop when no clients are connected
+        console.log('📹 Registration WebSocket closed (page unload)');
+    });
+
+    // Legacy fetch-based streaming (not used anymore - WebSocket is used instead)
+    function initIpCameraWithFetch(streamUrl, canvas) {
+        const ctx = canvas.getContext('2d');
+        let reader = null;
+        // Use global flag for cleanup
+        window.isStreaming = true;
+        window.currentStreamReader = null;
+        let buffer = new Uint8Array(0);
+
+        async function processStream() {
+            try {
+                console.log('🔄 Fetching stream from:', streamUrl);
+                const response = await fetch(streamUrl, {
+                    // Important: Don't cache, enable streaming
+                    cache: 'no-store',
+                    headers: {
+                        'Cache-Control': 'no-cache'
+                    }
+                });
+                console.log('📡 Response status:', response.status, response.statusText);
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                if (!response.body) {
+                    throw new Error('Response body is null');
+                }
+
+                reader = response.body.getReader();
+                window.currentStreamReader = reader;  // Store for cleanup
+                const boundary = '--frame\r\n';
+                const boundaryBytes = new TextEncoder().encode(boundary);
+                const jpegStartMarker = new Uint8Array([0xFF, 0xD8]);  // JPEG start marker
+
+                statusBadge.textContent = 'IP Camera Ready';
+                statusBadge.className = 'status-in';
+                console.log('✅ IP camera stream connected (fetch API - streaming mode)');
+
+                while (window.isStreaming) {
+                    const { done, value } = await reader.read();
+                    if (done) {
+                        console.log('📹 Stream ended');
+                        break;
+                    }
+
+                    // Append new data to buffer
+                    const newBuffer = new Uint8Array(buffer.length + value.length);
+                    newBuffer.set(buffer);
+                    newBuffer.set(value, buffer.length);
+                    buffer = newBuffer;
+
+                    // Look for complete frames (boundary + headers + JPEG)
+                    let searchIndex = 0;
+                    while (true) {
+                        const boundaryIndex = findBytes(buffer, boundaryBytes, searchIndex);
+                        if (boundaryIndex === -1) break;
+
+                        // Skip boundary and headers, find JPEG start (FF D8)
+                        const jpegStart = findBytes(buffer, jpegStartMarker, boundaryIndex + boundaryBytes.length);
+                        if (jpegStart === -1) {
+                            searchIndex = boundaryIndex + 1;
+                            continue;
+                        }
+
+                        // Find next boundary (JPEG end) - look for boundary after JPEG start
+                        const nextBoundary = findBytes(buffer, boundaryBytes, jpegStart + 1);
+                        if (nextBoundary === -1) {
+                            // Incomplete frame, wait for more data
+                            break;
+                        }
+
+                        // Extract JPEG data (from JPEG start to next boundary)
+                        const jpegData = buffer.slice(jpegStart, nextBoundary);
+
+                        // Create image from JPEG data and draw to canvas immediately
+                        const blob = new Blob([jpegData], { type: 'image/jpeg' });
+                        const img = new Image();
+                        img.onload = function () {
+                            // Draw image to canvas immediately (no buffering)
+                            ctx.clearRect(0, 0, canvas.width, canvas.height);
+                            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                            URL.revokeObjectURL(img.src); // Clean up immediately
+                        };
+                        img.onerror = function () {
+                            console.warn('Failed to load JPEG frame');
+                        };
+                        img.src = URL.createObjectURL(blob);
+
+                        // Remove processed data from buffer
+                        buffer = buffer.slice(nextBoundary);
+                        searchIndex = 0;
+                    }
+                }
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    console.log('📹 Stream aborted (normal)');
+                } else {
+                    console.error('❌ IP camera stream failed:', error);
+                    statusBadge.textContent = 'IP Camera Connection Failed';
+                    statusBadge.className = 'status-unknown';
+
+                    // Show error alert
+                    const errorAlert = document.createElement('div');
+                    errorAlert.className = 'alert alert-warning alert-dismissible fade show mt-2';
+                    errorAlert.innerHTML = `
+                <i class="bi bi-exclamation-triangle"></i> <strong>IP Camera Error:</strong> 
+                Could not connect to IP camera. Error: ${error.message}
+                <br><small>Please check camera settings and network connection.</small>
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            `;
+                    canvas.parentElement.appendChild(errorAlert);
+                }
+            } finally {
+                window.currentStreamReader = null;
+            }
+        }
+
+        // Helper function to find byte sequence in buffer
+        function findBytes(buffer, pattern, startIndex = 0) {
+            for (let i = startIndex; i <= buffer.length - pattern.length; i++) {
+                let match = true;
+                for (let j = 0; j < pattern.length; j++) {
+                    if (buffer[i + j] !== pattern[j]) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) return i;
+            }
+            return -1;
+        }
+
+        // Start processing stream
+        processStream();
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            window.isStreaming = false;
+            if (window.currentStreamReader) {
+                window.currentStreamReader.cancel();
+                window.currentStreamReader = null;
+            }
+            console.log('📹 Registration camera stream stopped (page unload)');
+        });
+    }
+</script>
+{% endblock %}

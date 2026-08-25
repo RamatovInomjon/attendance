@@ -1,0 +1,355 @@
+{% extends "base.html" %}
+
+{% block title %}Live Face Feed{% endblock %}
+
+{% block extra_css %}
+<style>
+    /* Dark Mode Theme for Live Feed */
+    body {
+        background-color: #0f172a;
+        color: #e2e8f0;
+    }
+
+    .live-feed-container {
+        display: flex;
+        gap: 20px;
+        height: calc(100vh - 80px);
+        /* Adjust based on navbar height */
+        padding: 20px;
+        overflow: hidden;
+    }
+
+    /* Left Panel: Camera Stream (Optional/Small) or just Stats */
+    .stream-panel {
+        flex: 1;
+        background: #1e293b;
+        border-radius: 16px;
+        padding: 20px;
+        display: flex;
+        flex-direction: column;
+        border: 1px solid #334155;
+    }
+
+    /* Right Panel: Event Feed */
+    .feed-panel {
+        flex: 2;
+        background: #1e293b;
+        border-radius: 16px;
+        padding: 20px;
+        display: flex;
+        flex-direction: column;
+        border: 1px solid #334155;
+        overflow: hidden;
+    }
+
+    .feed-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 20px;
+        padding-bottom: 10px;
+        border-bottom: 1px solid #334155;
+    }
+
+    .feed-list {
+        flex: 1;
+        overflow-y: auto;
+        padding-right: 10px;
+        display: flex;
+        flex-direction: column;
+        gap: 15px;
+    }
+
+    /* Scrollbar styling */
+    .feed-list::-webkit-scrollbar {
+        width: 8px;
+    }
+
+    .feed-list::-webkit-scrollbar-track {
+        background: #0f172a;
+        border-radius: 4px;
+    }
+
+    .feed-list::-webkit-scrollbar-thumb {
+        background: #475569;
+        border-radius: 4px;
+    }
+
+    /* Event Card */
+    .event-card {
+        background: #334155;
+        border-radius: 12px;
+        padding: 15px;
+        display: flex;
+        align-items: center;
+        gap: 15px;
+        border-left: 4px solid #3b82f6;
+        /* Default Blue */
+        animation: slideIn 0.5s ease-out forwards;
+        opacity: 0;
+        transform: translateY(-20px);
+        transition: all 0.3s ease;
+    }
+
+    .event-card:hover {
+        background: #475569;
+        transform: scale(1.02);
+    }
+
+    .event-card.high-confidence {
+        border-left-color: #22c55e;
+        /* Green */
+        background: linear-gradient(90deg, rgba(34, 197, 94, 0.1) 0%, #334155 100%);
+    }
+
+    .event-card.low-confidence {
+        border-left-color: #eab308;
+        /* Yellow */
+    }
+
+    .event-avatar {
+        width: 80px;
+        height: 80px;
+        border-radius: 50%;
+        object-fit: cover;
+        border: 2px solid #e2e8f0;
+    }
+
+    .event-info {
+        flex: 1;
+    }
+
+    .event-name {
+        font-size: 1.25rem;
+        font-weight: 700;
+        color: #f8fafc;
+        margin-bottom: 4px;
+    }
+
+    .event-meta {
+        display: flex;
+        gap: 15px;
+        font-size: 0.9rem;
+        color: #94a3b8;
+    }
+
+    .event-meta i {
+        margin-right: 5px;
+    }
+
+    .status-pill {
+        background: #22c55e;
+        color: #fff;
+        padding: 4px 10px;
+        border-radius: 20px;
+        font-size: 0.8rem;
+        font-weight: 600;
+        display: inline-flex;
+        align-items: center;
+    }
+
+    .pulse {
+        width: 8px;
+        height: 8px;
+        background: white;
+        border-radius: 50%;
+        margin-right: 6px;
+        animation: pulse-animation 1.5s infinite;
+    }
+
+    @keyframes pulse-animation {
+        0% {
+            box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.4);
+        }
+
+        70% {
+            box-shadow: 0 0 0 6px rgba(255, 255, 255, 0);
+        }
+
+        100% {
+            box-shadow: 0 0 0 0 rgba(255, 255, 255, 0);
+        }
+    }
+
+    @keyframes slideIn {
+        from {
+            opacity: 0;
+            transform: translateY(-20px);
+        }
+
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+
+    .empty-state {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        color: #64748b;
+        text-align: center;
+    }
+
+    .empty-state i {
+        font-size: 3rem;
+        margin-bottom: 15px;
+        opacity: 0.5;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid p-0">
+    <div class="live-feed-container">
+
+        <!-- Left Panel: Stats & Info -->
+        <div class="stream-panel">
+            <h3 class="mb-4 text-white"><i class="bi bi-broadcast me-2"></i>Live Monitor</h3>
+
+            <div class="card bg-dark border-secondary mb-4">
+                <div class="card-body">
+                    <h5 class="card-title text-muted mb-3">System Status</h5>
+                    <div class="d-flex align-items-center mb-2">
+                        <span class="status-pill"><span class="pulse"></span>Online</span>
+                        <span class="text-muted ms-auto" id="clock">--:--:--</span>
+                    </div>
+                    <p class="text-muted small mb-0">Connected to Recognition Feed</p>
+                </div>
+            </div>
+
+            <div class="alert alert-info bg-opacity-10 border-info text-info">
+                <i class="bi bi-info-circle me-2"></i>
+                Waiting for face detections from cameras...
+            </div>
+
+            <div class="mt-auto text-center">
+                <p class="text-muted small">Powered by InsightFace & Django Channels</p>
+                <div class="btn-group">
+                    <button class="btn btn-outline-light btn-sm" onclick="location.reload()">Refresh</button>
+                    <a href="{{ url('dashboard:home') }}" class="btn btn-outline-light btn-sm">Dashboard</a>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Panel: Live Feed -->
+        <div class="feed-panel">
+            <div class="feed-header">
+                <h3 class="text-white m-0"><i class="bi bi-person-lines-fill me-2"></i>Recent Detections</h3>
+                <span class="badge bg-primary" id="detection-count">0 today</span>
+            </div>
+
+            <div class="feed-list" id="feed-list">
+                <!-- Empty State -->
+                <div class="empty-state" id="empty-state">
+                    <i class="bi bi-camera-video"></i>
+                    <h5>No detections yet</h5>
+                    <p>Faces detected by cameras will appear here in real-time.</p>
+                </div>
+                <!-- Events will be injected here -->
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    // Clock
+    setInterval(() => {
+        const now = new Date();
+        document.getElementById('clock').textContent = now.toLocaleTimeString();
+    }, 1000);
+
+    // WebSocket Connection
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/recognition/`;
+    let socket = null;
+    let reconnectInterval = 3000;
+
+    function connectDataStream() {
+        console.log("Creating WebSocket connection to " + wsUrl);
+        socket = new WebSocket(wsUrl);
+
+        socket.onopen = function (e) {
+            console.log("Detailed Connection opened");
+            const statusPill = document.querySelector('.status-pill');
+            if (statusPill) {
+                statusPill.style.background = '#22c55e';
+                statusPill.innerHTML = '<span class="pulse"></span>Online';
+            }
+        };
+
+        socket.onmessage = function (e) {
+            const data = JSON.parse(e.data);
+            console.log("Received event:", data);
+
+            if (data.employee_id) {
+                addEventCard(data);
+            }
+        };
+
+        socket.onclose = function (e) {
+            console.error('Socket closed unexpectedly');
+            const statusPill = document.querySelector('.status-pill');
+            if (statusPill) {
+                statusPill.style.background = '#ef4444';
+                statusPill.innerHTML = '<i class="bi bi-wifi-off me-1"></i>Offline';
+            }
+            setTimeout(connectDataStream, reconnectInterval);
+        };
+
+        socket.onerror = function (err) {
+            console.error('Socket encountered error: ', err.message, 'Closing socket');
+            socket.close();
+        };
+    }
+
+    // Add Event Card to Feed
+    function addEventCard(data) {
+        const feedList = document.getElementById('feed-list');
+        const emptyState = document.getElementById('empty-state');
+
+        if (emptyState) {
+            emptyState.style.display = 'none';
+        }
+
+        // Confidence styling
+        const confidenceClass = data.confidence > 0.8 ? 'high-confidence' : 'low-confidence';
+
+        const card = document.createElement('div');
+        card.className = `event-card ${confidenceClass}`;
+
+        card.innerHTML = `
+            <img src="${data.snapshot}" alt="${data.full_name}" class="event-avatar">
+            <div class="event-info">
+                <div class="event-name">${data.full_name}</div>
+                <div class="event-meta">
+                    <span title="Employee ID"><i class="bi bi-person-badge"></i> ${data.employee_id}</span>
+                    <span title="Time"><i class="bi bi-clock"></i> ${data.timestamp}</span>
+                    <span title="Camera"><i class="bi bi-camera"></i> ${data.camera || 'Main Camera'}</span>
+                    <span title="Confidence"><i class="bi bi-check-circle"></i> ${Math.round(data.confidence * 100)}%</span>
+                </div>
+            </div>
+        `;
+
+        // Prepend to top
+        feedList.insertBefore(card, feedList.firstChild);
+
+        // Limit number of items (keep last 50)
+        if (feedList.children.length > 50) {
+            feedList.removeChild(feedList.lastChild);
+        }
+
+        // Update count (just a simple counter for now)
+        const countBadge = document.getElementById('detection-count');
+        let count = parseInt(countBadge.innerText) || 0;
+        countBadge.innerText = `${count + 1} today`;
+    }
+
+    // Start connection
+    connectDataStream();
+</script>
+{% endblock %}

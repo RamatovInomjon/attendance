@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}Boshqaruv | AIRI{% endblock %}
+
+{% block content %}
+<section class="airi-card dashboard-welcome p-4 mb-4" aria-labelledby="dashboardWelcome">
+    <div class="d-flex flex-column flex-md-row gap-3 justify-content-between align-items-md-center">
+        <div>
+            <p class="text-muted text-uppercase small fw-semibold mb-1">AIRI operatsion markazi</p>
+            <h1 class="h3 mb-1" id="dashboardWelcome">Xush kelibsiz</h1>
+            <p class="mb-0 text-muted">{{ today|date("d.m.Y") }} · Bugungi davomat holati</p>
+        </div>
+        <div class="text-md-end">
+            <strong class="d-block fs-4">{{ total_employees }} xodim</strong>
+            <span class="text-muted">Davomat: {{ present_today }}/{{ total_employees }} ({{ present_ratio }}%)</span>
+        </div>
+    </div>
+</section>
+
+<section class="mb-4" aria-labelledby="dailyAttendanceHeading">
+    <div class="d-flex align-items-center justify-content-between mb-3">
+        <h2 class="h4 mb-0" id="dailyAttendanceHeading">Kunlik davomat</h2>
+        <a class="btn btn-sm btn-outline-primary" href="{{ url('attendance:list') }}">Batafsil</a>
+    </div>
+    <div class="row g-3">
+        <div class="col-6 col-xl-3"><article class="metric-card h-100"><span class="text-muted small">Kelganlar</span><div class="dashboard-metric__value mt-2">{{ present_today }}</div><span class="status-chip status-chip--success mt-3">Bugun qayd etildi</span></article></div>
+        <div class="col-6 col-xl-3"><article class="metric-card h-100"><span class="text-muted small">Vaqtida kelgan</span><div class="dashboard-metric__value mt-2">{{ on_time_today }}</div><span class="status-chip status-chip--success mt-3">09:00 gacha</span></article></div>
+        <div class="col-6 col-xl-3"><article class="metric-card h-100"><span class="text-muted small">Kechikkanlar</span><div class="dashboard-metric__value mt-2">{{ late_arrivals }}</div><span class="status-chip status-chip--warning mt-3">09:00 dan keyin</span></article></div>
+        <div class="col-6 col-xl-3"><article class="metric-card h-100"><span class="text-muted small">Kelmaganlar</span><div class="dashboard-metric__value mt-2">{{ absent_today }}</div><span class="status-chip status-chip--danger mt-3">Faol ro'yxat</span></article></div>
+    </div>
+</section>
+
+<section class="mb-4" aria-labelledby="quickActionsHeading">
+    <h2 class="h4 mb-3" id="quickActionsHeading">Tezkor amallar</h2>
+    <div class="row g-3">
+        <div class="col-6 col-lg-3"><a class="airi-card d-flex flex-column gap-2 h-100 p-3 text-decoration-none" href="{{ url('attendance:list') }}"><i class="bi bi-calendar2-check fs-4" aria-hidden="true"></i><strong>Davomat</strong><span class="text-muted small">Bugungi qaydlar</span></a></div>
+        <div class="col-6 col-lg-3"><a class="airi-card d-flex flex-column gap-2 h-100 p-3 text-decoration-none" href="{{ url('employees:list') }}"><i class="bi bi-people fs-4" aria-hidden="true"></i><strong>Xodimlar</strong><span class="text-muted small">Faol ro'yxat</span></a></div>
+        <div class="col-6 col-lg-3"><a class="airi-card d-flex flex-column gap-2 h-100 p-3 text-decoration-none" href="{{ url('recognition:live') }}"><i class="bi bi-broadcast-pin fs-4" aria-hidden="true"></i><strong>Jonli kuzatuv</strong><span class="text-muted small">Kamera oqimlari</span></a></div>
+        <div class="col-6 col-lg-3"><a class="airi-card d-flex flex-column gap-2 h-100 p-3 text-decoration-none" href="{{ url('attendance:export') }}?day={{ today }}"><i class="bi bi-file-earmark-arrow-down fs-4" aria-hidden="true"></i><strong>Hisobot</strong><span class="text-muted small">CSV eksport</span></a></div>
+    </div>
+</section>
+
+<div class="row g-4 mb-4">
+    <section class="col-12 col-xl-7" aria-labelledby="recentEventsHeading">
+        <div class="airi-card h-100 p-3">
+            <div class="d-flex justify-content-between align-items-center mb-3"><h2 class="h4 mb-0" id="recentEventsHeading">So'nggi tanishlar</h2><span class="text-muted small">Oxirgi 12 ta</span></div>
+            <div class="vstack gap-3">
+                {% for event in recent_events %}
+                <article class="d-flex gap-3 align-items-center border-bottom pb-3">
+                    {% if event.snapshot %}
+                    <button class="border-0 bg-transparent p-0" type="button" data-evidence-src="{{ event.snapshot }}" data-evidence-title="{{ event.employee_name }}" data-evidence-subtitle="{{ event.camera }} · {{ event.action_type }}">
+                        <img class="dashboard-evidence" src="{{ event.snapshot }}" alt="{{ event.employee_name }} uchun tanish dalili" loading="lazy">
+                    </button>
+                    {% else %}
+                    <span class="dashboard-evidence d-flex align-items-center justify-content-center text-muted small" aria-label="Dalil mavjud emas"><i class="bi bi-image" aria-hidden="true"></i></span>
+                    {% endif %}
+                    <div class="flex-grow-1 min-w-0"><strong class="d-block text-truncate">{{ event.employee_name }}</strong><span class="text-muted small">{{ event.camera|default("Kamera noma'lum") }}</span></div>
+                    <div class="text-end"><span class="status-chip {% if event.action_type == 'IN' %}status-chip--success{% else %}status-chip--warning{% endif %}">{{ event.action_type }}</span><span class="d-block text-muted small mt-1">{{ event.timestamp|date("H:i") }} · {{ event.confidence|floatformat(3) }}</span></div>
+                </article>
+                {% else %}
+                <p class="text-muted text-center py-4 mb-0">Hozircha tanishlar yo'q</p>
+                {% endfor %}
+            </div>
+        </div>
+    </section>
+    <section class="col-12 col-xl-5" aria-labelledby="systemHealthHeading">
+        <div class="airi-card h-100 p-3">
+            <h2 class="h4 mb-3" id="systemHealthHeading">Tizim holati</h2>
+            <div class="vstack gap-3">
+                {% for camera in camera_health %}
+                <article class="d-flex justify-content-between gap-3 border-bottom pb-3"><div><strong class="d-block">{{ camera.name }}</strong><span class="text-muted small">{{ camera.role }} · {{ camera.detail }}</span></div><div class="text-end"><span class="status-chip {% if camera.state == 'online' %}status-chip--success{% elif camera.state == 'offline' %}status-chip--danger{% else %}status-chip--warning{% endif %}">{{ camera.state_label }}</span><span class="d-block text-muted small mt-1">{% if camera.fps is not none %}{{ camera.fps }} FPS{% else %}FPS mavjud emas{% endif %}{% if camera.pipeline_errors is not none %} · Xatolar: {{ camera.pipeline_errors }}{% endif %}</span></div></article>
+                {% else %}
+                <p class="text-muted text-center py-4 mb-0">Faol kameralar sozlanmagan</p>
+                {% endfor %}
+            </div>
+        </div>
+    </section>
+</div>
+
+<section class="airi-card p-3 mb-4" aria-labelledby="todayTableHeading">
+    <div class="d-flex justify-content-between align-items-center mb-3"><h2 class="h4 mb-0" id="todayTableHeading">Bugungi kelish-ketish</h2><span class="text-muted small">{{ today|date("d.m.Y") }}</span></div>
+    <div class="data-table"><table class="table align-middle"><thead><tr><th>Xodim</th><th>Bo'lim</th><th>IN</th><th>OUT</th><th>Dalil</th></tr></thead><tbody>
+        {% for record in today_attendance %}
+        <tr><td>{% if record.employee %}<a class="fw-semibold text-decoration-none" href="{{ url('employees:detail', record.employee.id) }}">{{ record.employee.full_name }}</a>{% else %}Noma'lum{% endif %}</td><td>{{ record.employee.department if record.employee else "—" }}</td><td>{{ record.check_in_time|date("H:i")|default("—") }}</td><td>{{ record.check_out_time|date("H:i")|default("—") }}</td><td class="text-nowrap">{% if record.check_in_snapshot %}<button class="btn btn-sm btn-outline-primary" type="button" data-evidence-src="{{ record.check_in_snapshot }}" data-evidence-title="IN dalili" data-evidence-subtitle="{{ record.employee_name }}">IN</button>{% endif %}{% if record.check_out_snapshot %}<button class="btn btn-sm btn-outline-secondary ms-1" type="button" data-evidence-src="{{ record.check_out_snapshot }}" data-evidence-title="OUT dalili" data-evidence-subtitle="{{ record.employee_name }}">OUT</button>{% endif %}{% if not record.check_in_snapshot and not record.check_out_snapshot %}<span class="text-muted">Mavjud emas</span>{% endif %}</td></tr>
+        {% else %}
+        <tr><td colspan="5" class="text-center text-muted py-4">Bugun davomat qaydlari yo'q</td></tr>
+        {% endfor %}
+    </tbody></table></div>
+</section>
+
+<div class="row g-4">
+    <section class="col-12 col-lg-6" aria-labelledby="weeklyChartHeading"><div class="airi-card p-3 h-100"><h2 class="h4 mb-3" id="weeklyChartHeading">Haftalik davomat</h2><div class="dashboard-chart"><canvas id="weeklyChart" aria-label="Haftalik davomat grafigi"></canvas></div></div></section>
+    <section class="col-12 col-lg-6" aria-labelledby="monthlyChartHeading"><div class="airi-card p-3 h-100"><h2 class="h4 mb-3" id="monthlyChartHeading">Oylik davomat</h2><div class="dashboard-chart"><canvas id="monthlyChart" aria-label="Oylik davomat grafigi"></canvas></div></div></section>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+{{ weekly_chart_data|json_script("weekly-chart-data") }}
+{{ monthly_chart_data|json_script("monthly-chart-data") }}
+<script>
+(() => {
+    const charts = {};
+    const chartData = (id) => JSON.parse(document.getElementById(id)?.textContent || '[]');
+    const themeColors = () => {
+        const styles = getComputedStyle(document.documentElement);
+        return { accent: styles.getPropertyValue('--airi-accent').trim(), success: styles.getPropertyValue('--airi-success').trim(), text: styles.getPropertyValue('--airi-text-muted').trim(), grid: styles.getPropertyValue('--airi-border').trim() };
+    };
+    const applyColors = (chart, colors) => {
+        chart.data.datasets.forEach((dataset) => { dataset.borderColor = colors.success; dataset.backgroundColor = colors.success; });
+        chart.options.scales.x.ticks.color = colors.text;
+        chart.options.scales.y.ticks.color = colors.text;
+        chart.options.scales.x.grid.color = colors.grid;
+        chart.options.scales.y.grid.color = colors.grid;
+        chart.update();
+    };
+    const createChart = (key, targetId, type, data) => {
+        if (!window.Chart || charts[key]) return;
+        const target = document.getElementById(targetId);
+        if (!target) return;
+        const colors = themeColors();
+        charts[key] = new Chart(target, { type, data: { labels: data.map((item) => item.label), datasets: [{ label: 'Davomat', data: data.map((item) => item.present), borderColor: colors.success, backgroundColor: colors.success, borderWidth: 2, tension: .35, fill: type === 'line' }] }, options: { responsive: true, maintainAspectRatio: false, scales: { x: { ticks: { color: colors.text }, grid: { color: colors.grid } }, y: { beginAtZero: true, ticks: { precision: 0, color: colors.text }, grid: { color: colors.grid } } }, plugins: { legend: { display: false } } } });
+    };
+    document.addEventListener('DOMContentLoaded', () => {
+        createChart('weekly', 'weeklyChart', 'line', chartData('weekly-chart-data'));
+        createChart('monthly', 'monthlyChart', 'bar', chartData('monthly-chart-data'));
+        document.querySelectorAll('[data-evidence-src]').forEach((button) => button.addEventListener('click', () => window.AiriUI?.openEvidence({ src: button.dataset.evidenceSrc, title: button.dataset.evidenceTitle, subtitle: button.dataset.evidenceSubtitle })));
+    });
+    document.addEventListener('airi:themechange', () => Object.values(charts).forEach((chart) => applyColors(chart, themeColors())));
+})();
+</script>
+{% endblock %}

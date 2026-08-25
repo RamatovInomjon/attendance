@@ -1,0 +1,521 @@
+{% extends "base.html" %}
+{% block title %}{{ employee.full_name }} - Attendance Details{% endblock %}
+{% block extra_css %}
+<style>
+    .modal-image {
+        max-width: 100%;
+        max-height: 80vh;
+        border-radius: 8px;
+    }
+    .snapshot img {
+        transition: transform 0.2s;
+        cursor: pointer;
+    }
+    .snapshot img:hover {
+        transform: scale(1.05);
+        opacity: 0.9;
+    }
+    
+    /* Status badge styling with hover effects */
+    .status-badge {
+        cursor: pointer;
+        transition: all 0.2s ease;
+        position: relative;
+        display: inline-block;
+    }
+    
+    .status-badge:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+        z-index: 10;
+    }
+    
+    /* Custom badge colors for better visibility */
+    .badge.bg-success {
+        background-color: #22c55e !important;
+        color: white;
+    }
+    
+    .badge.bg-info {
+        background-color: #3b82f6 !important;
+        color: white;
+    }
+    
+    .badge.bg-warning {
+        background-color: #f59e0b !important;
+        color: white;
+    }
+    
+    .badge.bg-primary {
+        background-color: #8b5cf6 !important;
+        color: white;
+    }
+    
+    .badge.bg-secondary {
+        background-color: #6b7280 !important;
+        color: white;
+    }
+    
+    /* Tooltip for status badges */
+    .status-badge[data-bs-toggle="tooltip"] {
+        cursor: help;
+    }
+    .employee-header {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 2rem;
+        border-radius: 12px;
+        margin-bottom: 2rem;
+    }
+    .snapshot-pair {
+        display: flex;
+        gap: 1rem;
+        margin-top: 1rem;
+    }
+    .snapshot {
+        flex: 1;
+        text-align: center;
+    }
+    .snapshot img {
+        width: 100%;
+        max-width: 300px;
+        height: auto;
+        border-radius: 8px;
+        border: 2px solid #e9ecef;
+    }
+    .snapshot-placeholder {
+        width: 100%;
+        max-width: 300px;
+        height: 200px;
+        background: #f8f9fa;
+        border: 2px dashed #dee2e6;
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #6c757d;
+        margin: 0 auto;
+    }
+</style>
+{% endblock %}
+{% block content %}
+<div class="container-fluid">
+    <!-- Employee Header -->
+    <div class="employee-header">
+        <div class="d-flex justify-content-between align-items-start">
+            <div>
+                <h1 class="mb-2">{{ employee.full_name }}</h1>
+                <p class="mb-1"><strong>Employee ID:</strong> {{ employee.employee_id }}</p>
+                <p class="mb-1"><strong>Department:</strong> {{ employee.department }}</p>
+                <p class="mb-0"><strong>Position:</strong> {{ employee.position }}</p>
+            </div>
+            <a href="{{ url('attendance:list') }}" class="btn btn-light">
+                <i class="bi bi-arrow-left me-1"></i>Back to Attendance
+            </a>
+        </div>
+    </div>
+
+    <!-- Today's Attendance -->
+    <div class="card card-shadow mb-4">
+        <div class="card-header bg-white border-0">
+            <h5 class="mb-0">Today's Attendance</h5>
+        </div>
+        <div class="card-body">
+            {% if today_attendance %}
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="mb-3">
+                        <strong>Date:</strong> {{ today_attendance.date|date("M d, Y") }}
+                    </div>
+                    <div class="mb-3">
+                        <strong>Check-In Time:</strong> 
+                        {% if today_attendance.check_in_time %}
+                            {{ today_attendance.check_in_time|date("H:i") }}
+                            {% if today_attendance.check_in_accuracy %}
+                            <span class="badge bg-info ms-2">{{ today_attendance.check_in_accuracy|floatformat(1) }}%</span>
+                            {% endif %}
+                        {% else %}
+                            <span class="text-muted">Not checked in</span>
+                        {% endif %}
+                    </div>
+                    <div class="mb-3">
+                        <strong>Check-Out Time:</strong> 
+                        {% if today_attendance.check_out_time %}
+                            {{ today_attendance.check_out_time|date("H:i") }}
+                            {% if today_attendance.check_out_accuracy %}
+                            <span class="badge bg-info ms-2">{{ today_attendance.check_out_accuracy|floatformat(1) }}%</span>
+                            {% endif %}
+                        {% else %}
+                            <span class="text-muted">Not checked out</span>
+                        {% endif %}
+                    </div>
+                    <div class="mb-3">
+                        <strong>Working Hours:</strong> 
+                        {{ today_attendance.working_hours|duration_hm|default("—") }}
+                    </div>
+                    <div class="mb-3">
+                        <strong>Status:</strong> 
+                        <button class="btn btn-sm btn-outline-primary ms-2" 
+                                onclick="showStatusDetails('{{ today_attendance.status }}', '{{ today_attendance.check_in_time|date("H:i")|default("—") }}', '{{ today_attendance.check_out_time|date("H:i")|default("—") }}', '{{ today_attendance.working_hours|duration_hm|default("—") }}', '{{ today_attendance.date|date("M d, Y") }}', '{% if today_attendance.check_in_snapshot %}{{ today_attendance.check_in_snapshot }}{% endif %}', '{% if today_attendance.check_out_snapshot %}{{ today_attendance.check_out_snapshot }}{% endif %}')">
+                            Status
+                        </button>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="snapshot-pair">
+                        <div class="snapshot">
+                            <small class="text-muted d-block mb-2">Check-In Snapshot</small>
+                            {% if today_attendance.check_in_snapshot %}
+                            <img src="{{ today_attendance.check_in_snapshot }}" 
+                                 alt="Check-in snapshot" 
+                                 loading="lazy"
+                                 onclick="showSnapshotModal('{{ today_attendance.check_in_snapshot }}', '{{ employee.full_name }} - Check-In')">
+                            {% else %}
+                            <div class="snapshot-placeholder">No photo</div>
+                            {% endif %}
+                        </div>
+                        <div class="snapshot">
+                            <small class="text-muted d-block mb-2">Check-Out Snapshot</small>
+                            {% if today_attendance.check_out_snapshot %}
+                            <img src="{{ today_attendance.check_out_snapshot }}" 
+                                 alt="Check-out snapshot" 
+                                 loading="lazy"
+                                 onclick="showSnapshotModal('{{ today_attendance.check_out_snapshot }}', '{{ employee.full_name }} - Check-Out')">
+                            {% else %}
+                            <div class="snapshot-placeholder">No photo</div>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% else %}
+            <p class="text-muted text-center py-4 mb-0">No attendance record for today.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Recent Attendance History -->
+    <div class="card card-shadow">
+        <div class="card-header bg-white border-0">
+            <h5 class="mb-0">Recent Attendance History (Last 7 Days)</h5>
+        </div>
+        <div class="card-body">
+            {% if recent_attendance %}
+            <div class="table-responsive">
+                <table class="table table-hover align-middle">
+                    <thead>
+                        <tr>
+                            <th>Date</th>
+                            <th>Check-In</th>
+                            <th>Check-Out</th>
+                            <th>Working Hours</th>
+                            <th>Status</th>
+                            <th>Accuracy</th>
+                            <th>Snapshots</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for record in recent_attendance %}
+                        <tr>
+                            <td>{{ record.date|date("M d, Y") }}</td>
+                            <td>
+                                {% if record.check_in_time %}
+                                    {{ record.check_in_time|date("H:i") }}
+                                    {% if record.check_in_accuracy %}
+                                    <br><small class="text-muted">{{ record.check_in_accuracy|floatformat(1) }}%</small>
+                                    {% endif %}
+                                {% else %}
+                                    —
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if record.check_out_time %}
+                                    {{ record.check_out_time|date("H:i") }}
+                                    {% if record.check_out_accuracy %}
+                                    <br><small class="text-muted">{{ record.check_out_accuracy|floatformat(1) }}%</small>
+                                    {% endif %}
+                                {% else %}
+                                    —
+                                {% endif %}
+                            </td>
+                            <td>{{ record.working_hours|duration_hm|default("—") }}</td>
+                            <td>
+                                <button class="btn btn-sm btn-outline-primary" 
+                                        onclick="showStatusDetails('{{ record.status }}', '{{ record.check_in_time|date("H:i")|default("—") }}', '{{ record.check_out_time|date("H:i")|default("—") }}', '{{ record.working_hours|duration_hm|default("—") }}', '{{ record.date|date("M d, Y") }}', '{% if record.check_in_snapshot %}{{ record.check_in_snapshot }}{% endif %}', '{% if record.check_out_snapshot %}{{ record.check_out_snapshot }}{% endif %}')">
+                                    Status
+                                </button>
+                            </td>
+                            <td>
+                                {% if record.check_in_accuracy or record.check_out_accuracy %}
+                                    <div class="d-flex flex-column gap-1">
+                                        {% if record.check_in_accuracy %}
+                                        <span class="badge bg-info" style="font-size: 0.75rem;">In: {{ record.check_in_accuracy|floatformat(1) }}%</span>
+                                        {% endif %}
+                                        {% if record.check_out_accuracy %}
+                                        <span class="badge bg-info" style="font-size: 0.75rem;">Out: {{ record.check_out_accuracy|floatformat(1) }}%</span>
+                                        {% endif %}
+                                    </div>
+                                {% else %}
+                                    <span class="text-muted small">—</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                <div class="d-flex gap-2">
+                                    {% if record.check_in_snapshot %}
+                                    <img src="{{ record.check_in_snapshot }}" 
+                                         alt="Check-in" 
+                                         style="width: 50px; height: 50px; object-fit: cover; border-radius: 4px; cursor: pointer;"
+                                         onclick="showSnapshotModal('{{ record.check_in_snapshot }}', '{{ employee.full_name }} - Check-In ({{ record.date|date("M d") }})')">
+                                    {% endif %}
+                                    {% if record.check_out_snapshot %}
+                                    <img src="{{ record.check_out_snapshot }}" 
+                                         alt="Check-out" 
+                                         style="width: 50px; height: 50px; object-fit: cover; border-radius: 4px; cursor: pointer;"
+                                         onclick="showSnapshotModal('{{ record.check_out_snapshot }}', '{{ employee.full_name }} - Check-Out ({{ record.date|date("M d") }})')">
+                                    {% endif %}
+                                    {% if not record.check_in_snapshot and not record.check_out_snapshot %}
+                                    <span class="text-muted small">No snapshots</span>
+                                    {% endif %}
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <p class="text-muted text-center py-4 mb-0">No recent attendance records.</p>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<!-- Snapshot Modal -->
+<div class="modal fade" id="snapshotModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="snapshotModalTitle">Snapshot</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body text-center">
+                <img id="snapshotModalImage" src="" alt="" class="modal-image">
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                <button type="button" class="btn btn-primary" id="snapshotModalSaveBtn">
+                    <i class="bi bi-download me-1"></i>Save Image
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Status Details Modal -->
+<div class="modal fade" id="statusDetailsModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="statusDetailsModalTitle">Status Details</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <strong>Date:</strong> <span id="statusDetailsDate">—</span>
+                </div>
+                <div class="mb-3">
+                    <strong>Check-In Time:</strong> <span id="statusDetailsCheckIn">—</span>
+                </div>
+                <div class="mb-3">
+                    <strong>Check-Out Time:</strong> <span id="statusDetailsCheckOut">—</span>
+                </div>
+                <div class="mb-3">
+                    <strong>Working Hours:</strong> <span id="statusDetailsWorkingHours">—</span>
+                </div>
+                <hr>
+                <div class="mb-2">
+                    <strong>Kelish:</strong> <span id="statusDetailsCheckInStatus" class="badge bg-info ms-2">—</span>
+                </div>
+                <div class="mb-2">
+                    <strong>Ketish:</strong> <span id="statusDetailsCheckOutStatus" class="badge bg-info ms-2">—</span>
+                </div>
+                <div class="mb-3">
+                    <strong>Ishlangan vaqt:</strong> <span id="statusDetailsShiftStatus" class="badge bg-warning ms-2">—</span>
+                </div>
+                <div id="statusDetailsSnapshots" class="mt-3 d-flex gap-2 justify-content-center" style="display: none;">
+                    <div id="statusDetailsCheckInSnapshot" style="display: none;">
+                        <small class="d-block text-muted mb-1">Check-In Snapshot</small>
+                        <img id="statusDetailsCheckInImage" src="" alt="Check-in" style="max-width: 150px; max-height: 150px; border-radius: 8px; cursor: pointer;" onclick="showSnapshotModal(this.src, 'Check-In Snapshot')">
+                    </div>
+                    <div id="statusDetailsCheckOutSnapshot" style="display: none;">
+                        <small class="d-block text-muted mb-1">Check-Out Snapshot</small>
+                        <img id="statusDetailsCheckOutImage" src="" alt="Check-out" style="max-width: 150px; max-height: 150px; border-radius: 8px; cursor: pointer;" onclick="showSnapshotModal(this.src, 'Check-Out Snapshot')">
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    // Function to show snapshot in modal
+    function showSnapshotModal(imageUrl, title) {
+        const modal = document.getElementById('snapshotModal');
+        const modalImage = document.getElementById('snapshotModalImage');
+        const modalTitle = document.getElementById('snapshotModalTitle');
+        const modalSaveBtn = document.getElementById('snapshotModalSaveBtn');
+        
+        if (modal && modalImage && modalTitle) {
+            modalTitle.textContent = title || 'Snapshot';
+            modalImage.src = imageUrl;
+            
+            // Update save button
+            if (modalSaveBtn) {
+                const filename = (title || 'snapshot').replace(/\s+/g, '_').toLowerCase() + '.jpg';
+                modalSaveBtn.onclick = () => saveSnapshotImage(imageUrl, filename);
+            }
+            
+            // Show modal using Bootstrap
+            const bsModal = new bootstrap.Modal(modal);
+            bsModal.show();
+        }
+    }
+
+    function saveSnapshotImage(imageUrl, filename) {
+        // Create a temporary anchor element to trigger download
+        const link = document.createElement('a');
+        link.href = imageUrl;
+        link.download = filename;
+        link.target = '_blank';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        
+        // Show success message
+        const toast = document.createElement('div');
+        toast.className = 'alert alert-success alert-dismissible fade show position-fixed top-0 end-0 m-3';
+        toast.style.zIndex = '9999';
+        toast.innerHTML = `
+            <i class="bi bi-check-circle me-2"></i>Image saved as ${filename}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        `;
+        document.body.appendChild(toast);
+        setTimeout(() => {
+            toast.remove();
+        }, 3000);
+    }
+    
+    // Function to show status details modal
+    function showStatusDetails(statusString, checkInTime, checkOutTime, workingHours, date, checkInSnapshot, checkOutSnapshot) {
+        // Parse status string
+        const labels = statusString.split('|').map(l => l.trim());
+        
+        let checkinStatus = null;
+        let checkoutStatus = null;
+        let shiftStatus = null;
+        
+        labels.forEach(label => {
+            if (['ON_TIME', 'LATE', 'EARLY_ARRIVAL'].includes(label)) {
+                checkinStatus = label;
+            } else if (['NORMAL_EXIT', 'EARLY_LEAVE', 'OVERTIME'].includes(label)) {
+                checkoutStatus = label;
+            } else if (['FULL_SHIFT', 'PARTIAL_SHIFT'].includes(label)) {
+                shiftStatus = label;
+            }
+        });
+        
+        // Map status labels to display names
+        const statusMap = {
+            'ON_TIME': 'On Time',
+            'LATE': 'Late',
+            'EARLY_ARRIVAL': 'Early Arrival',
+            'NORMAL_EXIT': 'Normal Exit',
+            'EARLY_LEAVE': 'Early Leave',
+            'OVERTIME': 'Overtime',
+            'FULL_SHIFT': 'Full Shift',
+            'PARTIAL_SHIFT': 'Partial Shift',
+        };
+        
+        // Update modal content
+        document.getElementById('statusDetailsDate').textContent = date || '—';
+        document.getElementById('statusDetailsCheckIn').textContent = checkInTime || '—';
+        document.getElementById('statusDetailsCheckOut').textContent = checkOutTime || '—';
+        document.getElementById('statusDetailsWorkingHours').textContent = workingHours || '—';
+        
+        // Update status badges
+        const checkInStatusEl = document.getElementById('statusDetailsCheckInStatus');
+        const checkOutStatusEl = document.getElementById('statusDetailsCheckOutStatus');
+        const shiftStatusEl = document.getElementById('statusDetailsShiftStatus');
+        
+        if (checkinStatus) {
+            checkInStatusEl.textContent = statusMap[checkinStatus] || checkinStatus;
+            checkInStatusEl.className = 'badge ms-2 ' + (checkinStatus === 'ON_TIME' ? 'bg-success' : checkinStatus === 'LATE' ? 'bg-warning' : 'bg-info');
+            checkInStatusEl.style.display = 'inline-block';
+        } else {
+            checkInStatusEl.textContent = '—';
+            checkInStatusEl.style.display = 'none';
+        }
+        
+        if (checkoutStatus) {
+            checkOutStatusEl.textContent = statusMap[checkoutStatus] || checkoutStatus;
+            checkOutStatusEl.className = 'badge ms-2 ' + (checkoutStatus === 'NORMAL_EXIT' ? 'bg-success' : checkoutStatus === 'OVERTIME' ? 'bg-primary' : 'bg-info');
+            checkOutStatusEl.style.display = 'inline-block';
+        } else {
+            checkOutStatusEl.textContent = '—';
+            checkOutStatusEl.style.display = 'none';
+        }
+        
+        if (shiftStatus) {
+            shiftStatusEl.textContent = statusMap[shiftStatus] || shiftStatus;
+            shiftStatusEl.className = 'badge ms-2 ' + (shiftStatus === 'FULL_SHIFT' ? 'bg-success' : 'bg-warning');
+            shiftStatusEl.style.display = 'inline-block';
+        } else {
+            shiftStatusEl.textContent = '—';
+            shiftStatusEl.style.display = 'none';
+        }
+        
+        // Update snapshots
+        const snapshotsContainer = document.getElementById('statusDetailsSnapshots');
+        const checkInSnapshotDiv = document.getElementById('statusDetailsCheckInSnapshot');
+        const checkOutSnapshotDiv = document.getElementById('statusDetailsCheckOutSnapshot');
+        
+        if (checkInSnapshot) {
+            document.getElementById('statusDetailsCheckInImage').src = checkInSnapshot;
+            checkInSnapshotDiv.style.display = 'block';
+            snapshotsContainer.style.display = 'flex';
+        } else {
+            checkInSnapshotDiv.style.display = 'none';
+        }
+        
+        if (checkOutSnapshot) {
+            document.getElementById('statusDetailsCheckOutImage').src = checkOutSnapshot;
+            checkOutSnapshotDiv.style.display = 'block';
+            snapshotsContainer.style.display = 'flex';
+        } else {
+            checkOutSnapshotDiv.style.display = 'none';
+        }
+        
+        if (!checkInSnapshot && !checkOutSnapshot) {
+            snapshotsContainer.style.display = 'none';
+        }
+        
+        // Show modal
+        const modal = new bootstrap.Modal(document.getElementById('statusDetailsModal'));
+        modal.show();
+    }
+    
+    // Initialize Bootstrap tooltips for status badges
+    document.addEventListener('DOMContentLoaded', function() {
+        const tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+        tooltipTriggerList.map(function (tooltipTriggerEl) {
+            return new bootstrap.Tooltip(tooltipTriggerEl);
+        });
+    });
+</script>
+{% endblock %}
+

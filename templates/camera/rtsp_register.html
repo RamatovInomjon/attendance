@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+{% block title %}Register RTSP Cameras{% endblock %}
+
+{% block content %}
+<div class="row g-4">
+    <div class="col-12 col-xl-7">
+        <div class="card card-shadow mb-4">
+            <div class="card-header bg-white border-0 d-flex justify-content-between align-items-center">
+                <div>
+                    <h5 class="mb-0">Primary Camera</h5>
+                    <small class="text-muted">Current main stream used on recognition page</small>
+                </div>
+            </div>
+            <div class="card-body">
+                {% if cameras and cameras|length > 0 %}
+                {% set primary = cameras[0] %}
+                <dl class="row mb-0">
+                    <dt class="col-sm-4">Type</dt>
+                    <dd class="col-sm-8 text-capitalize">{{ primary.camera_type|default("—") }}</dd>
+                    <dt class="col-sm-4">RTSP URL</dt>
+                    <dd class="col-sm-8"><code>{{ primary.rtsp_url|default("Not configured") }}</code></dd>
+                    <dt class="col-sm-4">Resolution</dt>
+                    <dd class="col-sm-8">
+                        {{ primary.width|default("—") }}×{{ primary.height|default("—") }}
+                    </dd>
+                    <dt class="col-sm-4">FPS</dt>
+                    <dd class="col-sm-8">{{ primary.fps|default(25) }} fps</dd>
+                </dl>
+                {% else %}
+                <p class="text-muted mb-0">
+                    Primary camera is not configured yet.
+                    <a href="{{ url('camera:settings') }}">Open camera settings</a> to set it up.
+                </p>
+                {% endif %}
+            </div>
+        </div>
+
+        <div class="card card-shadow">
+            <div class="card-header bg-white border-0 d-flex justify-content-between align-items-center">
+                <div>
+                    <h5 class="mb-0">Register New RTSP Camera</h5>
+                    <small class="text-muted">These cameras will appear as additional streams on the recognition
+                        page</small>
+                </div>
+            </div>
+            <div class="card-body">
+                <form method="post" action="/api/cameras/add" novalidate>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label" for="camera_id">Camera ID</label>
+                            <input type="number" name="camera_id" id="camera_id" class="form-control" min="2" value="2">
+                            <small class="form-text text-muted">Unique identifier (2 or higher)</small>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label" for="label">Label</label>
+                            <input type="text" name="label" id="label" class="form-control"
+                                placeholder="e.g. Entrance Camera">
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label" for="rtsp_url">RTSP URL</label>
+                            <input type="text" name="rtsp_url" id="rtsp_url" class="form-control"
+                                placeholder="rtsp://username:password@ip:port/stream">
+                            <small class="form-text text-muted">Full RTSP URL including credentials</small>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label" for="fps">FPS</label>
+                            <input type="number" name="fps" id="fps" class="form-control" value="25" min="1" max="60">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label" for="width">Width</label>
+                            <input type="number" name="width" id="width" class="form-control" value="1920">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label" for="height">Height</label>
+                            <input type="number" name="height" id="height" class="form-control" value="1080">
+                        </div>
+                        <div class="col-12">
+                            <div class="form-check">
+                                <input type="checkbox" name="enable_recognition" id="enable_recognition"
+                                    class="form-check-input" checked>
+                                <label class="form-check-label" for="enable_recognition">
+                                    Enable face recognition
+                                </label>
+                            </div>
+                            <small class="form-text text-muted">Run AI recognition on this camera feed</small>
+                        </div>
+                    </div>
+                    <div class="text-end mt-4">
+                        <button type="submit" class="btn btn-primary">
+                            <i class="bi bi-plus-circle me-1"></i> Add Camera
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-12 col-xl-5">
+        <div class="card card-shadow h-100">
+            <div class="card-header bg-white border-0 d-flex justify-content-between align-items-center">
+                <div>
+                    <h5 class="mb-0">Registered Cameras</h5>
+                    <small class="text-muted">Shown as additional streams on the recognition page</small>
+                </div>
+            </div>
+            <div class="card-body">
+                {% if cameras and cameras|length > 1 %}
+                <div class="list-group">
+                    {% for cam in cameras[1:] %}
+                    <div class="list-group-item d-flex justify-content-between align-items-start">
+                        <div class="me-3">
+                            <div class="fw-semibold">Camera {{ cam.id }}</div>
+                            <small class="text-muted d-block">
+                                ID: <code>{{ cam.id }}</code>
+                            </small>
+                            {% if cam.rtsp_url %}
+                            <small class="text-muted d-block text-truncate" style="max-width: 260px;">
+                                {{ cam.rtsp_url }}
+                            </small>
+                            {% endif %}
+                            <small class="text-muted d-block">
+                                {{ cam.width|default(1920) }}×{{ cam.height|default(1080) }} · {{ cam.fps|default(25)
+                                }}fps
+                            </small>
+                        </div>
+                        <span class="badge bg-success-subtle text-success">
+                            <i class="bi bi-cpu me-1"></i>
+                            Recognition ON
+                        </span>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <p class="text-muted mb-0">
+                    No additional cameras registered yet. Use the form on the left to add RTSP cameras.
+                </p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

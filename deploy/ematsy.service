@@ -1,0 +1,19 @@
+[Unit]
+Description=EmAtSy face recognition attendance
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=inomjon
+WorkingDirectory=/home/inomjon/projectAI/face_rec/face_recognition_airi
+ExecStart=/home/inomjon/anaconda3/envs/yolo/bin/python scripts/run.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/ematsy/ematsy.log
+StandardError=append:/var/log/ematsy/ematsy.log
+# 4K frames are 24 MB; bound the process so a leak cannot take the machine down
+MemoryMax=6G
+
+[Install]
+WantedBy=multi-user.target

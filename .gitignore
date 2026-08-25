@@ -1,0 +1,111 @@
+# =========================
+# Python / Flask .gitignore
+# =========================
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Environment variables
+*.env
+.env.*
+
+# Flask instance folder (stores uploads, etc.)
+instance/
+*.db
+*.sqlite3
+db.sqlite3-*
+*.sqlite3-shm
+*.sqlite3-wal
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+pip-wheel-metadata/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# IDEs and editors
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Logs
+*.log
+
+# Local settings
+config.py
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Uploaded media
+media/
+!media/.gitkeep
+
+# ---- added 2026-08-25: keep the repo to source only -------------------
+# Biometric / personal data. The face_id_users export README states it
+# "contains personal and biometric data" - it must never enter version control.
+face_id_users/
+
+# Model weights: 781 MB of ONNX. Tracked out of band, restored from
+# models/README or the training runs they were exported from.
+models/
+*.onnx
+*.pt
+
+# Runtime output: clips, debug captures, snapshots, logs, the SQLite db.
+data/
+staticfiles/
+db.sqlite3
+*.sqlite3
+db.sqlite3-*
+*.sqlite3-shm
+*.sqlite3-wal
+
+# Local caches
+.pytest_cache/

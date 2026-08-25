@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Noma'lum kuzatuvlar{% endblock %}
+{% block content %}
+<section class="page-header unknown-review__header">
+    <p class="eyebrow mb-2">Ko'rib chiqish navbati</p>
+    <h1>Noma'lum kuzatuvlar</h1>
+    <p class="mb-0 text-muted">Tizim mos kelmagan treklarni bir dalil kartasida jamlaydi.</p>
+</section>
+
+<section class="airi-card unknown-review" aria-labelledby="unknownReviewHeading">
+    <div class="unknown-review__toolbar">
+        <div>
+            <h2 id="unknownReviewHeading" class="h5 mb-1">Tanib olinmagan yuzlar</h2>
+            <p class="text-muted mb-0">Har bir karta saqlangan eng yaxshi kadrni ko'rsatadi.</p>
+        </div>
+        <span class="status-chip status-chip--warning">{{ unknown_attempts|length }} ta trek</span>
+    </div>
+
+    {% if unknown_attempts %}
+    <div class="unknown-review__grid">
+        {% for attempt in unknown_attempts %}
+        {% set snapshot = attempt.latest_record.snapshot.url if attempt.latest_record and attempt.latest_record.snapshot else None %}
+        <article class="unknown-review__card">
+            <button class="unknown-review__image-button" type="button" data-airi-evidence
+                data-evidence-src="{{ snapshot or '' }}" data-evidence-title="Noma'lum #{{ attempt.id }}"
+                data-evidence-subtitle="{{ 'Kamera #' ~ attempt.camera_id if attempt.camera_id else 'Kamera aniqlanmagan' }}">
+                {% if snapshot %}
+                <img src="{{ snapshot|media_url }}" alt="Noma'lum #{{ attempt.id }} uchun eng yaxshi kadr">
+                {% else %}
+                <span class="unknown-review__image-empty"><i class="bi bi-person-x" aria-hidden="true"></i> Tasvir mavjud emas</span>
+                {% endif %}
+            </button>
+            <div class="unknown-review__body">
+                <div class="d-flex align-items-start justify-content-between gap-2">
+                    <h3 class="h6 mb-0">Noma'lum #{{ attempt.id }}</h3>
+                    <span class="status-chip">{{ attempt.attempt_count|default(0) }} ta</span>
+                </div>
+                <dl class="unknown-review__facts">
+                    <div><dt>Eng yaxshi kadr</dt><dd>{{ "Mavjud" if snapshot else "Mavjud emas" }}</dd></div>
+                    <div><dt>Kamera</dt><dd>{{ "Kamera #" ~ attempt.camera_id if attempt.camera_id else "Aniqlanmagan" }}</dd></div>
+                    <div><dt>Birinchi ko'rilgan</dt><dd>{% if attempt.first_seen %}{{ attempt.first_seen|date("d M Y") }} {{ attempt.first_seen|time("H:i:s") }}{% else %}Mavjud emas{% endif %}</dd></div>
+                    <div><dt>Oxirgi ko'rilgan</dt><dd>{% if attempt.last_seen %}{{ attempt.last_seen|date("d M Y") }} {{ attempt.last_seen|time("H:i:s") }}{% else %}Mavjud emas{% endif %}</dd></div>
+                    <div><dt>Kadrlar soni</dt><dd>{{ attempt.attempt_count|default(0) }} ta</dd></div>
+                </dl>
+                <button class="btn btn-outline-primary btn-sm" type="button" data-airi-evidence
+                    data-evidence-src="{{ snapshot or '' }}" data-evidence-title="Noma'lum #{{ attempt.id }}"
+                    data-evidence-subtitle="Umumiy dalil ko'rinishi">Dalilni ko'rish</button>
+            </div>
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="unknown-review__empty">
+        <i class="bi bi-shield-check" aria-hidden="true"></i>
+        <h2 class="h5">Hozircha noma'lum kuzatuvlar yo'q</h2>
+        <p class="text-muted mb-0">Yangi noma'lum trek paydo bo'lsa, uning eng yaxshi kadri shu yerda ko'rinadi.</p>
+    </div>
+    {% endif %}
+</section>
+{% endblock %}

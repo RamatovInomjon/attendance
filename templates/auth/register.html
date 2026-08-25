@@ -1,0 +1,220 @@
+{% extends "auth/base.html" %}
+{% block title %}Register{% endblock %}
+{% block content %}
+<div class="auth-container">
+    <div class="auth-card">
+        <div class="auth-header">
+            <div class="auth-icon">
+                <i class="bi bi-person-plus"></i>
+            </div>
+            <h2 class="auth-title">Create Account</h2>
+            <p class="auth-subtitle">Join the Attendance Portal system</p>
+        </div>
+        <form method="post" class="auth-form">
+            
+            <div class="form-floating mb-3">
+                <input type="text" class="form-control {% if form.username.errors %}is-invalid{% endif %}" 
+                       id="id_username" name="username" placeholder="Username" 
+                       value="{{ form.username.value|default("") }}" required autofocus
+                       minlength="3" maxlength="150" pattern="[\w.@+-]+">
+                <label for="id_username">
+                    <i class="bi bi-person me-2"></i>Username
+                </label>
+                {% if form.username.errors %}
+                <div class="invalid-feedback">
+                    {{ form.username.errors.0 }}
+                </div>
+                {% else %}
+                <small class="form-text text-muted">3-150 characters. Letters, numbers, and @/./+/-/_ only.</small>
+                {% endif %}
+            </div>
+            <div class="form-floating mb-3">
+                <input type="email" class="form-control {% if form.email.errors %}is-invalid{% endif %}" 
+                       id="id_email" name="email" placeholder="Email" 
+                       value="{{ form.email.value|default("") }}" required>
+                <label for="id_email">
+                    <i class="bi bi-envelope me-2"></i>Email Address
+                </label>
+                {% if form.email.errors %}
+                <div class="invalid-feedback">
+                    {{ form.email.errors.0 }}
+                </div>
+                {% endif %}
+            </div>
+            <div class="form-floating mb-2">
+                <input type="password" class="form-control {% if form.password1.errors %}is-invalid{% endif %}" 
+                       id="id_password1" name="password1" placeholder="Password" required
+                       minlength="8" autocomplete="new-password">
+                <label for="id_password1">
+                    <i class="bi bi-lock me-2"></i>Password
+                </label>
+                {% if form.password1.errors %}
+                <div class="invalid-feedback">
+                    {{ form.password1.errors.0 }}
+                </div>
+                {% endif %}
+            </div>
+            <div class="mb-3">
+                <div class="password-strength-meter">
+                    <div class="password-strength-bar">
+                        <div id="passwordStrengthBar" class="password-strength-fill" style="width: 0%"></div>
+                    </div>
+                    <small id="passwordStrengthText" class="text-muted">Password strength: <span id="strengthLabel">-</span></small>
+                </div>
+                <small class="form-text text-muted d-block mt-1">
+                    Must be at least 8 characters. Use a mix of letters, numbers, and symbols for better security.
+                </small>
+            </div>
+            <div class="form-floating mb-4">
+                <input type="password" class="form-control {% if form.password2.errors %}is-invalid{% endif %}" 
+                       id="id_password2" name="password2" placeholder="Confirm Password" required
+                       minlength="8" autocomplete="new-password">
+                <label for="id_password2">
+                    <i class="bi bi-lock-fill me-2"></i>Confirm Password
+                </label>
+                {% if form.password2.errors %}
+                <div class="invalid-feedback">
+                    {{ form.password2.errors.0 }}
+                </div>
+                {% else %}
+                <div id="passwordMatchIndicator" class="mt-1" style="display: none;">
+                    <small class="text-success"><i class="bi bi-check-circle"></i> Passwords match</small>
+                </div>
+                {% endif %}
+            </div>
+            <button type="submit" class="btn btn-primary btn-lg w-100 auth-submit">
+                <i class="bi bi-person-plus me-2"></i>Create Account
+            </button>
+        </form>
+        <div class="auth-footer">
+            <p class="text-center text-muted mb-0">
+                Already have an account? 
+                <a href="{{ url('auth_app:login') }}" class="auth-link">Sign in here</a>
+            </p>
+        </div>
+    </div>
+</div>
+
+<style>
+.password-strength-meter {
+    margin-top: 0.5rem;
+}
+.password-strength-bar {
+    height: 4px;
+    background-color: #e9ecef;
+    border-radius: 2px;
+    overflow: hidden;
+    margin-bottom: 0.25rem;
+}
+.password-strength-fill {
+    height: 100%;
+    transition: width 0.3s ease, background-color 0.3s ease;
+    border-radius: 2px;
+}
+.password-strength-fill.weak {
+    background-color: #dc3545;
+    width: 33%;
+}
+.password-strength-fill.medium {
+    background-color: #ffc107;
+    width: 66%;
+}
+.password-strength-fill.strong {
+    background-color: #28a745;
+    width: 100%;
+}
+</style>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const password1 = document.getElementById('id_password1');
+    const password2 = document.getElementById('id_password2');
+    const strengthBar = document.getElementById('passwordStrengthBar');
+    const strengthText = document.getElementById('passwordStrengthText');
+    const strengthLabel = document.getElementById('strengthLabel');
+    const matchIndicator = document.getElementById('passwordMatchIndicator');
+    
+    function calculatePasswordStrength(password) {
+        let strength = 0;
+        let feedback = [];
+        
+        // Length check
+        if (password.length >= 8) strength += 1;
+        else feedback.push('At least 8 characters');
+        
+        if (password.length >= 12) strength += 1;
+        
+        // Character variety
+        if (/[a-z]/.test(password)) strength += 1;
+        else feedback.push('lowercase letters');
+        
+        if (/[A-Z]/.test(password)) strength += 1;
+        else feedback.push('uppercase letters');
+        
+        if (/[0-9]/.test(password)) strength += 1;
+        else feedback.push('numbers');
+        
+        if (/[^a-zA-Z0-9]/.test(password)) strength += 1;
+        else feedback.push('special characters');
+        
+        // Determine strength level
+        if (strength <= 2) {
+            return { level: 'weak', score: strength, feedback: feedback };
+        } else if (strength <= 4) {
+            return { level: 'medium', score: strength, feedback: feedback };
+        } else {
+            return { level: 'strong', score: strength, feedback: [] };
+        }
+    }
+    
+    function updatePasswordStrength() {
+        const password = password1.value;
+        
+        if (password.length === 0) {
+            strengthBar.style.width = '0%';
+            strengthBar.className = 'password-strength-fill';
+            strengthLabel.textContent = '-';
+            return;
+        }
+        
+        const strength = calculatePasswordStrength(password);
+        strengthBar.className = `password-strength-fill ${strength.level}`;
+        
+        const labels = {
+            'weak': 'Weak',
+            'medium': 'Medium',
+            'strong': 'Strong'
+        };
+        strengthLabel.textContent = labels[strength.level];
+        strengthLabel.className = strength.level === 'weak' ? 'text-danger' : 
+                                  strength.level === 'medium' ? 'text-warning' : 'text-success';
+    }
+    
+    function checkPasswordMatch() {
+        const p1 = password1.value;
+        const p2 = password2.value;
+        
+        if (p2.length === 0) {
+            matchIndicator.style.display = 'none';
+            return;
+        }
+        
+        if (p1 === p2 && p1.length > 0) {
+            matchIndicator.style.display = 'block';
+            matchIndicator.innerHTML = '<small class="text-success"><i class="bi bi-check-circle"></i> Passwords match</small>';
+        } else {
+            matchIndicator.style.display = 'block';
+            matchIndicator.innerHTML = '<small class="text-danger"><i class="bi bi-x-circle"></i> Passwords do not match</small>';
+        }
+    }
+    
+    password1.addEventListener('input', updatePasswordStrength);
+    password1.addEventListener('input', checkPasswordMatch);
+    password2.addEventListener('input', checkPasswordMatch);
+    
+    // Initial check
+    updatePasswordStrength();
+});
+</script>
+{% endblock %}
+

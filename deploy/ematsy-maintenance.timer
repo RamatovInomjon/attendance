@@ -1,0 +1,9 @@
+[Unit]
+Description=Run EmAtSy maintenance daily after the 04:00 day boundary
+
+[Timer]
+OnCalendar=*-*-* 04:05:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

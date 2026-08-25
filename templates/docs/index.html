@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block title %}Documentation{% endblock %}
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-12 col-xl-10">
+        <div class="card card-shadow mb-4">
+            <div class="card-header bg-white border-0">
+                <h4 class="mb-0">Setup Guide</h4>
+            </div>
+            <div class="card-body">
+                <ol class="mb-3">
+                    <li>Create and activate the virtual environment.</li>
+                    <li>Install dependencies with <code>pip install -r requirements.txt</code>.</li>
+                    <li>Run <code>python manage.py makemigrations</code> and <code>python manage.py migrate</code>.</li>
+                    <li>Start Redis (<code>redis-server</code> or Docker).</li>
+                    <li>Launch the dev server with <code>python manage.py runserver</code>.</li>
+                </ol>
+                <p class="mb-0">Use <code>setup.sh</code> for an automated flow.</p>
+            </div>
+        </div>
+
+        <div class="card card-shadow mb-4">
+            <div class="card-header bg-white border-0 d-flex justify-content-between align-items-center">
+                <h4 class="mb-0">API Reference</h4>
+                <span class="badge bg-primary">Base URL: /api/</span>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-sm">
+                        <thead>
+                        <tr>
+                            <th>Endpoint</th>
+                            <th>Method</th>
+                            <th>Description</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        <tr>
+                            <td><code>/api/employees/</code></td>
+                            <td>GET/POST</td>
+                            <td>List or create employees.</td>
+                        </tr>
+                        <tr>
+                            <td><code>/api/attendance-records/</code></td>
+                            <td>GET</td>
+                            <td>Historical recognition events (supports <code>?search=&lt;name&gt;</code>).</td>
+                        </tr>
+                        <tr>
+                            <td><code>/api/attendance-records/recent/</code></td>
+                            <td>GET</td>
+                            <td>Latest 20 recognition logs.</td>
+                        </tr>
+                        <tr>
+                            <td><code>/api/daily-attendance/</code></td>
+                            <td>GET</td>
+                            <td>Aggregated daily attendance.</td>
+                        </tr>
+                        <tr>
+                            <td><code>/api/camera-config/</code></td>
+                            <td>GET/POST/PATCH</td>
+                            <td>Manage camera settings and sync with <code>camera_config.json</code>.</td>
+                        </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <p class="text-muted mb-0">All endpoints require authentication (session or basic auth).</p>
+            </div>
+        </div>
+
+        <div class="card card-shadow mb-4">
+            <div class="card-header bg-white border-0">
+                <h4 class="mb-0">UI Usage Guide</h4>
+            </div>
+            <div class="card-body">
+                <ul>
+                    <li><strong>Dashboard:</strong> Monitor real-time stats, live recognition log, and charts.</li>
+                    <li><strong>Employees:</strong> Manage employee profiles, edit details, and view attendance history.</li>
+                    <li><strong>Register:</strong> Capture webcam photo, preview, and save embeddings.</li>
+                    <li><strong>Recognition:</strong> Stream live video, visualize detections, and track daily summary.</li>
+                    <li><strong>Attendance:</strong> Filter records by date/department and export CSV.</li>
+                    <li><strong>Camera Settings:</strong> Tweak device, resolution, FPS, brightness, contrast, and sharpness.</li>
+                </ul>
+            </div>
+        </div>
+
+        <div class="card card-shadow">
+            <div class="card-header bg-white border-0">
+                <h4 class="mb-0">Deployment Checklist</h4>
+            </div>
+            <div class="card-body">
+                <ul class="mb-3">
+                    <li>Set <code>DEBUG=False</code> and configure <code>ALLOWED_HOSTS</code>.</li>
+                    <li>Switch DATABASE_URL to PostgreSQL or MySQL.</li>
+                    <li>Run <code>python manage.py collectstatic</code> and serve static files via CDN/web server.</li>
+                    <li>Use Daphne or Uvicorn with ASGI for Channels/WebSockets.</li>
+                    <li>Secure Redis and configure persistent storage for media.</li>
+                    <li>Configure HTTPS (nginx/Apache) and environment secrets.</li>
+                </ul>
+                <p class="text-muted mb-0">Refer to the README for extended setup and troubleshooting tips.</p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+

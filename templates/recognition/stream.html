@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Live Stream{% endblock %}
+{% block content %}
+<div class="container-fluid p-4">
+    <div class="page-header mb-4">
+        <h1>Live Camera Stream</h1>
+        <p class="text-muted">Full-screen camera feed with face recognition</p>
+    </div>
+    <div class="row">
+        <div class="col-12">
+            <div class="video-card">
+                <canvas id="streamCanvas" class="w-100"
+                    style="background: #111; border-radius: 8px; min-height: 600px;"></canvas>
+                <div class="video-hud mt-2">
+                    <span class="stream-time">--:--:--</span> |
+                    <span class="stream-date">--</span> |
+                    FPS: <span class="stream-fps">--</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+{% block extra_js %}
+<script>
+    (function () {
+        const canvas = document.getElementById('streamCanvas');
+        const ctx = canvas.getContext('2d');
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(`${protocol}//${window.location.host}/ws/camera/primary/`);
+
+        let frameCount = 0;
+        let lastFrameTime = 0;
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.type === 'frame' && data.data) {
+                const img = new Image();
+                img.onload = () => {
+                    if (canvas.width !== img.width || canvas.height !== img.height) {
+                        canvas.width = img.width;
+                        canvas.height = img.height;
+                    }
+                    ctx.drawImage(img, 0, 0);
+
+                    frameCount++;
+                    const now = performance.now();
+                    if (now - lastFrameTime >= 1000) {
+                        document.querySelector('.stream-fps').textContent = frameCount;
+                        frameCount = 0;
+                        lastFrameTime = now;
+                    }
+
+                    const date = new Date();
+                    document.querySelector('.stream-time').textContent = date.toLocaleTimeString();
+                    document.querySelector('.stream-date').textContent = date.toLocaleDateString();
+                };
+                img.src = 'data:image/jpeg;base64,' + data.data;
+            }
+        };
+    })();
+</script>
+{% endblock %}

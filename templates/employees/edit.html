@@ -1,0 +1,176 @@
+{% extends "base.html" %}
+{% block title %}Edit Employee{% endblock %}
+{% block content %}
+<div class="row g-4 justify-content-center">
+    <div class="col-12 col-lg-10 col-xl-8">
+        <div class="card card-shadow">
+            <div class="card-header bg-white border-0">
+                <h5 class="mb-0">Edit Details</h5>
+            </div>
+            <div class="card-body">
+                <form method="post" id="editEmployeeForm">
+                    
+                    {{ form.captured_image }}
+                    <div class="row g-3">
+                        <div class="col-12">
+                            <label class="form-label fw-semibold">
+                                <i class="bi bi-person me-2"></i>Full Name
+                            </label>
+                            {{ form.full_name|add_class("form-control") }}
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">
+                                <i class="bi bi-briefcase me-2"></i>Position
+                            </label>
+                            {{ form.position|add_class("form-control") }}
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">
+                                <i class="bi bi-building me-2"></i>Department
+                            </label>
+                            {{ form.department|add_class("form-control") }}
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">
+                                <i class="bi bi-telephone me-2"></i>Phone Number
+                            </label>
+                            {{ form.phone_number|add_class("form-control") }}
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold">
+                                <i class="bi bi-envelope me-2"></i>Email
+                            </label>
+                            {{ form.email|add_class("form-control") }}
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label fw-semibold">
+                                <i class="bi bi-sticky me-2"></i>Notes
+                            </label>
+                            {{ form.notes|add_class("form-control") }}
+                        </div>
+                    </div>
+                    <div class="d-flex justify-content-end mt-4">
+                        <button class="btn btn-primary btn-lg" type="submit">
+                            <i class="bi bi-check-circle me-2"></i>Save Changes
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+    <div class="col-12 col-lg-10 col-xl-8">
+        <div class="card card-shadow">
+            <div class="card-header bg-white border-0">
+                <h5 class="mb-0">Update Photo</h5>
+            </div>
+            <div class="card-body text-center">
+                {% if object.image %}
+                    <img src="{{ object.image }}" alt="{{ object.full_name }}" class="img-fluid mb-3" width="320" loading="lazy" style="border-radius: 4px; border: 2px solid #e0e0e0; object-fit: cover; image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                    <p class="text-muted small mb-3">Current photo (optional: capture new photo below)</p>
+                {% endif %}
+                <div id="cameraSection" style="display: none;">
+                    <video id="webcam" width="100%" autoplay playsinline class="rounded mb-3"></video>
+                    <canvas id="snapshot" width="640" height="480" class="d-none"></canvas>
+                    <div id="previewContainer" class="mb-3 d-none">
+                        <img id="previewImage" class="img-fluid rounded" alt="Preview">
+                    </div>
+                    <button class="btn btn-outline-primary me-2" type="button" id="captureBtn">Capture New Photo</button>
+                    <button class="btn btn-outline-secondary" type="button" id="retakeBtn" disabled>Retake</button>
+                </div>
+                <button class="btn btn-outline-primary" type="button" id="showCameraBtn">
+                    <i class="bi bi-camera me-2"></i>Update Photo (Optional)
+                </button>
+                <p class="text-muted small mt-2 mb-0">Note: You can update employee details without capturing a new photo. The current photo and face embeddings will be kept. Click "Update Photo" only if you want to change the photo.</p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const webcam = document.getElementById('webcam');
+const canvas = document.getElementById('snapshot');
+const previewContainer = document.getElementById('previewContainer');
+const previewImage = document.getElementById('previewImage');
+const captureBtn = document.getElementById('captureBtn');
+const retakeBtn = document.getElementById('retakeBtn');
+const hiddenInput = document.getElementById('id_captured_image');
+
+let cameraStream = null;
+
+async function initCamera() {
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        webcam.srcObject = stream;
+        cameraStream = stream;
+    } catch (error) {
+        console.error('Camera error', error);
+        alert('Failed to access camera. Please check camera permissions.');
+    }
+}
+
+function stopCamera() {
+    if (cameraStream) {
+        cameraStream.getTracks().forEach(track => track.stop());
+        cameraStream = null;
+        if (webcam) {
+            webcam.srcObject = null;
+        }
+    }
+}
+
+// Show camera section when "Update Photo" button is clicked
+const showCameraBtn = document.getElementById('showCameraBtn');
+const cameraSection = document.getElementById('cameraSection');
+
+showCameraBtn?.addEventListener('click', () => {
+    if (cameraSection) {
+        const isHidden = cameraSection.style.display === 'none' || !cameraSection.style.display;
+        if (isHidden) {
+            cameraSection.style.display = 'block';
+            initCamera();
+            showCameraBtn.innerHTML = '<i class="bi bi-camera-video-off me-2"></i>Hide Camera';
+        } else {
+            cameraSection.style.display = 'none';
+            stopCamera();
+            showCameraBtn.innerHTML = '<i class="bi bi-camera me-2"></i>Update Photo (Optional)';
+        }
+    }
+});
+
+captureBtn?.addEventListener('click', () => {
+    const context = canvas.getContext('2d');
+    context.drawImage(webcam, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL('image/jpeg');
+    hiddenInput.value = dataUrl;
+    previewImage.src = dataUrl;
+    previewContainer.classList.remove('d-none');
+    retakeBtn.disabled = false;
+    captureBtn.disabled = false;
+});
+
+retakeBtn?.addEventListener('click', () => {
+    hiddenInput.value = '';
+    previewContainer.classList.add('d-none');
+    retakeBtn.disabled = true;
+    captureBtn.disabled = false;
+});
+
+// Allow form submission without captured image (for editing name/other fields only)
+const editForm = document.getElementById('editEmployeeForm');
+if (editForm) {
+    editForm.addEventListener('submit', (e) => {
+        // Stop camera before form submission
+        stopCamera();
+        // Form can be submitted even without captured_image
+        // The view will only update image if captured_image is provided
+        // This allows editing name/other fields without requiring new photo
+        // Old face embeddings will be kept if no new image is provided
+    });
+}
+
+// Don't initialize camera automatically - only when user clicks "Update Photo"
+</script>
+{% endblock %}
+

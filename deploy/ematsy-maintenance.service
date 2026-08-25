@@ -1,0 +1,8 @@
+[Unit]
+Description=EmAtSy daily maintenance
+
+[Service]
+Type=oneshot
+User=inomjon
+WorkingDirectory=/home/inomjon/projectAI/face_rec/face_recognition_airi
+ExecStart=/home/inomjon/anaconda3/envs/yolo/bin/python scripts/maintenance.py

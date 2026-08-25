@@ -1,0 +1,96 @@
+"""WebSocket camera streaming, in the shape the original live page expects.
+
+`templates/recognition/live.html` connects to `/ws/camera/<id>/` and draws
+`{type:"frame", data:<base64 jpeg>}` messages onto a canvas.  This serves that
+contract from the v3 workers.
+
+Each connection renders its own frame from the worker's latest processed frame,
+so opening a second viewer does not steal the first one's frames — the previous
+implementation had every consumer pulling from one shared queue.
+"""
+from __future__ import annotations
+
+import asyncio
+import base64
+import logging
+
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+from app.runtime import runtime
+
+log = logging.getLogger(__name__)
+router = APIRouter()
+
+FPS = 10
+
+
+async def _pump(ws: WebSocket, camera_id: int):
+    worker = runtime.workers.get(camera_id)
+    if worker is None:
+        await ws.close(code=4004, reason="camera not running")
+        return
+    try:
+        while True:
+            jpg = await asyncio.to_thread(worker.render)
+            if jpg:
+                await ws.send_json({
+                    "type": "frame",
+                    "data": base64.b64encode(jpg).decode("ascii"),
+                    "camera_id": camera_id,
+                    "fps": round(worker.source.fps, 1),
+                    "stale": worker.source.is_stale,
+                })
+            await asyncio.sleep(1 / FPS)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:                       # client vanished mid-send
+        log.debug("ws camera %s ended: %s", camera_id, e)
+
+
+def _resolve(camera_id: str) -> int | None:
+    if camera_id.isdigit():
+        return int(camera_id)
+    if camera_id in ("primary", "default"):
+        ids = sorted(runtime.workers)
+        return ids[0] if ids else None
+    for w in runtime.workers.values():          # allow /ws/camera/entrance/
+        if w.name.lower() == camera_id.lower() or w.role.value.lower() == camera_id.lower():
+            return w.camera_id
+    return None
+
+
+@router.websocket("/ws/camera/{camera_id}/")
+async def camera_ws(ws: WebSocket, camera_id: str):
+    await ws.accept()
+    cid = _resolve(camera_id)
+    if cid is None:
+        await ws.close(code=4004, reason="unknown camera")
+        return
+    await _pump(ws, cid)
+
+
+@router.websocket("/ws/camera/{camera_id}")
+async def camera_ws_noslash(ws: WebSocket, camera_id: str):
+    await camera_ws(ws, camera_id)
+
+
+@router.websocket("/ws/attendance/")
+async def attendance_ws(ws: WebSocket):
+    """Pushes recognition events to the live page as they happen."""
+    await ws.accept()
+    seen: set[tuple] = set()
+    try:
+        while True:
+            for ev in runtime.events(12):
+                key = (ev["ts"], ev["name"], ev["camera"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                await ws.send_json({"type": "event", **ev})
+            if len(seen) > 400:
+                seen = set(list(seen)[-200:])
+            await asyncio.sleep(2)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        log.debug("attendance ws ended: %s", e)

@@ -1,0 +1,324 @@
+{% extends "auth/base.html" %}
+{% block title %}AIRI - Login{% endblock %}
+{% block messages %}{% endblock %}
+{% block extra_css %}
+<style>
+    * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+    }
+
+    body {
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        min-height: 100vh;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        padding: 20px;
+        position: relative;
+        overflow: hidden;
+    }
+
+    /* Animated background particles */
+    .particle {
+        position: absolute;
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 50%;
+        animation: float 15s infinite ease-in-out;
+    }
+
+    .particle:nth-child(1) {
+        width: 80px;
+        height: 80px;
+        top: 10%;
+        left: 10%;
+        animation-delay: 0s;
+    }
+
+    .particle:nth-child(2) {
+        width: 120px;
+        height: 120px;
+        top: 70%;
+        left: 80%;
+        animation-delay: 2s;
+    }
+
+    .particle:nth-child(3) {
+        width: 60px;
+        height: 60px;
+        top: 30%;
+        left: 70%;
+        animation-delay: 4s;
+    }
+
+    .particle:nth-child(4) {
+        width: 100px;
+        height: 100px;
+        top: 80%;
+        left: 20%;
+        animation-delay: 1s;
+    }
+
+    .particle:nth-child(5) {
+        width: 90px;
+        height: 90px;
+        top: 50%;
+        left: 5%;
+        animation-delay: 3s;
+    }
+
+    .particle:nth-child(6) {
+        width: 70px;
+        height: 70px;
+        top: 15%;
+        left: 90%;
+        animation-delay: 5s;
+    }
+
+    @keyframes float {
+        0%, 100% {
+            transform: translate(0, 0) scale(1);
+            opacity: 0.3;
+        }
+        33% {
+            transform: translate(30px, -30px) scale(1.1);
+            opacity: 0.5;
+        }
+        66% {
+            transform: translate(-20px, 20px) scale(0.9);
+            opacity: 0.4;
+        }
+    }
+
+    /* Mesh gradient overlay */
+    body::before {
+        content: '';
+        position: absolute;
+        width: 100%;
+        height: 100%;
+        background: 
+            radial-gradient(circle at 20% 50%, rgba(120, 119, 198, 0.3) 0%, transparent 50%),
+            radial-gradient(circle at 80% 80%, rgba(99, 102, 241, 0.3) 0%, transparent 50%),
+            radial-gradient(circle at 40% 20%, rgba(168, 85, 247, 0.2) 0%, transparent 50%);
+        animation: meshMove 10s ease-in-out infinite;
+    }
+
+    @keyframes meshMove {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.8; }
+    }
+
+    .auth-container {
+        background: rgba(255, 255, 255, 0.98);
+        backdrop-filter: blur(20px);
+        border-radius: 24px;
+        box-shadow: 
+            0 25px 70px rgba(0, 0, 0, 0.3),
+            0 0 0 1px rgba(255, 255, 255, 0.2) inset;
+        max-width: 420px;
+        width: 100%;
+        padding: 50px 40px;
+        animation: slideIn 0.6s ease-out;
+        position: relative;
+        z-index: 10;
+    }
+
+    @keyframes slideIn {
+        from {
+            opacity: 0;
+            transform: translateY(-40px) scale(0.95);
+        }
+        to {
+            opacity: 1;
+            transform: translateY(0) scale(1);
+        }
+    }
+
+    .logo-container {
+        display: flex;
+        justify-content: center;
+        margin-bottom: 35px;
+    }
+
+    .logo {
+        width: 100px;
+        height: 100px;
+    }
+
+    .logo svg {
+        width: 100%;
+        height: 100%;
+        filter: drop-shadow(0 4px 12px rgba(102, 126, 234, 0.4));
+    }
+
+    h1 {
+        text-align: center;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        font-size: 32px;
+        margin-bottom: 12px;
+        font-weight: 700;
+    }
+
+    .subtitle {
+        text-align: center;
+        color: #64748b;
+        font-size: 15px;
+        margin-bottom: 12px;
+    }
+
+    .institute-name {
+        text-align: center;
+        color: #475569;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        margin-bottom: 40px;
+        line-height: 1.6;
+        letter-spacing: 0.5px;
+    }
+
+    .form-group {
+        margin-bottom: 25px;
+    }
+
+    label {
+        display: block;
+        color: #475569;
+        font-size: 14px;
+        font-weight: 600;
+        margin-bottom: 10px;
+    }
+
+    .input-wrapper {
+        position: relative;
+    }
+
+    .input-icon {
+        position: absolute;
+        left: 18px;
+        top: 50%;
+        transform: translateY(-50%);
+        font-size: 20px;
+        z-index: 2;
+    }
+
+    input {
+        width: 100%;
+        padding: 15px 20px 15px 55px;
+        border: 2px solid #e2e8f0;
+        border-radius: 12px;
+        font-size: 15px;
+        transition: all 0.3s ease;
+        outline: none;
+        background: white;
+    }
+
+    input:focus {
+        border-color: #667eea;
+        box-shadow: 0 0 0 4px rgba(102, 126, 234, 0.15);
+        transform: translateY(-2px);
+    }
+
+    input::placeholder {
+        color: #cbd5e1;
+    }
+
+    .btn {
+        width: 100%;
+        padding: 16px;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border: none;
+        border-radius: 12px;
+        font-size: 16px;
+        font-weight: 700;
+        cursor: pointer;
+        transition: all 0.4s ease;
+        margin-top: 15px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        box-shadow: 0 10px 25px rgba(102, 126, 234, 0.3);
+    }
+
+    .btn:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 15px 35px rgba(102, 126, 234, 0.4);
+    }
+
+    .btn:active {
+        transform: translateY(-1px);
+    }
+
+    .decorative-line {
+        height: 3px;
+        background: linear-gradient(90deg, transparent, #667eea, transparent);
+        margin: 30px 0 20px 0;
+        border-radius: 10px;
+    }
+
+    .error-message {
+        background: #fee;
+        color: #c33;
+        padding: 12px;
+        border-radius: 8px;
+        margin-bottom: 20px;
+        font-size: 14px;
+        border: 1px solid #fcc;
+    }
+</style>
+{% endblock %}
+{% block content %}
+<div class="particle"></div>
+<div class="particle"></div>
+<div class="particle"></div>
+<div class="particle"></div>
+<div class="particle"></div>
+<div class="particle"></div>
+
+<div class="auth-container">
+    <div class="logo-container">
+        <div class="logo">
+            <img src="/static/image.png" alt="AIRI Logo" style="width: 100%; height: 100%; object-fit: contain;">
+        </div>
+    </div>
+
+    <h1>Welcome Back</h1>
+    <p class="subtitle">Sign in to access the Attendance Portal</p>
+    <p class="institute-name">RAQAMLI TEXNOLOGIYALAR VA SUN'IY INTELLEKTNI<br>RIVOJLANTIRISH ILMIY-TADQIQOT INSTITUTI<br>AIRI</p>
+
+    <div class="decorative-line"></div>
+
+    {% if messages %}
+        {% for message in messages %}
+            {% if message.tags == 'error' %}
+            <div class="error-message">{{ message }}</div>
+            {% endif %}
+        {% endfor %}
+    {% endif %}
+
+    <form method="post" id="loginForm">
+            
+        <div class="form-group">
+            <label for="username">👤 Username</label>
+            <div class="input-wrapper">
+                <span class="input-icon">👤</span>
+                <input type="text" id="username" name="username" placeholder="admin" required autofocus>
+            </div>
+        </div>
+        <div class="form-group">
+            <label for="password">🔒 Password</label>
+            <div class="input-wrapper">
+                <span class="input-icon">🔒</span>
+                <input type="password" id="password" name="password" placeholder="••••" required>
+            </div>
+        </div>
+        <button type="submit" class="btn">🔐 SIGN IN</button>
+    </form>
+</div>
+{% endblock %}
+

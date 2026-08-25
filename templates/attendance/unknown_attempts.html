@@ -1,0 +1,691 @@
+{% extends "base.html" %}
+{% block title %}Unknown Attempts{% endblock %}
+
+{% block extra_css %}
+<style>
+    .unknown-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+        gap: 1.5rem;
+        margin-top: 1.5rem;
+    }
+    
+    .unknown-card {
+        background: white;
+        border-radius: 12px;
+        overflow: hidden;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        transition: transform 0.2s, box-shadow 0.2s;
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+    }
+    
+    .unknown-card:hover {
+        transform: translateY(-4px);
+        box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+    }
+    
+    .unknown-card.selected {
+        border: 2px solid #dc3545;
+        box-shadow: 0 4px 16px rgba(220, 53, 69, 0.3);
+    }
+    
+    .progress-container {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        background: rgba(0, 0, 0, 0.7);
+        z-index: 10000;
+        display: none;
+        padding: 2rem;
+    }
+    
+    .progress-container.show {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+    }
+    
+    .progress-card {
+        background: white;
+        border-radius: 12px;
+        padding: 2rem;
+        min-width: 400px;
+        max-width: 600px;
+    }
+    
+    .unknown-card-image {
+        width: 100%;
+        height: 280px;
+        object-fit: contain;
+        object-position: center;
+        background: #ffffff;
+        cursor: pointer;
+        transition: transform 0.3s;
+        display: block;
+        padding: 0;
+        margin: 0;
+    }
+    
+    .unknown-card-image:hover {
+        transform: scale(1.05);
+    }
+    
+    .unknown-card-body {
+        padding: 1rem;
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+    }
+    
+    .unknown-card-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: start;
+        margin-bottom: 0.5rem;
+        gap: 0.5rem;
+    }
+    
+    .unknown-card-id {
+        font-weight: 600;
+        color: #333;
+        font-size: 1rem;
+        word-break: break-word;
+        flex: 1;
+        min-width: 0;
+    }
+    
+    .unknown-card-badge {
+        background: #dc3545;
+        color: white;
+        padding: 0.25rem 0.5rem;
+        border-radius: 4px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        white-space: nowrap;
+        flex-shrink: 0;
+    }
+    
+    .unknown-card-info {
+        font-size: 0.875rem;
+        color: #666;
+        margin-bottom: 0.25rem;
+        word-wrap: break-word;
+        overflow-wrap: break-word;
+        line-height: 1.4;
+    }
+    
+    .unknown-card-info strong {
+        display: inline-block;
+        min-width: 80px;
+    }
+    
+    .unknown-card-actions {
+        display: flex;
+        gap: 0.5rem;
+        margin-top: auto;
+        padding-top: 0.75rem;
+        border-top: 1px solid #eee;
+    }
+    
+    .btn-save-image {
+        flex: 1;
+        font-size: 0.875rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    
+    .snapshot-placeholder {
+        width: 100%;
+        height: 280px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background: #ffffff;
+        color: #999;
+        font-size: 0.875rem;
+        border: none;
+    }
+    
+    .snapshot-placeholder i {
+        margin-bottom: 0.5rem;
+    }
+    
+    .modal-image {
+        max-width: 100%;
+        max-height: 80vh;
+        border-radius: 8px;
+    }
+    
+    .stats-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border-radius: 12px;
+        padding: 1.5rem;
+    }
+    
+    .stats-card h3 {
+        font-size: 2rem;
+        font-weight: 700;
+        margin: 0;
+    }
+    
+    .stats-card p {
+        margin: 0.5rem 0 0 0;
+        opacity: 0.9;
+    }
+</style>
+{% endblock %}
+{% block content %}
+<div class="row g-4 mb-4">
+    <div class="col-12 col-md-4">
+        <div class="stats-card">
+            <h3>{{ total_attempts }}</h3>
+            <p>Total Unknown Faces</p>
+        </div>
+    </div>
+    <div class="col-12 col-md-4">
+        <div class="stats-card" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
+            <h3>{{ today_attempts }}</h3>
+            <p>Today's Unknown Faces</p>
+        </div>
+    </div>
+    <div class="col-12 col-md-4">
+        <div class="stats-card" style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);">
+            <h3>{{ attempts|length }}</h3>
+            <p>Showing in This View</p>
+        </div>
+    </div>
+</div>
+
+    <div class="card card-shadow">
+    <div class="card-header bg-white border-0 d-flex justify-content-between align-items-center">
+        <div>
+            <h4 class="mb-0 fw-bold">Unknown Face Attempts</h4>
+            <small class="text-muted">View and manage unknown face detections</small>
+        </div>
+        <div class="d-flex gap-2">
+            <button id="selectAllBtn" class="btn btn-outline-primary" onclick="toggleSelectAll()">
+                <i class="bi bi-check-square me-2"></i>Select All
+            </button>
+            <button id="deleteSelectedBtn" class="btn btn-danger" onclick="bulkDeleteSelected()" disabled>
+                <i class="bi bi-trash me-2"></i>Delete Selected (<span id="selectedCount">0</span>)
+            </button>
+            <a href="{{ url('attendance:list') }}" class="btn btn-outline-secondary">
+                <i class="bi bi-arrow-left me-2"></i>Back to Attendance
+            </a>
+        </div>
+    </div>
+    <div class="card-body">
+        <form method="get" class="row g-3 mb-4 p-3 bg-light rounded">
+            <div class="col-md-3">
+                <label class="form-label fw-semibold small">{{ filter_form.start_date.label }}</label>
+                {{ filter_form.start_date }}
+            </div>
+            <div class="col-md-3">
+                <label class="form-label fw-semibold small">{{ filter_form.end_date.label }}</label>
+                {{ filter_form.end_date }}
+            </div>
+            <div class="col-md-2">
+                <label class="form-label fw-semibold small">{{ filter_form.start_time.label }}</label>
+                {{ filter_form.start_time }}
+            </div>
+            <div class="col-md-2">
+                <label class="form-label fw-semibold small">{{ filter_form.end_time.label }}</label>
+                {{ filter_form.end_time }}
+            </div>
+            <div class="col-md-2">
+                <label class="form-label fw-semibold small">{{ filter_form.camera_id.label }}</label>
+                {{ filter_form.camera_id }}
+            </div>
+            <div class="col-md-3">
+                <label class="form-label fw-semibold small">{{ filter_form.min_attempts.label }}</label>
+                {{ filter_form.min_attempts }}
+            </div>
+            <div class="col-12 text-end">
+                <button class="btn btn-primary" type="submit">
+                    <i class="bi bi-funnel me-2"></i>Apply Filters
+                </button>
+                <a href="{{ url('attendance:unknown') }}" class="btn btn-outline-secondary">
+                    <i class="bi bi-x-circle me-2"></i>Clear
+                </a>
+            </div>
+        </form>
+
+        {% if attempts %}
+        <div class="unknown-grid">
+            {% for attempt in attempts %}
+            <div class="unknown-card" data-attempt-id="{{ attempt.id }}">
+                <div class="position-absolute top-0 start-0 m-2">
+                    <input type="checkbox" class="form-check-input attempt-checkbox" 
+                           value="{{ attempt.id }}" 
+                           onchange="updateSelectedCount()"
+                           style="width: 1.2rem; height: 1.2rem; cursor: pointer; background-color: white; border: 2px solid #dc3545;">
+                </div>
+                {% if attempt.latest_record and attempt.latest_record.snapshot %}
+                <img src="{{ attempt.latest_record.snapshot.url }}" 
+                     alt="Unknown face #{{ attempt.id }}" 
+                     class="unknown-card-image"
+                     onclick="showImageModal('{{ attempt.latest_record.snapshot.url }}', 'Unknown Face #{{ attempt.id }}')">
+                {% else %}
+                <div class="snapshot-placeholder">
+                    <i class="bi bi-image" style="font-size: 2rem; opacity: 0.3;"></i>
+                    <span class="ms-2">No snapshot</span>
+                </div>
+                {% endif %}
+                <div class="unknown-card-body">
+                    <div class="unknown-card-header">
+                        <span class="unknown-card-id">Unknown Face #{{ attempt.id }}</span>
+                        <span class="unknown-card-badge">{{ attempt.attempt_count }} attempt{{ attempt.attempt_count|pluralize }}</span>
+                    </div>
+                    <div class="unknown-card-info">
+                        <i class="bi bi-calendar3 me-1"></i>
+                        <strong>First seen:</strong> {{ attempt.first_seen|date("M d, Y H:i") }}
+                    </div>
+                    <div class="unknown-card-info">
+                        <i class="bi bi-clock me-1"></i>
+                        <strong>Last seen:</strong> {{ attempt.last_seen|date("M d, Y H:i") }}
+                    </div>
+                    {% if attempt.camera_id %}
+                    <div class="unknown-card-info">
+                        <i class="bi bi-camera-video me-1"></i>
+                        <strong>Camera:</strong> {{ attempt.camera_id }}
+                    </div>
+                    {% endif %}
+                    <div class="unknown-card-actions">
+                        {% if attempt.latest_record and attempt.latest_record.snapshot %}
+                        <button class="btn btn-primary btn-save-image" onclick="saveImage('{{ attempt.latest_record.snapshot.url }}', 'unknown_face_{{ attempt.id }}_{{ attempt.last_seen|date("Ymd_His") }}.jpg')">
+                            <i class="bi bi-download me-1"></i>Save Image
+                        </button>
+                        {% else %}
+                        <button class="btn btn-secondary btn-save-image" disabled>
+                            <i class="bi bi-download me-1"></i>No Image
+                        </button>
+                        {% endif %}
+                        <button class="btn btn-danger" onclick="deleteAttempt({{ attempt.id }})" title="Delete this unknown face attempt">
+                            <i class="bi bi-trash"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+
+        <!-- Pagination -->
+        {% if is_paginated %}
+        <nav aria-label="Page navigation" class="mt-4">
+            <ul class="pagination justify-content-center">
+                {% if page_obj.has_previous %}
+                <li class="page-item">
+                    <a class="page-link" href="?page=1{% if request.query_params.get("start_date") %}&start_date={{ request.query_params.get("start_date") }}{% endif %}{% if request.query_params.get("end_date") %}&end_date={{ request.query_params.get("end_date") }}{% endif %}{% if request.query_params.get("start_time") %}&start_time={{ request.query_params.get("start_time") }}{% endif %}{% if request.query_params.get("end_time") %}&end_time={{ request.query_params.get("end_time") }}{% endif %}{% if request.query_params.get("camera_id") %}&camera_id={{ request.query_params.get("camera_id") }}{% endif %}{% if request.query_params.get("min_attempts") %}&min_attempts={{ request.query_params.get("min_attempts") }}{% endif %}">First</a>
+                </li>
+                <li class="page-item">
+                    <a class="page-link" href="?page={{ page_obj.previous_page_number }}{% if request.query_params.get("start_date") %}&start_date={{ request.query_params.get("start_date") }}{% endif %}{% if request.query_params.get("end_date") %}&end_date={{ request.query_params.get("end_date") }}{% endif %}{% if request.query_params.get("start_time") %}&start_time={{ request.query_params.get("start_time") }}{% endif %}{% if request.query_params.get("end_time") %}&end_time={{ request.query_params.get("end_time") }}{% endif %}{% if request.query_params.get("camera_id") %}&camera_id={{ request.query_params.get("camera_id") }}{% endif %}{% if request.query_params.get("min_attempts") %}&min_attempts={{ request.query_params.get("min_attempts") }}{% endif %}">Previous</a>
+                </li>
+                {% endif %}
+                
+                <li class="page-item active">
+                    <span class="page-link">Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
+                </li>
+                
+                {% if page_obj.has_next %}
+                <li class="page-item">
+                    <a class="page-link" href="?page={{ page_obj.next_page_number }}{% if request.query_params.get("start_date") %}&start_date={{ request.query_params.get("start_date") }}{% endif %}{% if request.query_params.get("end_date") %}&end_date={{ request.query_params.get("end_date") }}{% endif %}{% if request.query_params.get("start_time") %}&start_time={{ request.query_params.get("start_time") }}{% endif %}{% if request.query_params.get("end_time") %}&end_time={{ request.query_params.get("end_time") }}{% endif %}{% if request.query_params.get("camera_id") %}&camera_id={{ request.query_params.get("camera_id") }}{% endif %}{% if request.query_params.get("min_attempts") %}&min_attempts={{ request.query_params.get("min_attempts") }}{% endif %}">Next</a>
+                </li>
+                <li class="page-item">
+                    <a class="page-link" href="?page={{ page_obj.paginator.num_pages }}{% if request.query_params.get("start_date") %}&start_date={{ request.query_params.get("start_date") }}{% endif %}{% if request.query_params.get("end_date") %}&end_date={{ request.query_params.get("end_date") }}{% endif %}{% if request.query_params.get("start_time") %}&start_time={{ request.query_params.get("start_time") }}{% endif %}{% if request.query_params.get("end_time") %}&end_time={{ request.query_params.get("end_time") }}{% endif %}{% if request.query_params.get("camera_id") %}&camera_id={{ request.query_params.get("camera_id") }}{% endif %}{% if request.query_params.get("min_attempts") %}&min_attempts={{ request.query_params.get("min_attempts") }}{% endif %}">Last</a>
+                </li>
+                {% endif %}
+            </ul>
+        </nav>
+        {% endif %}
+        {% else %}
+        <div class="text-center py-5">
+            <i class="bi bi-inbox" style="font-size: 4rem; color: #ccc;"></i>
+            <p class="text-muted mt-3">No unknown face attempts found.</p>
+            {% if request.GET %}
+            <a href="{{ url('attendance:unknown') }}" class="btn btn-outline-primary">Clear Filters</a>
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Progress Modal -->
+<div id="progressContainer" class="progress-container">
+    <div id="progressCard" class="progress-card">
+        <h5 class="mb-3">Deleting Unknown Face Attempts</h5>
+        <div class="progress mb-3" style="height: 25px;">
+            <div id="progressBar" class="progress-bar progress-bar-striped progress-bar-animated" 
+                 role="progressbar" 
+                 style="width: 0%" 
+                 aria-valuenow="0" 
+                 aria-valuemin="0" 
+                 aria-valuemax="100">
+            </div>
+        </div>
+        <p id="progressText" class="text-center mb-0">Preparing...</p>
+    </div>
+</div>
+
+<!-- Image Modal -->
+<div class="modal fade" id="imageModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="imageModalTitle">Unknown Face</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body text-center">
+                <img id="modalImage" src="" alt="" class="modal-image">
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                <button type="button" class="btn btn-primary" id="modalSaveBtn" onclick="saveImageFromModal()">
+                    <i class="bi bi-download me-1"></i>Save Image
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+let currentImageUrl = '';
+let currentImageName = '';
+
+function showImageModal(imageUrl, title) {
+    currentImageUrl = imageUrl;
+    currentImageName = title.replace(/\s+/g, '_').toLowerCase() + '.jpg';
+    document.getElementById('imageModalTitle').textContent = title;
+    document.getElementById('modalImage').src = imageUrl;
+    const modal = new bootstrap.Modal(document.getElementById('imageModal'));
+    modal.show();
+}
+
+function saveImageFromModal() {
+    if (currentImageUrl) {
+        saveImage(currentImageUrl, currentImageName);
+    }
+}
+
+function saveImage(imageUrl, filename) {
+    // Create a temporary anchor element to trigger download
+    const link = document.createElement('a');
+    link.href = imageUrl;
+    link.download = filename;
+    link.target = '_blank';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    
+    // Show success message
+    const toast = document.createElement('div');
+    toast.className = 'alert alert-success alert-dismissible fade show position-fixed top-0 end-0 m-3';
+    toast.style.zIndex = '9999';
+    toast.innerHTML = `
+        <i class="bi bi-check-circle me-2"></i>Image saved as ${filename}
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    `;
+    document.body.appendChild(toast);
+    setTimeout(() => {
+        toast.remove();
+    }, 3000);
+}
+
+function deleteAttempt(attemptId) {
+    if (!confirm(`Are you sure you want to delete unknown face attempt #${attemptId}? This action cannot be undone.`)) {
+        return;
+    }
+    
+    // Show loading state
+    const deleteBtn = event.target.closest('button');
+    const originalHTML = deleteBtn.innerHTML;
+    deleteBtn.disabled = true;
+    deleteBtn.innerHTML = '<i class="bi bi-hourglass-split"></i>';
+    
+    // Send delete request
+    const deleteUrl = `/attendance/unknown/${attemptId}/delete/`;
+    fetch(deleteUrl, {
+        method: 'POST',
+        headers: {
+            'X-CSRFToken': getCookie('csrftoken'),
+            'Content-Type': 'application/json',
+        },
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // Remove the card from DOM
+            const card = deleteBtn.closest('.unknown-card');
+            card.style.transition = 'opacity 0.3s, transform 0.3s';
+            card.style.opacity = '0';
+            card.style.transform = 'scale(0.9)';
+            setTimeout(() => {
+                card.remove();
+                
+                // Check if grid is empty
+                const grid = document.querySelector('.unknown-grid');
+                if (grid && grid.children.length === 0) {
+                    location.reload(); // Reload to show empty state
+                }
+            }, 300);
+            
+            // Show success message
+            showToast('success', data.message || 'Unknown face attempt deleted successfully.');
+        } else {
+            // Show error message
+            showToast('danger', data.message || 'Error deleting unknown face attempt.');
+            deleteBtn.disabled = false;
+            deleteBtn.innerHTML = originalHTML;
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        showToast('danger', 'An error occurred while deleting the unknown face attempt.');
+        deleteBtn.disabled = false;
+        deleteBtn.innerHTML = originalHTML;
+    });
+}
+
+function getCookie(name) {
+    let cookieValue = null;
+    if (document.cookie && document.cookie !== '') {
+        const cookies = document.cookie.split(';');
+        for (let i = 0; i < cookies.length; i++) {
+            const cookie = cookies[i].trim();
+            if (cookie.substring(0, name.length + 1) === (name + '=')) {
+                cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+                break;
+            }
+        }
+    }
+    // Fallback: try to get from meta tag if cookie not found
+    if (!cookieValue) {
+        const metaTag = document.querySelector('meta[name="csrf-token"]');
+        if (metaTag) {
+            cookieValue = metaTag.getAttribute('content');
+        }
+    }
+    return cookieValue;
+}
+
+function showToast(type, message) {
+    const toast = document.createElement('div');
+    toast.className = `alert alert-${type} alert-dismissible fade show position-fixed top-0 end-0 m-3`;
+    toast.style.zIndex = '9999';
+    const icon = type === 'success' ? 'check-circle' : 'exclamation-triangle';
+    toast.innerHTML = `
+        <i class="bi bi-${icon} me-2"></i>${message}
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    `;
+    document.body.appendChild(toast);
+    setTimeout(() => {
+        toast.remove();
+    }, 5000);
+}
+
+function updateSelectedCount() {
+    const checkboxes = document.querySelectorAll('.attempt-checkbox:checked');
+    const count = checkboxes.length;
+    const selectedCountEl = document.getElementById('selectedCount');
+    const deleteBtn = document.getElementById('deleteSelectedBtn');
+    
+    if (selectedCountEl) {
+        selectedCountEl.textContent = count;
+    }
+    
+    if (deleteBtn) {
+        deleteBtn.disabled = count === 0;
+    }
+    
+    // Update card selected state
+    checkboxes.forEach(cb => {
+        const card = cb.closest('.unknown-card');
+        if (card) {
+            card.classList.toggle('selected', cb.checked);
+        }
+    });
+}
+
+function toggleSelectAll() {
+    const selectAllBtn = document.getElementById('selectAllBtn');
+    const checkboxes = document.querySelectorAll('.attempt-checkbox');
+    const allChecked = Array.from(checkboxes).every(cb => cb.checked);
+    
+    checkboxes.forEach(cb => {
+        cb.checked = !allChecked;
+    });
+    
+    selectAllBtn.innerHTML = allChecked 
+        ? '<i class="bi bi-check-square me-2"></i>Select All'
+        : '<i class="bi bi-x-square me-2"></i>Deselect All';
+    
+    updateSelectedCount();
+}
+
+async function bulkDeleteSelected() {
+    const checkboxes = document.querySelectorAll('.attempt-checkbox:checked');
+    const selectedIds = Array.from(checkboxes).map(cb => parseInt(cb.value));
+    
+    if (selectedIds.length === 0) {
+        showToast('warning', 'Please select at least one item to delete.');
+        return;
+    }
+    
+    if (!confirm(`Are you sure you want to delete ${selectedIds.length} unknown face attempt(s)? This action cannot be undone.`)) {
+        return;
+    }
+    
+    // Show progress container
+    const progressContainer = document.getElementById('progressContainer');
+    const progressBar = document.getElementById('progressBar');
+    const progressText = document.getElementById('progressText');
+    const progressCard = document.getElementById('progressCard');
+    
+    progressContainer.classList.add('show');
+    progressCard.style.display = 'block';
+    
+    const total = selectedIds.length;
+    const chunkSize = 50;
+    let deletedCount = 0;
+    let failedCount = 0;
+    const allDeletedIds = [];
+    
+    try {
+        // Process in chunks of 50
+        for (let i = 0; i < selectedIds.length; i += chunkSize) {
+            const chunk = selectedIds.slice(i, i + chunkSize);
+            const chunkNumber = Math.floor(i / chunkSize) + 1;
+            const totalChunks = Math.ceil(selectedIds.length / chunkSize);
+            
+            // Update progress
+            const progress = Math.floor((i / selectedIds.length) * 100);
+            progressBar.style.width = `${progress}%`;
+            progressBar.setAttribute('aria-valuenow', progress);
+            progressText.textContent = `Deleting chunk ${chunkNumber}/${totalChunks} (${chunk.length} items)...`;
+            
+            try {
+                const response = await fetch('{{ url('attendance:unknown_bulk_delete') }}', {
+                    method: 'POST',
+                    headers: {
+                        'X-CSRFToken': getCookie('csrftoken'),
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ ids: chunk })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    deletedCount += data.deleted_count;
+                    allDeletedIds.push(...data.deleted_ids);
+                    
+                    // Remove deleted cards from DOM
+                    data.deleted_ids.forEach(id => {
+                        const card = document.querySelector(`[data-attempt-id="${id}"]`);
+                        if (card) {
+                            card.style.transition = 'opacity 0.3s, transform 0.3s';
+                            card.style.opacity = '0';
+                            card.style.transform = 'scale(0.9)';
+                            setTimeout(() => card.remove(), 300);
+                        }
+                    });
+                } else {
+                    failedCount += chunk.length;
+                    console.error('Delete failed:', data.message);
+                }
+            } catch (error) {
+                failedCount += chunk.length;
+                console.error('Error deleting chunk:', error);
+            }
+            
+            // Small delay between chunks to avoid overwhelming the server
+            if (i + chunkSize < selectedIds.length) {
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+        }
+        
+        // Final progress update
+        progressBar.style.width = '100%';
+        progressBar.setAttribute('aria-valuenow', 100);
+        
+        // Hide progress after a short delay
+        setTimeout(() => {
+            progressContainer.classList.remove('show');
+            progressCard.style.display = 'none';
+            
+            // Show result message
+            if (deletedCount > 0) {
+                showToast('success', `Successfully deleted ${deletedCount} unknown face attempt(s).`);
+            }
+            if (failedCount > 0) {
+                showToast('danger', `Failed to delete ${failedCount} unknown face attempt(s).`);
+            }
+            
+            // Update selected count
+            updateSelectedCount();
+            
+            // Check if grid is empty
+            const grid = document.querySelector('.unknown-grid');
+            if (grid && grid.children.length === 0) {
+                setTimeout(() => location.reload(), 1000);
+            }
+        }, 500);
+        
+    } catch (error) {
+        console.error('Bulk delete error:', error);
+        progressContainer.classList.remove('show');
+        progressCard.style.display = 'none';
+        showToast('danger', 'An error occurred during bulk delete.');
+    }
+}
+</script>
+{% endblock %}
+
