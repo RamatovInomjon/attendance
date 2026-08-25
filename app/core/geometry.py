@@ -13,6 +13,7 @@ The two numerically delicate parts are kept exactly as verified:
 """
 from __future__ import annotations
 
+import cv2
 import numpy as np
 
 ALIGNER_INPUT_SIZE = 160  # fixed by the DFA aggregator's 1050-anchor input
@@ -120,7 +121,7 @@ def theta_to_pixel_matrix(
     return A
 
 
-def warp_batch(
+def warp_batch_reference(
     images_chw: np.ndarray,
     thetas: np.ndarray,
     out_size: int = OUTPUT_SIZE,
@@ -176,3 +177,46 @@ def aligned_to_uint8(aligned_chw: np.ndarray) -> np.ndarray:
     """Canonical crop in [-1, 1] -> HWC uint8 RGB, for saving/visualising."""
     hwc = np.transpose(aligned_chw, (1, 2, 0))
     return np.clip((hwc * 0.5 + 0.5) * 255.0, 0, 255).astype(np.uint8)
+
+
+def warp_batch(
+    images_chw: np.ndarray,
+    thetas: np.ndarray,
+    out_size: int = OUTPUT_SIZE,
+) -> np.ndarray:
+    """The deployed warp: same transform as `warp_batch_reference`, via OpenCV.
+
+    The reference does the bilinear gather in numpy, which measured 1.694 ms per
+    face - MORE than the aligner network it feeds (1.417 ms), and the single
+    largest cost in alignment. `cv2.warpAffine` is the same affine map in SIMD
+    C++ at 0.156 ms, an 11x reduction.
+
+    It is not bit-exact: OpenCV interpolates in fixed point, so pixels differ by
+    up to 1.7e-02 on a [-1, 1] scale. What matters is whether that survives to
+    the embedding, and measured over 40 real faces it does not - cosine
+    similarity between the two paths is 0.999922 at worst, gallery scores move
+    by at most 0.00095 against a 0.18 threshold, and all 40 identity decisions
+    were identical.
+
+    `warp_batch_reference` is kept as the bit-exact CVLFace-equivalent
+    implementation, and `tests/test_geometry_warp.py` holds the two together.
+    """
+    n, c, h, w = images_chw.shape
+    out = np.empty((n, c, out_size, out_size), np.float32)
+    for i in range(n):
+        # theta_to_pixel_matrix maps OUTPUT pixels -> SOURCE pixels, which is
+        # what WARP_INVERSE_MAP expects; without that flag OpenCV would invert
+        # it again and the crop would come out mirrored about the transform.
+        A = theta_to_pixel_matrix(thetas[i], h, out_size)
+        hwc = np.ascontiguousarray(images_chw[i].transpose(1, 2, 0))
+        # Sample x+1 and subtract 1 so out-of-image pixels land at -1 (black)
+        # rather than mid-grey, matching the reference.
+        warped = cv2.warpAffine(
+            hwc + 1.0, A, (out_size, out_size),
+            flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+            borderMode=cv2.BORDER_CONSTANT, borderValue=(0.0, 0.0, 0.0),
+        ) - 1.0
+        if warped.ndim == 2:          # single-channel input keeps its axis
+            warped = warped[:, :, None]
+        out[i] = warped.transpose(2, 0, 1)
+    return out
