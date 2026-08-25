@@ -109,3 +109,8 @@ db.sqlite3-*
 
 # Local caches
 .pytest_cache/
+
+# Licensing: the private key mints licences for ANY machine - never commit it.
+vendor_private_key.pem
+licence.key
+*.onnx.enc

@@ -27,6 +27,7 @@ import numpy as np
 import onnxruntime as ort
 
 from app.core.onnx_env import best_providers
+from app.core.model_vault import load_model
 
 # Verified against real frames: class 0 boxes have a median size of 40 px
 # and class 1 of 276 px on the same images, so 0 is the head.
@@ -45,7 +46,10 @@ class HeadDetector:
                  conf: float = 0.35, iou: float = 0.5, providers=None):
         opts = ort.SessionOptions()
         opts.log_severity_level = 3
-        self.session = ort.InferenceSession(str(model_path), sess_options=opts,
+        # load_model returns a path for a plain .onnx (ONNX Runtime mmaps it)
+        # or decrypted bytes for a licensed .onnx.enc, so protected weights
+        # are never written to disk in the clear.
+        self.session = ort.InferenceSession(load_model(model_path), sess_options=opts,
                                             providers=providers or best_providers())
         inp = self.session.get_inputs()[0]
         self.input_name = inp.name

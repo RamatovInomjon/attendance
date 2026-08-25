@@ -41,6 +41,7 @@ interface, served from `templates/` and fed by the v3 recognition core.
 | file | what |
 |---|---|
 | [docs/ALGORITHM.md](docs/ALGORITHM.md) | **start here** - how the algorithm works, end to end |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | shipping to another machine: licence, encrypted models, bundle |
 | [docs/PLAN.md](docs/PLAN.md) | the implementation plan and the decisions behind it |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | how the pipeline works, module by module |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | running, deploying, tuning, troubleshooting |
@@ -67,7 +68,8 @@ app/
   web/viewmodels.py    v3 schema -> template field names
 templates/             the original Bootstrap UI (unchanged)
 static/                its CSS and JS
-models/                ONNX + YOLO weights (497 MB) + MANIFEST.sha256 + README
+models/                runtime weights (139 MB) + MANIFEST.sha256 + README
+                       _archive/ holds the fp32 master, never shipped
 scripts/               enroll, seed_cameras, run, live_test, diagnose_live
 bench/                 the benchmark and validation scripts
 face_id_users/         enrolment export (55 people, biometric - not in git)

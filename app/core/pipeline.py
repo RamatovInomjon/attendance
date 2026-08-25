@@ -32,6 +32,7 @@ from app.core.detector import build_detector
 from app.core.direction import Direction, DirectionConfig, Trajectory
 from app.core.head_detector import CLS_HEAD, HeadDetector
 from app.core.gallery import Gallery, Match, TrackVote
+from app.core.model_vault import model_available
 from app.core.quality import Quality, assess
 from app.core.recognizer import FaceRecognizer
 from pathlib import Path
@@ -170,7 +171,10 @@ class CameraPipeline:
         self.head_detector = head_detector
         if self.head_detector is None and settings.head_model:
             hp = settings.model_path(settings.head_model)
-            if Path(hp).exists():
+            # model_available, not Path.exists: an encrypted deployment has only
+            # <name>.enc on disk, and a plain existence check silently disabled
+            # head tracking and fell back to face detection.
+            if model_available(hp):
                 self.head_detector = HeadDetector(hp, size=settings.head_input,
                                                   conf=settings.head_conf)
 

@@ -137,19 +137,27 @@ def _clip_metrics(max_clips: int = 8, max_frames: int = 400) -> dict:
     for clip in clips:
         pipe = CameraPipeline("bench", gallery)
         cap = cv2.VideoCapture(clip)
+        t_base = 1_700_000_000.0     # fixed epoch: replay must not depend on "now"
         i = 0
         while i < max_frames:
             ok, im = cap.read()
             if not ok:
                 break
+            # Synthetic timestamps, NOT time.time(). Track ageing and the
+            # direction trajectory are measured in seconds, so feeding
+            # wall-clock makes replay depend on how fast the machine happens to
+            # run: a slower build ages tracks sooner, prunes them differently,
+            # and reports different recognitions. That produced a phantom
+            # "regression" where an encrypted build appeared to lose a person.
+            # 20 fps is what the cameras deliver.
             t0 = time.perf_counter()
-            r = pipe.process(Frame(image=im, ts=time.time(), index=i))
+            r = pipe.process(Frame(image=im, ts=t_base + i / 20.0, index=i))
             ts.append((time.perf_counter() - t0) * 1000)
             heads += len(r.tracks)          # live tracks this frame
             faces_embedded += int(r.timings.get("faces", 0) or 0)
             tracks.extend(r.completed)
             i += 1
-        tracks.extend(pipe._prune(time.time() + 1e6))
+        tracks.extend(pipe._prune(t_base + i / 20.0 + 1e6))
         cap.release()
 
     for t in tracks:

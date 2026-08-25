@@ -61,6 +61,7 @@ import numpy as np
 import onnxruntime as ort
 
 from app.core.onnx_env import best_providers
+from app.core.model_vault import load_model
 
 from app.core import geometry as G
 
@@ -101,7 +102,11 @@ class FaceAligner:
 
         opts = ort.SessionOptions()
         opts.log_severity_level = 3
-        self.session = ort.InferenceSession(str(model_path), sess_options=opts, providers=providers)
+        # load_model returns a path for a plain .onnx (ONNX Runtime mmaps it)
+        # or decrypted bytes for a licensed .onnx.enc, so protected weights
+        # are never written to disk in the clear.
+        self.session = ort.InferenceSession(load_model(model_path), sess_options=opts,
+                                            providers=providers)
         self.crop_size = crop_size
         self.margin = margin
         self.mode = mode
