@@ -9,8 +9,16 @@ other candidate, over the resolutions this corridor geometry actually needs:
     1920x1088             ~8 ms                 139.0 ms
 
 Both found 270/270 faces in the enrolment gallery with near-identical box sizes,
-so accuracy did not separate them and speed did.  YuNet stays selectable: it is
-the better choice on a CPU-only host, where YOLO has no GPU to run on.
+so accuracy did not separate them and speed did.
+
+The YuNet implementation was removed on 2026-08-25 along with its weights: it
+was never selected (`detector_kind` has always been "yolo"), it only made sense
+on a CPU-only host, and this pipeline already refuses to start without CUDA.
+Restoring it means re-adding a class here and downloading
+`face_detection_yunet_2023mar.onnx` from OpenCV Zoo.
+
+This detector runs only during ENROLMENT, from photographs. The live pipeline
+tracks and aligns from head boxes and never calls it.
 """
 from __future__ import annotations
 
@@ -48,34 +56,11 @@ class YoloFaceDetector:
         return [Detection(b, float(s)) for b, s in zip(boxes, scores)]
 
 
-class YuNetDetector:
-    """CPU fallback.  Recreated on input-size change, as the API requires."""
-
-    def __init__(self, model_path: str | Path, conf: float = 0.6, nms: float = 0.3):
-        self.model_path = str(model_path)
-        self.conf = conf
-        self.nms = nms
-        self._det = None
-        self._size = None
-
-    def detect(self, frame_bgr: np.ndarray) -> list[Detection]:
-        h, w = frame_bgr.shape[:2]
-        if self._det is None or self._size != (w, h):
-            self._det = cv2.FaceDetectorYN.create(self.model_path, "", (w, h), self.conf, self.nms, 5000)
-            self._size = (w, h)
-        _, faces = self._det.detect(frame_bgr)
-        if faces is None:
-            return []
-        out = []
-        for f in faces:
-            x, y, bw, bh = f[:4]
-            out.append(Detection(np.array([x, y, x + bw, y + bh], dtype=np.float32), float(f[-1])))
-        return out
-
 
 def build_detector(kind: str, model_path, **kw):
     if kind == "yolo":
         return YoloFaceDetector(model_path, **kw)
-    if kind == "yunet":
-        return YuNetDetector(model_path, **kw)
-    raise ValueError(f"unknown detector: {kind}")
+    raise ValueError(
+        f"unknown detector: {kind!r}. Only 'yolo' is available; the YuNet "
+        "path and its weights were removed as unused."
+    )
