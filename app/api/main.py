@@ -20,6 +20,8 @@ from app.db.models import (
 from app.db.session import session_scope
 from app.runtime import runtime
 from app.services.attendance import business_date
+from app.services.auth import ensure_default_admin
+from app.api import auth as auth_router
 from app.api import pages as pages_router
 from app.api import ws as ws_router
 
@@ -28,6 +30,14 @@ log = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Before anything is served: make sure the console is reachable. On a fresh
+    # database this creates the default admin; once any account exists it does
+    # nothing, so a changed password or a deleted default is never resurrected.
+    try:
+        if ensure_default_admin():
+            log.warning("created the default admin account - change its password at /users")
+    except Exception:
+        log.exception("could not ensure a default admin account")
     runtime.start()
     yield
     runtime.stop()
@@ -44,6 +54,12 @@ if _static.is_dir():
     app.mount("/static", StaticFiles(directory=str(_static)), name="static")
 
 # HTML pages (original Bootstrap templates) and the live-view WebSocket.
+# Deny by default. This must be added BEFORE the routers so that every route,
+# including any added later, is behind it unless explicitly listed public in
+# app/api/auth.py. Without it the pages below answer anyone with the URL.
+app.middleware("http")(auth_router.auth_middleware)
+
+app.include_router(auth_router.router)
 app.include_router(pages_router.router)
 app.include_router(ws_router.router)
 

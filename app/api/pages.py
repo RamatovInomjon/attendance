@@ -47,10 +47,14 @@ env = build_env()
 
 
 def render(name: str, *, request=None, current_view: str = "", **ctx) -> HTMLResponse:
-    """Render a page with the common navigation and date context."""
+    """Render a page with the common navigation, date, and signed-in user."""
     ctx.setdefault("request", request)
     ctx.setdefault("current_view", current_view)
     ctx.setdefault("today", today())
+    # The nav needs to know who is signed in to show their name, the sign-out
+    # control, and the admin-only Users link. Injected once here rather than
+    # threaded through every page function.
+    ctx.setdefault("current_user", getattr(getattr(request, "state", None), "user", None))
     return HTMLResponse(env.get_template(name).render(**ctx))
 
 
@@ -1045,6 +1049,6 @@ def recognition_logs():
     }
 
 
-@router.get("/login", response_class=HTMLResponse)
-def login(request: Request):
-    return render("auth/login.html", request=request, current_view="auth:login")
+# /login and /logout now live in app/api/auth.py, which owns the POST handler,
+# the session cookie, and the redirect target. A GET-only stub here would
+# shadow that router depending on include order.

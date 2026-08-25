@@ -49,8 +49,23 @@
                 <li class="nav-item"><a class="nav-link {% if current_view == 'employees:register' %}active{% endif %}" href="{{ url('employees:register') }}"><i class="bi bi-person-plus" aria-hidden="true"></i><span>Ro'yxatdan o'tkazish</span></a></li>
                 <li class="nav-item"><a class="nav-link {% if current_view == 'attendance:unknown' %}active{% endif %}" href="{{ url('attendance:unknown') }}"><i class="bi bi-person-x" aria-hidden="true"></i><span>Noma'lumlar</span></a></li>
                 <li class="nav-item"><a class="nav-link {% if current_view == 'camera:settings' or current_view == 'camera:rtsp_register' %}active{% endif %}" href="{{ url('camera:settings') }}"><i class="bi bi-camera-video" aria-hidden="true"></i><span>Kameralar</span></a></li>
+                {% if current_user and current_user.adm %}
+                <li class="nav-item"><a class="nav-link {% if current_view == 'auth:users' %}active{% endif %}" href="/users"><i class="bi bi-shield-lock" aria-hidden="true"></i><span>Foydalanuvchilar</span></a></li>
+                {% endif %}
             </ul>
-            <a class="btn app-nav__login" href="{{ url('auth:login') }}"><i class="bi bi-box-arrow-in-right" aria-hidden="true"></i><span>Kirish</span></a>
+            {% if current_user %}
+            <div class="app-nav__session d-flex align-items-center gap-2">
+                <span class="app-nav__user" title="{{ current_user.u }}">
+                    <i class="bi bi-person-circle" aria-hidden="true"></i>
+                    <span>{{ current_user.u }}{% if current_user.adm %} <span class="badge text-bg-secondary">admin</span>{% endif %}</span>
+                </span>
+                <form method="post" action="/logout" class="m-0">
+                    <button class="btn app-nav__login" type="submit"><i class="bi bi-box-arrow-right" aria-hidden="true"></i><span>Chiqish</span></button>
+                </form>
+            </div>
+            {% else %}
+            <a class="btn app-nav__login" href="/login"><i class="bi bi-box-arrow-in-right" aria-hidden="true"></i><span>Kirish</span></a>
+            {% endif %}
         </div>
     </div>
 </nav>

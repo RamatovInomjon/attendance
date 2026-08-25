@@ -217,3 +217,24 @@ class UnknownSighting(Base):
     nearest_employee_id = Column(Integer, nullable=True)
     vector = Column(LargeBinary, nullable=True)
     snapshot = Column(String(255), nullable=True)
+
+
+class User(Base):
+    """An operator who may sign in to the console.
+
+    Distinct from `Employee` on purpose. An Employee is somebody the cameras
+    recognise; a User is somebody who may look at the results. Most employees
+    must never have a login, and an operator need not be enrolled at all, so
+    joining the two would hand every enrolled person an account.
+    """
+    __tablename__ = "app_user"
+
+    id = Column(Integer, primary_key=True)
+    username = Column(String(64), unique=True, nullable=False, index=True)
+    password_hash = Column(String(255), nullable=False)
+    full_name = Column(String(255), default="")
+    is_admin = Column(Boolean, default=False, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False, index=True)
+    created_at = Column(UtcDateTime(), default=utcnow)
+    updated_at = Column(UtcDateTime(), default=utcnow, onupdate=utcnow)
+    last_login_at = Column(UtcDateTime(), nullable=True)

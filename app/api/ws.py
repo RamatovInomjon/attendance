@@ -16,6 +16,8 @@ import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app.core.security import COOKIE_NAME, read_session
+
 from app.runtime import runtime
 
 log = logging.getLogger(__name__)
@@ -59,8 +61,28 @@ def _resolve(camera_id: str) -> int | None:
     return None
 
 
+
+async def _authed(ws: WebSocket) -> bool:
+    """Reject an unauthenticated socket before accepting it.
+
+    HTTP middleware does not run for WebSocket scopes, so without this check
+    the live camera feed and the attendance push stay world-readable even
+    though every page around them requires a login. Browsers send cookies on
+    the WebSocket handshake, so the same signed session applies.
+
+    1008 is "policy violation"; closing before accept() means no frame is ever
+    sent to a client that has not signed in.
+    """
+    if read_session(ws.cookies.get(COOKIE_NAME)):
+        return True
+    await ws.close(code=1008, reason="not authenticated")
+    return False
+
+
 @router.websocket("/ws/camera/{camera_id}/")
 async def camera_ws(ws: WebSocket, camera_id: str):
+    if not await _authed(ws):
+        return
     await ws.accept()
     cid = _resolve(camera_id)
     if cid is None:
@@ -77,6 +99,8 @@ async def camera_ws_noslash(ws: WebSocket, camera_id: str):
 @router.websocket("/ws/attendance/")
 async def attendance_ws(ws: WebSocket):
     """Pushes recognition events to the live page as they happen."""
+    if not await _authed(ws):
+        return
     await ws.accept()
     seen: set[tuple] = set()
     try:

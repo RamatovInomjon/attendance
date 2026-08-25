@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% block title %}AIRI - Foydalanuvchilar{% endblock %}
+
+{% block content %}
+<div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
+  <div>
+    <h1 class="h3 mb-1">Foydalanuvchilar</h1>
+    <p class="text-secondary mb-0">Konsolga kirish huquqiga ega hisoblar.</p>
+  </div>
+  <span class="badge text-bg-light border">{{ users|length }} ta hisob</span>
+</div>
+
+{% if error %}
+<div class="alert alert-danger d-flex align-items-center gap-2" role="alert">
+  <i class="bi bi-exclamation-triangle-fill" aria-hidden="true"></i>
+  <div>{{ error }}</div>
+</div>
+{% endif %}
+{% if created %}
+<div class="alert alert-success d-flex align-items-center gap-2" role="alert">
+  <i class="bi bi-check-circle-fill" aria-hidden="true"></i>
+  <div>Saqlandi: <strong>{{ created }}</strong></div>
+</div>
+{% endif %}
+
+<div class="row g-4">
+  <div class="col-12 col-xl-7">
+    <div class="card h-100">
+      <div class="card-header bg-transparent"><strong>Mavjud hisoblar</strong></div>
+      <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+          <thead>
+            <tr>
+              <th scope="col">Login</th>
+              <th scope="col">Ism</th>
+              <th scope="col">Rol</th>
+              <th scope="col">Holat</th>
+              <th scope="col">Oxirgi kirish</th>
+              <th scope="col" class="text-end">Amal</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for u in users %}
+            <tr>
+              <td class="font-monospace">{{ u.username }}{% if u.username == current_user.u %} <span class="badge text-bg-primary">siz</span>{% endif %}</td>
+              <td>{{ u.full_name or "—" }}</td>
+              <td>
+                {% if u.is_admin %}<span class="badge text-bg-secondary">admin</span>
+                {% else %}<span class="badge text-bg-light border">operator</span>{% endif %}
+              </td>
+              <td>
+                {% if u.is_active %}<span class="badge text-bg-success">faol</span>
+                {% else %}<span class="badge text-bg-danger">o'chirilgan</span>{% endif %}
+              </td>
+              <td class="text-secondary small">{{ u.last_login_at.strftime('%Y-%m-%d %H:%M') if u.last_login_at else "—" }}</td>
+              <td class="text-end">
+                {% if u.username != current_user.u %}
+                <form method="post" action="/users/toggle" class="d-inline">
+                  <input type="hidden" name="username" value="{{ u.username }}">
+                  <input type="hidden" name="active" value="{{ '0' if u.is_active else '1' }}">
+                  <button class="btn btn-sm {{ 'btn-outline-danger' if u.is_active else 'btn-outline-success' }}" type="submit">
+                    {{ "O'chirish" if u.is_active else "Yoqish" }}
+                  </button>
+                </form>
+                {% else %}
+                <span class="text-secondary small">—</span>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-12 col-xl-5">
+    <div class="card mb-4">
+      <div class="card-header bg-transparent"><strong>Yangi hisob qo'shish</strong></div>
+      <div class="card-body">
+        <form method="post" action="/users/add" class="vstack gap-3">
+          <div>
+            <label class="form-label" for="new-username">Login</label>
+            <input class="form-control font-monospace" id="new-username" name="username"
+                   required minlength="3" maxlength="64" pattern="[a-zA-Z0-9._-]+"
+                   autocomplete="off" placeholder="masalan: dilshod">
+            <div class="form-text">3–64 belgi: harflar, raqamlar, nuqta, chiziqcha.</div>
+          </div>
+          <div>
+            <label class="form-label" for="new-fullname">Ism (ixtiyoriy)</label>
+            <input class="form-control" id="new-fullname" name="full_name" maxlength="255" autocomplete="off">
+          </div>
+          <div>
+            <label class="form-label" for="new-password">Parol</label>
+            <input class="form-control" id="new-password" name="password" type="password"
+                   required minlength="6" autocomplete="new-password">
+            <div class="form-text">Kamida 6 belgi.</div>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="new-admin" name="is_admin" value="1" checked>
+            <label class="form-check-label" for="new-admin">Admin huquqi</label>
+            <div class="form-text">Yangi hisoblar sukut bo'yicha admin bo'ladi.</div>
+          </div>
+          <button class="btn btn-primary" type="submit"><i class="bi bi-person-plus" aria-hidden="true"></i> Qo'shish</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header bg-transparent"><strong>Parolni o'zgartirish</strong></div>
+      <div class="card-body">
+        <form method="post" action="/users/password" class="vstack gap-3">
+          <div>
+            <label class="form-label" for="pw-username">Login</label>
+            <input class="form-control font-monospace" id="pw-username" name="username"
+                   value="{{ current_user.u }}" required autocomplete="off">
+          </div>
+          <div>
+            <label class="form-label" for="pw-password">Yangi parol</label>
+            <input class="form-control" id="pw-password" name="password" type="password"
+                   required minlength="6" autocomplete="new-password">
+          </div>
+          <button class="btn btn-outline-primary" type="submit"><i class="bi bi-key" aria-hidden="true"></i> Yangilash</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
