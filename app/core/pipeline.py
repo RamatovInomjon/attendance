@@ -30,7 +30,7 @@ from app.config import settings
 from app.core.aligner import FaceAligner
 from app.core.detector import build_detector
 from app.core.direction import Direction, DirectionConfig, Trajectory
-from app.core.head_detector import CLS_HEAD, HeadDetector
+from app.core.head_detector import CLS_HEAD, CLS_PERSON, HeadDetector
 from app.core.gallery import Gallery, Match, TrackVote
 from app.core.model_vault import model_available
 from app.core.quality import Quality, assess
@@ -60,6 +60,14 @@ class TrackState:
     emitted: bool = False
     last_reason: str = ""
     face_box: np.ndarray | None = None
+    person_box: np.ndarray | None = None
+    # Where the head sat inside the person box, as a fraction of that box, the
+    # last time both were seen together. Used to synthesise a head point on
+    # frames where the head is missed - the person box is still tracked, so the
+    # trajectory stays continuous and direction keeps resolving even when the
+    # head is too small or turned away to detect.
+    head_offset: tuple[float, float] | None = None
+    frames_without_head: int = 0
     trajectory: Trajectory = field(default_factory=Trajectory)
     direction: Direction = Direction.UNKNOWN
     direction_reason: str = ""
@@ -153,6 +161,58 @@ class FrameResult:
     timings: dict = field(default_factory=dict)
 
 
+def _head_in(person: np.ndarray, heads: np.ndarray) -> np.ndarray | None:
+    """The head belonging to this person box, or None.
+
+    Association is by CONTAINMENT of the head centre, not IoU: a head is a tiny
+    box inside a large one, so their IoU is near zero even when the head plainly
+    belongs to that person, and an IoU threshold would reject every correct
+    pair. Where several heads fall inside one person box - someone standing
+    behind another - the highest one wins, since a person's own head is the
+    topmost thing in their box.
+    """
+    if heads is None or len(heads) == 0:
+        return None
+    px1, py1, px2, py2 = person
+    cx = (heads[:, 0] + heads[:, 2]) * 0.5
+    cy = (heads[:, 1] + heads[:, 3]) * 0.5
+    inside = (cx >= px1) & (cx <= px2) & (cy >= py1) & (cy <= py2)
+    if not inside.any():
+        return None
+    idx = np.flatnonzero(inside)
+    return heads[idx[np.argmin(cy[idx])]]
+
+
+def _offset_of(head: np.ndarray, person: np.ndarray) -> tuple[float, float]:
+    """Head centre as a fraction of the person box, for later synthesis."""
+    pw = max(float(person[2] - person[0]), 1.0)
+    ph = max(float(person[3] - person[1]), 1.0)
+    hcx = (float(head[0]) + float(head[2])) * 0.5
+    hcy = (float(head[1]) + float(head[3])) * 0.5
+    return ((hcx - float(person[0])) / pw, (hcy - float(person[1])) / ph)
+
+
+# Head centre when none has ever been seen for this track: horizontally centred,
+# and a tenth of the way down - where a standing person's head is.
+_DEFAULT_HEAD_OFFSET = (0.5, 0.10)
+
+
+def _synth_head(person: np.ndarray, offset: tuple[float, float] | None) -> np.ndarray:
+    """A head-sized box where this person's head should be.
+
+    Returned as a box rather than a point because Trajectory records boxes and
+    uses their AREA for the depth signal. Its size is tied to the person box, so
+    the area still grows and shrinks with distance the way a real head box does.
+    """
+    ox, oy = offset or _DEFAULT_HEAD_OFFSET
+    px1, py1 = float(person[0]), float(person[1])
+    pw = max(float(person[2]) - px1, 1.0)
+    ph = max(float(person[3]) - py1, 1.0)
+    cx, cy = px1 + ox * pw, py1 + oy * ph
+    half = max(pw * 0.18, 4.0)          # ~a head's width relative to shoulders
+    return np.array([cx - half, cy - half, cx + half, cy + half], np.float32)
+
+
 class CameraPipeline:
     def __init__(self, name: str, gallery: Gallery, detector=None, aligner=None,
                  recognizer=None, direction_cfg: DirectionConfig | None = None,
@@ -237,12 +297,23 @@ class CameraPipeline:
                 # has walked on, so a completion-time box lands on empty floor.
                 box=(t.disp_box.copy() if t.disp_box is not None
                      else (t.box.copy() if t.box is not None else None)),
-                # Clearest frame first: this is what the dashboard shows and what
-                # a person judges the result by. The top-scoring frame is kept
-                # separately for diagnosis.
-                crop=(t.vote.quality_snapshot if t.vote.quality_snapshot is not None
-                      else (t.best_crop if t.best_crop is not None else t.vote.best_snapshot)),
-                score_crop=t.vote.best_snapshot,
+                # HIGHEST-SCORING aligned face first: this is what the dashboard
+                # shows. It is the frame that actually drove the identity, so it
+                # is the one to judge the decision by - if the match is wrong,
+                # this is the image that made it wrong.
+                #
+                # This used to be the *clearest* frame instead, because
+                # score-best kept surfacing foreheads and backs of heads. That
+                # was a symptom of min_aligner_score sitting at 0.40; at 0.90
+                # nothing without a visible face can be embedded at all, so the
+                # top-scoring frame is now both safe to show and more
+                # informative. The clearest frame is kept alongside for
+                # comparison.
+                crop=(t.vote.best_snapshot if t.vote.best_snapshot is not None
+                      else (t.vote.quality_snapshot if t.vote.quality_snapshot is not None
+                            else t.best_crop)),
+                score_crop=(t.vote.quality_snapshot if t.vote.quality_snapshot is not None
+                            else t.best_crop),
                 vector=t.best_vector, nearest_employee_id=t.nearest_id,
             ))
         return out
@@ -299,24 +370,37 @@ class CameraPipeline:
         small = (cv2.resize(frame.image, (settings.detect_width, int(round(h * scale))),
                             interpolation=cv2.INTER_LINEAR) if scale != 1.0 else frame.image)
 
+        head_boxes = np.zeros((0, 4), np.float32)
         if self.head_detector is not None:
-            # One detector, not two. Heads are what we track, and the DFA aligner
-            # does its own face localisation inside whatever crop it is given -
-            # so a head box serves for recognition too. Measured on real frames,
-            # aligning from head boxes scores 0.187 median against 0.192 from a
-            # dedicated face detector, while costing 10 ms less per frame and
-            # still producing a box on frames where face detection finds nothing.
-            hd = self.head_detector.detect(small, want=CLS_HEAD)
-            track_boxes = (np.stack([d.box for d in hd]).astype(np.float32) / scale
-                           if hd else np.zeros((0, 4), np.float32))
-            track_scores = (np.array([d.score for d in hd], np.float32)
-                            if hd else np.zeros((0,), np.float32))
+            # One detector pass, both classes. The aligner does its own face
+            # localisation inside whatever crop it is given, so a head box
+            # serves for recognition; aligning from head boxes scores 0.187
+            # median against 0.192 from a dedicated face detector, 10 ms
+            # cheaper, and still produces a box where face detection finds none.
+            #
+            # TRACKING runs on the person box, not the head. Measured over 6
+            # clips: person boxes gave 7 coherent tracks with a median length of
+            # 188 frames, where head boxes gave 13 tracks with a median of 9 and
+            # twice the fragmentation - from the same number of detections. A
+            # body is simply a larger, more persistent thing to associate.
+            dets = self.head_detector.detect(small, want=None)
+            hd = [d for d in dets if d.cls == CLS_HEAD]
+            pd = [d for d in dets if d.cls == CLS_PERSON]
+            head_boxes = (np.stack([d.box for d in hd]).astype(np.float32) / scale
+                          if hd else np.zeros((0, 4), np.float32))
+            src = pd if (settings.track_on == "person" and pd) else hd
+            track_boxes = (np.stack([d.box for d in src]).astype(np.float32) / scale
+                           if src else np.zeros((0, 4), np.float32))
+            track_scores = (np.array([d.score for d in src], np.float32)
+                            if src else np.zeros((0,), np.float32))
+            tracking_persons = src is pd
         else:
             fd_ = self.detector.detect(small)
             track_boxes = (np.stack([d.box for d in fd_]).astype(np.float32) / scale
                            if fd_ else np.zeros((0, 4), np.float32))
             track_scores = (np.array([d.score for d in fd_], np.float32)
                             if fd_ else np.zeros((0,), np.float32))
+            tracking_persons = False
         t_det = (time.perf_counter() - t0) * 1000
 
         tracked = self.tracker.update(track_boxes, track_scores)
@@ -334,16 +418,46 @@ class CameraPipeline:
                 self.tracks[tid] = st
             st.last_seen = now
             st.box = box
-            # Trajectory follows the head: it is present on every frame, so the
-            # path is continuous even while the face is turned away.
-            st.trajectory.add(now, box, frame.image.shape[1], frame.image.shape[0])
-            st.face_box = box       # the head box is the alignment source
+
+            if tracking_persons:
+                st.person_box = box
+                head = _head_in(box, head_boxes)
+                if head is not None:
+                    st.face_box = head
+                    st.head_offset = _offset_of(head, box)
+                    st.frames_without_head = 0
+                    traj_box = head
+                else:
+                    # Head not detected this frame - too small, turned away, or
+                    # occluded. The person is still tracked, so keep the
+                    # trajectory going: direction is what this track is for, and
+                    # it resolves fine without ever seeing a face. Recognition
+                    # simply does not run on these frames.
+                    st.face_box = None
+                    st.frames_without_head += 1
+                    traj_box = _synth_head(box, st.head_offset)
+            else:
+                st.person_box = None
+                st.face_box = box
+                traj_box = box
+
+            # The trajectory ALWAYS follows a head-shaped point, never the body
+            # centroid, even when tracking persons. The tripwire and the depth
+            # trend were calibrated against head positions; a body centre sits
+            # lower in frame and would cross the line at a different moment,
+            # silently invalidating that calibration. When the head is missed we
+            # synthesise its position from the person box using the offset
+            # observed while both were visible, so the path stays continuous and
+            # in the same geometry throughout.
+            st.trajectory.add(now, traj_box, frame.image.shape[1], frame.image.shape[0])
             d, why = st.trajectory.direction(self.direction_cfg)
             st.direction_reason = why          # refresh: a stale reason misleads
             if d is not Direction.UNKNOWN:
                 st.direction = d
-            # Only tracks showing a face this frame can be recognized.
-            if not st.vote.decided:
+            # Only tracks showing a head this frame can be recognized. With
+            # person tracking a track can live for many frames with no head at
+            # all, and those frames have nothing to align.
+            if not st.vote.decided and st.face_box is not None:
                 pending.append(st)
 
         # Pre-gate on head-box size before paying for alignment. face_px is

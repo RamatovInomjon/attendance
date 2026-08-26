@@ -58,6 +58,9 @@ def build(strip: bool = True) -> list[Path]:
 
     files = [str(p) for p in sources()]
     print(f"  compiling {len(files)} module(s) from app/core/")
+    # A failed cythonize leaves the PREVIOUS .so in place, and because an
+    # extension module wins over a same-named .py, everything afterwards
+    # silently runs the old build - tests, benchmarks and all. Fail loudly.
     ext = cythonize(
         files,
         language_level="3",
@@ -79,6 +82,15 @@ def build(strip: bool = True) -> list[Path]:
         sys.argv = argv
 
     built = sorted(CORE.glob("*.so"))
+    stale = [p for p in sources()
+             if not (CORE / f"{p.stem}.cpython-310-x86_64-linux-gnu.so").exists()
+             or (CORE / f"{p.stem}.cpython-310-x86_64-linux-gnu.so").stat().st_mtime < p.stat().st_mtime]
+    if stale:
+        raise SystemExit(
+            "  BUILD FAILED - these modules are older than their source:\n    "
+            + "\n    ".join(p.name for p in stale)
+            + "\n  The previous .so is still in place and WILL be imported "
+              "instead of the .py, so nothing you just changed is active.")
     if strip:
         for so in built:
             # Drop symbol names. Does not stop disassembly, but removes the

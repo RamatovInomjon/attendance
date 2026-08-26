@@ -41,7 +41,9 @@ TOLERANCE = {
     "gallery.rank1": -0.0,             # rank-1 must never fall
     "gallery.weakest_genuine": -0.005,
     "clips.recognized_tracks": -0,     # must not recognise fewer people
-    "clips.heads_detected": -0.01,     # relative: 1% fewer detections allowed
+    # faces_embedded is the honest "are we getting fewer chances to
+    # recognise" signal; track_observations is reported, not enforced.
+    "clips.faces_embedded": -0.05,
     "clips.direction_resolved": -0.02,
 }
 
@@ -131,11 +133,29 @@ def _clip_metrics(max_clips: int = 8, max_frames: int = 400) -> dict:
     if not clips:
         return {"skipped": "no recordings"}
 
+    # Real per-camera geometry. Without it DirectionConfig has no line, so
+    # `configured` is False, the depth-only travel guard never applies, and
+    # every verdict comes back "depth only (...)" - which is NOT how production
+    # behaves and makes any direction comparison meaningless.
+    from app.core.direction import config_from_camera
+    from app.db.models import Camera
+    from app.db.session import session_scope
+    from sqlalchemy import select
+    cfgs = {}
+    try:
+        with session_scope() as _s:
+            for cam in _s.execute(select(Camera)).scalars():
+                cfgs[cam.name] = config_from_camera(cam)
+    except Exception:
+        pass
+
     gallery = load_gallery()
-    ts, tracks, heads, faces_embedded = [], [], 0, 0
+    ts, tracks, track_obs, faces_embedded = [], [], 0, 0
     names, dirs = set(), collections.Counter()
     for clip in clips:
-        pipe = CameraPipeline("bench", gallery)
+        # clips are data/recordings/<CameraName>/<file>.mp4
+        cam_name = Path(clip).parent.name
+        pipe = CameraPipeline("bench", gallery, direction_cfg=cfgs.get(cam_name))
         cap = cv2.VideoCapture(clip)
         t_base = 1_700_000_000.0     # fixed epoch: replay must not depend on "now"
         i = 0
@@ -153,7 +173,7 @@ def _clip_metrics(max_clips: int = 8, max_frames: int = 400) -> dict:
             t0 = time.perf_counter()
             r = pipe.process(Frame(image=im, ts=t_base + i / 20.0, index=i))
             ts.append((time.perf_counter() - t0) * 1000)
-            heads += len(r.tracks)          # live tracks this frame
+            track_obs += len(r.tracks)      # live tracks this frame, NOT detections
             faces_embedded += int(r.timings.get("faces", 0) or 0)
             tracks.extend(r.completed)
             i += 1
@@ -172,7 +192,9 @@ def _clip_metrics(max_clips: int = 8, max_frames: int = 400) -> dict:
         "ms_median": round(ts[n // 2], 3),
         "ms_p90": round(ts[int(n * 0.9)], 3),
         "ms_p99": round(ts[int(n * 0.99)], 3),
-        "heads_detected": heads,
+        # live track-observations summed over frames. Fewer is not worse:
+        # merging fragmented tracks legitimately reduces it.
+        "track_observations": track_obs,
         "faces_embedded": faces_embedded,
         "tracks": len(tracks),
         "recognized_tracks": len(names),
