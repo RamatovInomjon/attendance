@@ -262,26 +262,37 @@ that were written in between, and every one of them 404s on the dashboard.
 check-out has nothing to close and lands as `NO_CHECKIN`. Eleven people were
 open at this handover.
 
-### The timezone will bite you
+### The timezone is already handled — pin it only for readable logs
 
-The GPU server runs **UTC**; the cameras, the operators and all existing
-attendance data are **Asia/Tashkent (UTC+5)**. Left alone, the service writes
-UTC rows into a table full of Tashkent rows: check-in times display five hours
-early and open sessions compute nonsense durations.
+The GPU server runs **UTC**; the cameras and operators are **Asia/Tashkent**.
+That sounds alarming and is not, because the application never reads the host
+clock's zone:
 
-The host clock belongs to the other projects on this machine and is not ours to
-change (and there is no sudo). So the timezone is pinned per-process, in
-`~/faceid/start.sh` — always start through it:
+- `settings.timezone` is fixed at `"Asia/Tashkent"` in `app/config.py`;
+- every column goes through `UtcDateTime`, which stores and returns aware UTC;
+- `business_date()` converts with `ts.astimezone(settings.tz)` and applies the
+  04:00 day boundary.
+
+`app/db/models.py` and `app/services/attendance.py` both carry docstrings about
+the earlier versions of exactly this bug (`utcnow().date()` filing early
+arrivals under the previous day, a 09:02 check-in rendering as 04:02). It is
+fixed at the source, so a UTC host writes the same rows a Tashkent host would.
+
+What the host zone *does* affect is Python's `logging`, which formats in local
+time — so on an unpinned UTC server the log reads five hours behind the console
+and behind what operators report. `~/faceid/start.sh` pins the zone for that
+reason alone:
 
 ```bash
 #!/bin/bash
-export TZ=Asia/Tashkent
+export TZ=Asia/Tashkent          # log readability only; storage is UTC either way
 cd /home/gpu6/faceid/ematsy
 exec /home/gpu6/faceid/venv/bin/python scripts/run.py
 ```
 
-Confirm it took: the log timestamps must lead `date -u` by five hours, and
-`/faceid/api/attendance` must return offsets of `+05:00`.
+Do not "fix" a five-hour gap between stored timestamps and the log by shifting
+what gets written. Storage is UTC on purpose; `/faceid/api/attendance` renders
+it as `+05:00`, which is what you should check.
 
 ### Known limitation: the MJPEG endpoint
 
