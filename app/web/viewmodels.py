@@ -12,6 +12,8 @@ here too, so templates never deal with timezones.
 """
 from __future__ import annotations
 
+from app.web.django_compat import media_path
+
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -75,8 +77,8 @@ class DailyVM:
             check_in_time=_local(d.check_in_time), check_out_time=_local(d.check_out_time),
             working_hours=timedelta(seconds=secs) if secs else None,
             status=d.status or "PRESENT",
-            check_in_snapshot=f"/media/{d.check_in_snapshot}" if d.check_in_snapshot else None,
-            check_out_snapshot=f"/media/{d.check_out_snapshot}" if d.check_out_snapshot else None,
+            check_in_snapshot=media_path(d.check_in_snapshot) if d.check_in_snapshot else None,
+            check_out_snapshot=media_path(d.check_out_snapshot) if d.check_out_snapshot else None,
             recognition_count=d.event_count or 0,
             presence=d.presence.value if hasattr(d.presence, "value") else str(d.presence),
         )
@@ -120,7 +122,7 @@ class EventVM:
             id=e.id, employee_name=name or "Unknown", employee_department=dept or "",
             action_type=action_type,
             timestamp=_local(e.ts),
-            snapshot=f"/media/{e.snapshot}" if e.snapshot else None,
+            snapshot=media_path(e.snapshot) if e.snapshot else None,
             confidence=e.score or 0.0, camera=cam or "", transition=transition,
         )
 

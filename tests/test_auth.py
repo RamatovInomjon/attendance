@@ -207,3 +207,45 @@ def test_default_admin_is_not_recreated_once_accounts_exist():
     a changed password being silently reset, on every restart."""
     assert auth_svc.user_count() > 0
     assert auth_svc.ensure_default_admin() is False
+
+
+# --- next= confinement under a sub-path deployment -------------------------
+# Found by driving the deployed site in a browser: opening /faceid/login
+# directly leaves next="/" (the default), which was same-site and so allowed,
+# and dropped the operator on aiscan.airi.uz's root - a different project.
+
+import pytest as _pytest
+
+
+@_pytest.mark.parametrize("raw,expected", [
+    (None,             "/faceid/"),
+    ("",               "/faceid/"),
+    ("/",              "/faceid/"),   # the default - used to escape the app
+    ("/faceid/",       "/faceid/"),
+    ("/faceid",        "/faceid"),
+    ("/faceid/users",  "/faceid/users"),
+    ("/manim/",        "/faceid/"),   # same ORIGIN, different application
+    ("/ppe/",          "/faceid/"),
+    ("//evil.example", "/faceid/"),
+    ("https://evil.example", "/faceid/"),
+    ("/faceidevil",    "/faceid/"),   # prefix must match a path SEGMENT
+])
+def test_next_is_confined_to_the_deployment_prefix(raw, expected, monkeypatch):
+    from app.config import settings
+    from app.api import auth as A
+    monkeypatch.setattr(settings, "url_prefix", "/faceid", raising=False)
+    assert A._safe_next(raw) == expected
+
+
+@_pytest.mark.parametrize("raw,expected", [
+    (None,            "/"),
+    ("/",             "/"),
+    ("/users",        "/users"),
+    ("//evil.example", "/"),
+])
+def test_next_still_works_without_a_prefix(raw, expected, monkeypatch):
+    """Root deployments must keep behaving exactly as before."""
+    from app.config import settings
+    from app.api import auth as A
+    monkeypatch.setattr(settings, "url_prefix", "", raising=False)
+    assert A._safe_next(raw) == expected

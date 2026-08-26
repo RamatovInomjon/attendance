@@ -1589,3 +1589,41 @@ def test_event_vm_action_prefers_attendance_transition_over_camera_role(role, tr
     event = EventVM.of(event_row, "Xodim", "AI", "Kamera")
 
     assert event.action_type == expected
+
+
+# --- media URLs must carry the deployment prefix ---------------------------
+# Found in a browser against the deployed site: every snapshot on the
+# dashboard 404'd because "/media/x.jpg" resolves against the DOMAIN root,
+# which on aiscan.airi.uz belongs to a different project entirely.
+
+import pytest as _pytest
+
+
+@_pytest.mark.parametrize("stored,expected", [
+    ("snapshots/evt_1.jpg", "/faceid/media/snapshots/evt_1.jpg"),
+    ("/media/snapshots/a.jpg", "/faceid/media/snapshots/a.jpg"),
+    ("media/snapshots/a.jpg", "/faceid/media/snapshots/a.jpg"),
+])
+def test_media_path_carries_the_prefix(stored, expected, monkeypatch):
+    from app.config import settings
+    from app.web.django_compat import media_path
+    monkeypatch.setattr(settings, "url_prefix", "/faceid", raising=False)
+    assert media_path(stored) == expected
+
+
+def test_media_path_at_the_root_is_unchanged(monkeypatch):
+    from app.config import settings
+    from app.web.django_compat import media_path
+    monkeypatch.setattr(settings, "url_prefix", "", raising=False)
+    assert media_path("snapshots/evt_1.jpg") == "/media/snapshots/evt_1.jpg"
+
+
+def test_media_url_filter_prefixes_placeholder_and_files(monkeypatch):
+    from app.config import settings
+    from app.web.django_compat import media_url
+    monkeypatch.setattr(settings, "url_prefix", "/faceid", raising=False)
+    assert media_url("") == "/faceid/static/img/avatar-placeholder.png"
+    assert media_url("faces/a.jpg") == "/faceid/media/faces/a.jpg"
+    # absolute and data URLs are left alone
+    assert media_url("https://x/y.jpg") == "https://x/y.jpg"
+    assert media_url("data:image/png;base64,AA") == "data:image/png;base64,AA"

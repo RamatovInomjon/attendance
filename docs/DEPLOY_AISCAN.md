@@ -144,7 +144,7 @@ installing it needs sudo, which this account does not have. Without sudo, use
 
 ---
 
-## The edge proxy (10.10.0.75) — the risky step
+## The edge proxy (10.10.0.75) — installed
 
 This container fronts `aiscan.airi.uz` for **every** project. A mistake here
 takes down `/ppe/`, `/manim/` and the rest, not just ours.
@@ -156,22 +156,58 @@ ssh ai@10.10.0.75
 docker cp mamograf-app:/app/app/main.py ~/main.py.bak-$(date +%Y%m%d-%H%M)
 ```
 
-Edit a local copy, adding a `/faceid` block modelled on the existing `/ppe`
-one, and add `/faceid` to the CSP middleware list:
+The file already had a **prefix-preserving** proxy helper, `_extra_proxy`, used
+by `/iqttalim` and `/harakat`. That is exactly the shape we need — it forwards
+`/faceid/x` to the backend as `/faceid/x` — so the change is three small edits
+rather than a new mechanism.
+
+**1 — register the backend** (`_EXTRA_PROXIES`, ~line 6395):
 
 ```python
-_FACEID_URL = os.environ.get("FACEID_URL", "http://10.10.0.72:8021").rstrip("/")
+"faceid": os.environ.get("FACEID_URL", "http://10.10.0.72:8021").rstrip("/"),
+```
 
+**2 — the HTTP routes**, modelled on `/harakat`:
+
+```python
 @app.get("/faceid", include_in_schema=False)
 def _faceid_root_redirect():
-    return RedirectResponse(url="/faceid/")
+    return _MentorRedirect(url="/faceid/")
 
 @app.api_route("/faceid/{path:path}", include_in_schema=False,
                methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
-async def _faceid_proxy(path: str, request: Request):
-    target = f"{_FACEID_URL}/faceid/{path}"     # path forwarded UNCHANGED
+async def _faceid_proxy(path: str, request: _MentorRequest):
+    return await _extra_proxy("faceid", path, request)
+```
+
+**3 — let our app send its own CSP/X-Frame headers** (~line 415): add
+`"/faceid"` to the `startswith((...))` tuple, or the edge stamps
+`X-Frame-Options: DENY` over ours.
+
+**4 — the WebSocket bridge, which `_extra_proxy` cannot do.**
+
+`_extra_proxy` is an httpx request/response bridge. It has no upgrade support,
+so a WebSocket handshake through it returns **500** — the live camera view and
+the live attendance feed simply never connect. That needs a real websocket
+route:
+
+```python
+@app.websocket("/faceid/ws/{path:path}")
+async def _faceid_ws_proxy(websocket: WebSocket, path: str):
+    import asyncio
+    from websockets.asyncio.client import connect as _ws_connect   # inside the
+    # function ON PURPOSE: an import failure here must not stop the container,
+    # which serves every other project on the domain.
     ...
 ```
+
+Two details that matter:
+
+- **Forward the `Cookie` header.** The backend's auth middleware checks the
+  session on the handshake; without it the upgrade is answered with a 303 to
+  the login page and the socket never opens.
+- **Pump both directions** and cancel the surviving task when either side
+  closes, or the bridge leaks a task per disconnected viewer.
 
 Then syntax-check before shipping it back:
 
@@ -184,20 +220,51 @@ docker restart mamograf-app
 **Rollback:**
 
 ```bash
-docker cp ~/main.py.bak-<time> mamograf-app:/app/app/main.py
+docker cp ~/main.py.bak-20260826-140814 mamograf-app:/app/app/main.py
 docker restart mamograf-app
 ```
+
+A known-good copy with our block already applied is kept alongside it as
+`~/main.py.faceid-working-20260826-1420`.
+
+> The container publishes **host 8081 → container 8000**. `curl 127.0.0.1:8000`
+> on the host returns nothing and does not mean the proxy is down.
 
 ---
 
 ## Verify
 
 ```bash
-curl -sI https://aiscan.airi.uz/faceid          # 307/308 -> /faceid/
-curl -s  https://aiscan.airi.uz/faceid/health   # {"status":"ok"}
+curl -sk https://aiscan.airi.uz/faceid/health   # {"status":"ok"}
 # and prove nothing else broke:
-curl -sI https://aiscan.airi.uz/ppe/ https://aiscan.airi.uz/manim/ | grep HTTP
+curl -sk -o /dev/null -w "%{http_code}\n" https://aiscan.airi.uz/ppe/
+curl -sk -o /dev/null -w "%{http_code}\n" https://aiscan.airi.uz/manim/
 ```
+
+`curl` alone is **not enough**, and did not catch the two real bugs here. Both
+were found only by driving the site in a browser:
+
+- curl followed an explicit `next=/faceid/`, so it never exercised the default
+  and missed that login redirected to the domain root;
+- curl fetched pages, not their sub-resources, so it missed every snapshot
+  404ing.
+
+So load it in a browser, sign in from `/faceid/login` **without** a `next`
+parameter, and check the console is clean:
+
+```js
+[...document.querySelectorAll('img')]
+  .filter(i => !(i.complete && i.naturalWidth > 0)).map(i => i.src)      // broken
+[...document.querySelectorAll('img')].map(i => i.getAttribute('src'))
+  .filter(s => s.startsWith('/') && !s.startsWith('/faceid/'))           // unprefixed
+```
+
+Both must be empty (`evidenceModalImage`, a hidden modal placeholder with
+`src=""`, is the one legitimate exception).
+
+`/iqttalim/` and `/harakat/` answer **502** — their backends on 10.10.0.75:8093
+and :8094 are not running. That predates this work; confirm with the backup
+file, which points at the same ports.
 
 Then sign in at `https://aiscan.airi.uz/faceid/login` with `inomjon` / `123456`
 and **change that password immediately** at `/faceid/users`.
@@ -235,32 +302,62 @@ shipped here.
 | 502 at the public URL | service down, or bound to `127.0.0.1` instead of `0.0.0.0` |
 | static 404 under `/faceid/` | a template emitting `/static/...` without `{{ PREFIX }}` |
 | GPU unused | CPU `onnxruntime` shadowing the GPU build — check providers |
+| login lands on the domain root | `next` defaulted to `/`, which is same-site and so passed the old guard. `_safe_next` now confines it to the prefix |
+| every snapshot 404s | a `/media/...` URL built without the prefix; all of them now go through `media_path()` |
+| WebSocket 500 through the proxy | `_extra_proxy` is HTTP-only; needs the `@app.websocket` bridge |
+| proxy "down" on `127.0.0.1:8000` | wrong port — the container publishes **8081**→8000 |
+| `pkill -f "scripts/run.py"` kills the SSH session | the pattern matches the remote shell's own command string. Kill by PID |
+| `AssertionError: scope["type"] == "http"` | a WebSocket request reaching a StaticFiles mount — a WS path with no WS route |
 
 ---
 
 ## Status (2026-08-26)
 
-Running on `10.10.0.72:8021`, verified:
+Live and reachable at **https://aiscan.airi.uz/faceid/**.
 
 ```
-providers   ['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+backend     10.10.0.72:8021, providers ['Tensorrt', 'CUDA', 'CPU']
 licence     'AIRI aiscan gpu6', 365 days
-models      6.2 / 2.0 / 130.4 MB decrypted in memory from .enc
-routes      200 on /faceid/{,attendance,users,api/health,api/attendance}
-            303 anonymous -> login, 200 /faceid/health (public probe)
+models      6.2 / 2.0 / 130.4 MB, decrypted in memory from .enc
+gallery     268 embeddings / 54 people
+media       617 snapshots (2.8 MB)
 ```
+
+Verified end to end through the public domain:
+
+| check | result |
+|---|---|
+| `/faceid/health` | 200 `{"status":"ok"}` (public probe) |
+| `/faceid/` anonymous | 303 → `/faceid/login` |
+| login → lands on | `/faceid/` |
+| `/faceid/{,attendance,users,employees}` | 200 |
+| `/faceid/api/{health,attendance}` | 200 authed, 401 anonymous |
+| `/faceid/media/...` | 200 authed, 303 anonymous |
+| WebSocket `/faceid/ws/attendance/` | **101 Switching Protocols** |
+| WebSocket `/faceid/ws/camera/entrance` | **101 Switching Protocols** |
+| broken / unprefixed assets | none |
+| `/`, `/ppe/`, `/manim/`, `/iclaude/` | unchanged from baseline |
+
+Media requires a session by design — the snapshots are biometric data, so they
+must not be fetchable from the shared domain without one.
 
 Install took 51 minutes, almost all of it fetching torch's CUDA wheels
-(~13 GB cached, venv ~6 GB). `torch` is needed only for ENROLMENT - the live
-recognition path is pure ONNX - so a recognition-only deployment could drop
+(~13 GB cached, venv ~6 GB). `torch` is needed only for ENROLMENT — the live
+recognition path is pure ONNX — so a recognition-only deployment could drop
 `ultralytics`/`torch` and shrink to well under 1 GB.
 
 ## Open items
 
-- **The proxy block is not installed yet.** Until it is, the app answers only on
-  `http://10.10.0.72:8021/faceid/` inside the network.
-- **No systemd unit** — needs sudo. The process does not survive a reboot.
-- **Cameras**: reachable from the server, but this laptop is currently capturing
-  from the same two cameras. Running both writes two independent attendance
-  databases for the same people and doubles the RTSP load. Decide which host
-  owns capture before enabling the workers here.
+- **No systemd unit** — `gpu6` has no sudo, so the service runs under
+  `setsid nohup` and does **not** survive a reboot. Restart with:
+  ```bash
+  cd ~/faceid/ematsy && setsid nohup ~/faceid/venv/bin/python scripts/run.py \
+      > ~/faceid/run.log 2>&1 < /dev/null &
+  ```
+- **Cameras are disabled here** (`enabled=0`). They are reachable from this
+  server, but the laptop currently owns capture; running both would write two
+  independent attendance databases for the same people and double the RTSP
+  load. Decide which host owns capture before enabling the workers.
+- **The default password is still `123456`.** Change it at `/faceid/users`.
+- The migrated database carries history from the laptop, so the dashboard
+  shows events that predate this deployment.

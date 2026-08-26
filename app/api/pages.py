@@ -7,6 +7,8 @@ reads.
 """
 from __future__ import annotations
 
+from app.web.django_compat import media_path
+
 import logging
 from datetime import date, datetime, timedelta
 from urllib.parse import urlsplit, urlunsplit
@@ -727,7 +729,7 @@ def attendance_unknown(request: Request):
             "id": u.id, "camera_id": u.camera_id, "attempt_count": u.frames,
             "first_seen": u.first_seen.astimezone(settings.tz),
             "last_seen": u.last_seen.astimezone(settings.tz),
-            "latest_record": {"snapshot": {"url": f"/media/{u.snapshot}" if u.snapshot else None}},
+            "latest_record": {"snapshot": {"url": media_path(u.snapshot) if u.snapshot else None}},
         } for u in rows]
     return render("attendance/unknown.html", request=request, current_view="attendance:unknown",
                   unknown_attempts=attempts, page_obj=Page(attempts), is_paginated=False)
@@ -971,7 +973,7 @@ def _unknown_activity(s, day: date, limit: int = 30) -> list[dict]:
         "last_seen": sighting.last_seen.astimezone(settings.tz).isoformat(),
         "first_seen_label": sighting.first_seen.astimezone(settings.tz).strftime("%H:%M:%S"),
         "last_seen_label": sighting.last_seen.astimezone(settings.tz).strftime("%H:%M:%S"),
-        "snapshot": f"/media/{sighting.snapshot}" if sighting.snapshot else None,
+        "snapshot": media_path(sighting.snapshot) if sighting.snapshot else None,
     } for sighting, camera_name in rows]
 
 

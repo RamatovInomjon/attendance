@@ -86,9 +86,25 @@ def _quote(value: str) -> str:
 
 
 def _safe_next(raw: str | None) -> str:
-    """Only same-site absolute paths. A bare `next` would otherwise let a
-    crafted link bounce a freshly authenticated operator to another host."""
+    """Only absolute paths INSIDE this deployment's prefix.
+
+    Two failures this guards, both seen for real:
+
+    `//evil.example` and scheme-relative forms would bounce a freshly
+    authenticated operator to another host.
+
+    Under a sub-path deployment the app shares its origin with unrelated
+    projects (aiscan.airi.uz serves /faceid, /manim, /ppe, ...). A bare "/" -
+    which is the DEFAULT when the login page is opened directly - is same-site
+    and so passed the old check, and sent operators to the domain root instead
+    of the console. Anything outside our own prefix is refused for the same
+    reason: same-origin is not the same as same-application.
+    """
+    from app.config import settings
+    prefix = settings.url_prefix.rstrip("/")
     if not raw or not raw.startswith("/") or raw.startswith("//"):
+        return _p("/")
+    if prefix and raw != prefix and not raw.startswith(f"{prefix}/"):
         return _p("/")
     return raw
 
@@ -205,5 +221,5 @@ def users_password(request: Request, username: str = Form(""), password: str = F
     try:
         auth_svc.set_password(target, password)
     except auth_svc.AuthError as e:
-        return RedirectResponse(f"/users?error={_quote(str(e))}", status_code=303)
+        return RedirectResponse(_p(f"/users?error={_quote(str(e))}"), status_code=303)
     return RedirectResponse(_p("/users?created=password-changed"), status_code=303)

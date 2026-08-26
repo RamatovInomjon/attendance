@@ -133,12 +133,35 @@ def json_script(value, element_id=""):
                   f'{json.dumps(value, default=str)}</script>')
 
 
+def app_prefix() -> str:
+    """The deployment's URL prefix, e.g. "/faceid" - or "" at the root."""
+    from app.config import settings
+    return settings.url_prefix.rstrip("/")
+
+
+def media_path(value) -> str:
+    """Absolute URL for a stored media file, carrying the deployment prefix.
+
+    Under a sub-path deployment the app shares its origin with other projects,
+    so a bare "/media/x.jpg" resolves against the DOMAIN root and 404s. Every
+    media URL in the app is built here for that reason.
+    """
+    p = app_prefix()
+    v = str(value).lstrip("/")
+    if v.startswith("media/"):
+        return f"{p}/{v}"
+    return f"{p}/media/{v}"
+
+
 def media_url(value):
     if not value:
-        return "/static/img/avatar-placeholder.png"
-    if str(value).startswith(("http://", "https://", "/media/", "/static/", "data:")):
-        return value
-    return f"/media/{value}"
+        return f"{app_prefix()}/static/img/avatar-placeholder.png"
+    v = str(value)
+    if v.startswith(("http://", "https://", "data:")):
+        return v
+    if v.startswith("/static/"):
+        return f"{app_prefix()}{v}"
+    return media_path(v)
 
 
 def clean_phone(value):
