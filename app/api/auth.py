@@ -22,13 +22,28 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 # Exact paths served without a session. Everything else requires one.
-PUBLIC_PATHS = frozenset({"/login", "/logout", "/favicon.ico"})
-# Prefixes served without a session: the login page's own styling only.
-PUBLIC_PREFIXES = ("/static/",)
+_PUBLIC_NAMES = ("/login", "/logout", "/favicon.ico", "/health")
+_PUBLIC_PREFIX_NAMES = ("/static/",)
 
 
 def _is_public(path: str) -> bool:
-    return path in PUBLIC_PATHS or path.startswith(PUBLIC_PREFIXES)
+    """Public paths, resolved against the deployment prefix.
+
+    These are compared against the RAW request path, which under a sub-path
+    deployment arrives as /faceid/login - so the prefix has to be applied here
+    too, or the login page itself would demand a session and loop forever.
+    """
+    from app.config import settings
+    p = settings.url_prefix.rstrip("/")
+    if path in {f"{p}{n}" for n in _PUBLIC_NAMES}:
+        return True
+    return path.startswith(tuple(f"{p}{n}" for n in _PUBLIC_PREFIX_NAMES))
+
+
+def _p(path: str) -> str:
+    """Prefix an absolute app path for the current deployment."""
+    from app.config import settings
+    return f"{settings.url_prefix.rstrip('/')}{path}"
 
 
 def current_user(request: Request) -> dict | None:
@@ -52,7 +67,7 @@ async def auth_middleware(request: Request, call_next):
 
     accept = request.headers.get("accept", "")
     wants_json = (
-        path.startswith("/api/")
+        path.startswith(_p("/api/"))
         or "application/json" in accept
         or request.headers.get("x-requested-with") == "XMLHttpRequest"
     )
@@ -62,7 +77,7 @@ async def auth_middleware(request: Request, call_next):
     nxt = request.url.path
     if request.url.query:
         nxt = f"{nxt}?{request.url.query}"
-    return RedirectResponse(f"/login?next={_quote(nxt)}", status_code=303)
+    return RedirectResponse(_p(f"/login?next={_quote(nxt)}"), status_code=303)
 
 
 def _quote(value: str) -> str:
@@ -74,7 +89,7 @@ def _safe_next(raw: str | None) -> str:
     """Only same-site absolute paths. A bare `next` would otherwise let a
     crafted link bounce a freshly authenticated operator to another host."""
     if not raw or not raw.startswith("/") or raw.startswith("//"):
-        return "/"
+        return _p("/")
     return raw
 
 
@@ -130,7 +145,7 @@ async def login_submit(request: Request,
 @router.get("/logout")
 @router.post("/logout")
 def logout():
-    resp = RedirectResponse("/login", status_code=303)
+    resp = RedirectResponse(_p("/login"), status_code=303)
     resp.delete_cookie(COOKIE_NAME, path="/")
     return resp
 
@@ -160,8 +175,8 @@ def users_add(request: Request, username: str = Form(""), password: str = Form("
         admin = str(is_admin).lower() not in {"0", "false", "no"}
         auth_svc.create_user(username, password, is_admin=admin, full_name=full_name)
     except auth_svc.AuthError as e:
-        return RedirectResponse(f"/users?error={_quote(str(e))}", status_code=303)
-    return RedirectResponse(f"/users?created={_quote(username.strip().lower())}",
+        return RedirectResponse(_p(f"/users?error={_quote(str(e))}"), status_code=303)
+    return RedirectResponse(_p(f"/users?created={_quote(username.strip().lower())}"),
                             status_code=303)
 
 
@@ -173,8 +188,8 @@ def users_toggle(request: Request, username: str = Form(""), active: str = Form(
     try:
         auth_svc.set_active(username, str(active) not in {"0", "false", "no"})
     except auth_svc.AuthError as e:
-        return RedirectResponse(f"/users?error={_quote(str(e))}", status_code=303)
-    return RedirectResponse("/users", status_code=303)
+        return RedirectResponse(_p(f"/users?error={_quote(str(e))}"), status_code=303)
+    return RedirectResponse(_p("/users"), status_code=303)
 
 
 @router.post("/users/password")
@@ -191,4 +206,4 @@ def users_password(request: Request, username: str = Form(""), password: str = F
         auth_svc.set_password(target, password)
     except auth_svc.AuthError as e:
         return RedirectResponse(f"/users?error={_quote(str(e))}", status_code=303)
-    return RedirectResponse("/users?created=password-changed", status_code=303)
+    return RedirectResponse(_p("/users?created=password-changed"), status_code=303)

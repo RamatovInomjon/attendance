@@ -161,5 +161,5 @@
 {% block extra_js %}
 {{ recent_events_serialized|json_script("initial-recognition-events") }}
 {{ unknown_attempts_serialized|json_script("initial-unknown-activity") }}
-<script src="/static/js/camera_stream.js"></script>
+<script src="{{ PREFIX }}/static/js/camera_stream.js"></script>
 {% endblock %}

@@ -265,7 +265,7 @@
 
     // WebSocket Connection
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/recognition/`;
+    const wsUrl = `${protocol}//${window.location.host}{{ PREFIX }}/ws/recognition/`;
     let socket = null;
     let reconnectInterval = 3000;
 

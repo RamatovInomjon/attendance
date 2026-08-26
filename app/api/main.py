@@ -45,13 +45,18 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="EmAtSy v3", version="3.0.0", lifespan=lifespan)
 
+# Everything hangs off the configured prefix. The edge proxy forwards the path
+# unchanged, so when this is served at /faceid the app must really answer on
+# /faceid/... - mounts, routes and all.
+PREFIX = settings.url_prefix.rstrip("/")
+
 settings.media_dir.mkdir(parents=True, exist_ok=True)
-app.mount("/media", StaticFiles(directory=str(settings.media_dir)), name="media")
+app.mount(f"{PREFIX}/media", StaticFiles(directory=str(settings.media_dir)), name="media")
 
 # The original UI's stylesheet and scripts.
 _static = settings.root / "static"
 if _static.is_dir():
-    app.mount("/static", StaticFiles(directory=str(_static)), name="static")
+    app.mount(f"{PREFIX}/static", StaticFiles(directory=str(_static)), name="static")
 
 # HTML pages (original Bootstrap templates) and the live-view WebSocket.
 # Deny by default. This must be added BEFORE the routers so that every route,
@@ -59,9 +64,20 @@ if _static.is_dir():
 # app/api/auth.py. Without it the pages below answer anyone with the URL.
 app.middleware("http")(auth_router.auth_middleware)
 
-app.include_router(auth_router.router)
-app.include_router(pages_router.router)
-app.include_router(ws_router.router)
+app.include_router(auth_router.router, prefix=PREFIX)
+app.include_router(pages_router.router, prefix=PREFIX)
+app.include_router(ws_router.router, prefix=PREFIX)
+
+
+@app.get(f"{PREFIX}/health", include_in_schema=False)
+def _health_probe():
+    """Unauthenticated liveness probe for the edge proxy's monitoring.
+
+    Deliberately says nothing about cameras, people or the gallery - it exists
+    to answer "is the process up", and anything richer would leak operational
+    detail to an endpoint that has to stay public.
+    """
+    return {"status": "ok"}
 
 
 def _local(dt):

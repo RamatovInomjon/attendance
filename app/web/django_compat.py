@@ -157,11 +157,19 @@ def add_class(field, css):
 
 
 def url(name, *args, **kwargs):
+    """Reverse a route name to a path, carrying the deployment prefix.
+
+    The edge proxy forwards /faceid/... unchanged, so a link to "/attendance"
+    would leave the mounted app entirely. Every generated link has to include
+    the prefix, and this is the one place they are built.
+    """
+    from app.config import settings
     path = URL_MAP.get(name, f"/{name}")
     pk = kwargs.get("pk") or kwargs.get("id") or (args[0] if args else None)
     if pk is not None:
         path = path.replace("{pk}", str(pk))
-    return path
+    prefix = settings.url_prefix.rstrip("/")
+    return f"{prefix}{path}" if prefix else path
 
 
 class _User:

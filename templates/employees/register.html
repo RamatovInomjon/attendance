@@ -21,7 +21,7 @@
                 <i class="bi bi-person-vcard enrollment-stage__icon" aria-hidden="true"></i>
             </div>
             <div class="enrollment-stage__body">
-                <form method="post" action="/api/employees/" enctype="multipart/form-data" id="registrationForm">
+                <form method="post" action="{{ PREFIX }}/api/employees/" enctype="multipart/form-data" id="registrationForm">
 
                     <input type="hidden" name="captured_image" id="id_captured_image" value="">
                     <input type="hidden" name="captured_images" id="id_captured_images" value="">
@@ -1023,7 +1023,7 @@
 
     function initRegistrationWebSocket(canvas) {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws/camera/registration/`;
+        const wsUrl = `${protocol}//${window.location.host}{{ PREFIX }}/ws/camera/registration/`;
 
         console.log('🔌 Connecting to registration WebSocket:', wsUrl);
 

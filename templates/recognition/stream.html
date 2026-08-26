@@ -27,7 +27,7 @@
         const canvas = document.getElementById('streamCanvas');
         const ctx = canvas.getContext('2d');
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const ws = new WebSocket(`${protocol}//${window.location.host}/ws/camera/primary/`);
+        const ws = new WebSocket(`${protocol}//${window.location.host}{{ PREFIX }}/ws/camera/primary/`);
 
         let frameCount = 0;
         let lastFrameTime = 0;

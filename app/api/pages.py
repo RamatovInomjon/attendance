@@ -55,6 +55,9 @@ def render(name: str, *, request=None, current_view: str = "", **ctx) -> HTMLRes
     # control, and the admin-only Users link. Injected once here rather than
     # threaded through every page function.
     ctx.setdefault("current_user", getattr(getattr(request, "state", None), "user", None))
+    # For the handful of links templates build by hand - static assets, form
+    # actions, WebSocket URLs - which url() cannot reverse.
+    ctx.setdefault("PREFIX", settings.url_prefix.rstrip("/"))
     return HTMLResponse(env.get_template(name).render(**ctx))
 
 

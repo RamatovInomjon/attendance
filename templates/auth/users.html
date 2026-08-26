@@ -55,7 +55,7 @@
               <td class="text-secondary small">{{ u.last_login_at.strftime('%Y-%m-%d %H:%M') if u.last_login_at else "—" }}</td>
               <td class="text-end">
                 {% if u.username != current_user.u %}
-                <form method="post" action="/users/toggle" class="d-inline">
+                <form method="post" action="{{ PREFIX }}/users/toggle" class="d-inline">
                   <input type="hidden" name="username" value="{{ u.username }}">
                   <input type="hidden" name="active" value="{{ '0' if u.is_active else '1' }}">
                   <button class="btn btn-sm {{ 'btn-outline-danger' if u.is_active else 'btn-outline-success' }}" type="submit">
@@ -78,7 +78,7 @@
     <div class="card mb-4">
       <div class="card-header bg-transparent"><strong>Yangi hisob qo'shish</strong></div>
       <div class="card-body">
-        <form method="post" action="/users/add" class="vstack gap-3">
+        <form method="post" action="{{ PREFIX }}/users/add" class="vstack gap-3">
           <div>
             <label class="form-label" for="new-username">Login</label>
             <input class="form-control font-monospace" id="new-username" name="username"
@@ -109,7 +109,7 @@
     <div class="card">
       <div class="card-header bg-transparent"><strong>Parolni o'zgartirish</strong></div>
       <div class="card-body">
-        <form method="post" action="/users/password" class="vstack gap-3">
+        <form method="post" action="{{ PREFIX }}/users/password" class="vstack gap-3">
           <div>
             <label class="form-label" for="pw-username">Login</label>
             <input class="form-control font-monospace" id="pw-username" name="username"

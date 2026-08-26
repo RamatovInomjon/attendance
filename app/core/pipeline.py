@@ -269,6 +269,10 @@ class CameraPipeline:
         )
 
         self.tracks: dict[int, TrackState] = {}
+        # Recognised passes traced so far. Tracing embeds every frame of every
+        # track, which is far more GPU work than the pipeline normally does, so
+        # it stops itself rather than running until someone remembers.
+        self.traced_passes = 0
         self.frames_processed = 0
         self.faces_embedded = 0
 
@@ -284,6 +288,12 @@ class CameraPipeline:
             t = self.tracks.pop(tid)
             if t.embedded == 0:
                 continue
+            if t.employee_id is not None and settings.debug_trace_tracks:
+                self.traced_passes += 1
+                if self.traced_passes == settings.debug_trace_limit:
+                    log.info("track tracing complete: %d recognised passes captured "
+                             "in %s/<person>/frames/", self.traced_passes,
+                             settings.debug_dir)
             out.append(CompletedTrack(
                 track_id=tid, employee_id=t.employee_id, name=t.name,
                 best_score=float(max(t.best_seen, t.vote.best_score or 0.0)),
@@ -357,6 +367,10 @@ class CameraPipeline:
         boxes = np.stack([d.box for d in dets]).astype(np.float32) / scale
         scores = np.array([d.score for d in dets], dtype=np.float32)
         return boxes, scores
+
+    def _tracing(self) -> bool:
+        return (settings.debug_trace_tracks
+                and self.traced_passes < settings.debug_trace_limit)
 
     # -- main -------------------------------------------------------------
     def process(self, frame: Frame) -> FrameResult:
@@ -457,7 +471,11 @@ class CameraPipeline:
             # Only tracks showing a head this frame can be recognized. With
             # person tracking a track can live for many frames with no head at
             # all, and those frames have nothing to align.
-            if not st.vote.decided and st.face_box is not None:
+            #
+            # Normally recognition stops once the vote commits. While tracing,
+            # keep scoring for the whole life of the track so the score curve
+            # across the entire pass is recorded, not just its run-up.
+            if st.face_box is not None and (not st.vote.decided or self._tracing()):
                 pending.append(st)
 
         # Pre-gate on head-box size before paying for alignment. face_px is
@@ -489,6 +507,8 @@ class CameraPipeline:
         pending = sized
 
         t_align = t_embed = 0.0
+        # defined before the branch: used after it, and `pending` can be empty
+        gated_trace: list = []
         if pending:
             t0 = time.perf_counter()
             # Hand the BGR frame straight over: the aligner converts only the
@@ -513,6 +533,14 @@ class CameraPipeline:
                 if not q.ok:
                     st.gated += 1
                     st.last_reason = q.reason
+                    # While tracing, a gated face is the interesting one: it is
+                    # what the gates threw away, and you cannot judge whether
+                    # they were right without seeing it scored. Embed it, tag it
+                    # with the gate that rejected it, and save it - but keep it
+                    # OUT of `keep`, so it never reaches the vote and cannot
+                    # affect the identity.
+                    if self._tracing():
+                        gated_trace.append((st, f, q))
                     continue
                 keep.append((st, f))
                 quals.append(q)
@@ -530,7 +558,7 @@ class CameraPipeline:
                     )
                     st.embedded += 1
                     st.best_face_px = max(st.best_face_px, int(q.face_px))
-                    if settings.save_all_frames:
+                    if settings.save_all_frames or self._tracing():
                         x1, y1, x2, y2 = [int(v) for v in st.face_box]
                         res.candidates.append(FrameCandidate(
                             track_id=st.track_id,
@@ -539,7 +567,10 @@ class CameraPipeline:
                             score=float(m.score), aligned=f.aligned,
                             native=frame.image[max(0, y1):y2, max(0, x1):x2],
                             quality=q, accepted=m.employee_id is not None,
-                            index=st.embedded))
+                            # st.attempts, not st.embedded: attempts counts EVERY
+                            # assessed frame, so accepted and gated frames share
+                            # one sequence and the pass reads in order.
+                            index=st.attempts))
                     # Match.score is the top similarity even when it misses, and
                     # runner_up carries who it nearly was - both worth keeping so
                     # an unrecognized pass can be explained rather than guessed at.
@@ -587,6 +618,32 @@ class CameraPipeline:
                         st.reported_direction = st.direction
                     elif not st.emitted:
                         st.name = "…" if m.employee_id is None else self.gallery.name(m.employee_id)
+
+        # Trace: score the faces the gates rejected, so the saved frames show the
+        # whole pass rather than only its winners. Deliberately after the real
+        # path, and deliberately not touching any track state beyond the debug
+        # candidate list.
+        if gated_trace:
+            try:
+                g_aligned = np.stack([f.aligned for _st, f, _q in gated_trace])
+                g_embs = self.recognizer.embed(g_aligned)
+                for (st, f, q), emb in zip(gated_trace, g_embs):
+                    gm = self.gallery.match(emb, settings.recognition_threshold,
+                                            settings.second_best_margin)
+                    who = (self.gallery.name(gm.employee_id) if gm.employee_id
+                           else f"_near_{self.gallery.name(gm.runner_up)}")
+                    x1, y1, x2, y2 = [int(v) for v in st.face_box]
+                    res.candidates.append(FrameCandidate(
+                        track_id=st.track_id,
+                        name=who,
+                        score=float(gm.score),
+                        aligned=f.aligned,
+                        native=frame.image[max(0, y1):y2, max(0, x1):x2],
+                        quality=q,
+                        accepted=False,          # filenames get "gated"
+                        index=st.attempts))
+            except Exception:
+                log.exception("trace embedding failed")
 
         # No attendance outcome is emitted here. Identity commits partway
         # through a walk, but direction only resolves once the person has

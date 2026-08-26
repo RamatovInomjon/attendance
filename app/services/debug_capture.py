@@ -32,6 +32,8 @@ log = logging.getLogger(__name__)
 class DebugCapture:
     def __init__(self, enabled: bool | None = None, root=None, max_per_person: int | None = None):
         self.enabled = settings.debug_capture if enabled is None else enabled
+        # (camera, track_id) -> first frame time, so one pass is one directory
+        self._trace_starts: dict = {}
         self.root = root or settings.debug_dir
         self.max_per_person = max_per_person or settings.debug_max_per_person
         self._counts: dict[str, int] = defaultdict(int)
@@ -147,15 +149,39 @@ class DebugCapture:
         did it have to choose from", which is what you need to tell a threshold
         problem from a quality problem.
         """
-        if not self.enabled or not settings.save_all_frames:
+        if not self.enabled or not (settings.save_all_frames
+                                    or settings.debug_trace_tracks):
             return
         try:
             import shutil as _sh
             if _sh.disk_usage(self.root).free / 1073741824 < settings.save_all_min_free_gb:
                 return
-            d = self.root / self._slug(name) / "frames"
+            # While tracing, group by TRACK, not by guessed identity. The name
+            # comes from whichever gallery entry scored highest, so a single
+            # pass gets scattered across a dozen _near_* folders and reviewing
+            # one walk-through means hunting through all of them. One directory
+            # per track keeps the score curve of a pass readable in one listing.
+            if settings.debug_trace_tracks:
+                # Keyed on the track's FIRST timestamp, not this frame's -
+                # using the frame time made a new directory every second and
+                # split one pass across a dozen of them.
+                key = (camera, track_id)
+                start = self._trace_starts.get(key)
+                if start is None:
+                    start = ts
+                    self._trace_starts[key] = start
+                    if len(self._trace_starts) > 512:      # bounded
+                        for k in list(self._trace_starts)[:256]:
+                            self._trace_starts.pop(k, None)
+                d = (self.root / "_traces"
+                     / f"{start.astimezone(settings.tz):%H%M%S}_{camera}_t{track_id}")
+            else:
+                d = self.root / self._slug(name) / "frames"
             d.mkdir(parents=True, exist_ok=True)
-            stem = (f"{ts.astimezone(settings.tz):%H%M%S}_t{track_id}_{idx:03d}"
+            stem = (f"t{track_id}_{idx:03d}_score{score:.3f}"
+                    f"_{'OK' if accepted else 'gated'}_{self._slug(name)[:22]}"
+                    if settings.debug_trace_tracks else
+                    f"{ts.astimezone(settings.tz):%H%M%S}_t{track_id}_{idx:03d}"
                     f"_{score:.3f}_{'ok' if accepted else 'gated'}")
             if aligned_chw is not None:
                 rgb = aligned_to_uint8(aligned_chw)

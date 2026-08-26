@@ -283,7 +283,7 @@
 <div class="auth-container">
     <div class="logo-container">
         <div class="logo">
-            <img src="/static/images/airi-logo.png" alt="AIRI">
+            <img src="{{ PREFIX }}/static/images/airi-logo.png" alt="AIRI">
         </div>
     </div>
 
@@ -302,7 +302,7 @@
 
     {% if error %}<div class="error-message">{{ error }}</div>{% endif %}
 
-    <form method="post" id="loginForm" action="/login">
+    <form method="post" id="loginForm" action="{{ PREFIX }}/login">
         <input type="hidden" name="next" value="{{ next_url|default('/') }}">
 
         <div class="form-group">

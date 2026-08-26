@@ -25,7 +25,12 @@ from app.services import auth as auth_svc
 # against the cameras forever.
 client = TestClient(app, follow_redirects=False)
 
-PUBLIC = {"/login", "/logout", "/favicon.ico"}
+# Every deliberately public path. Adding to this list is a security decision:
+# /health is public because the edge proxy in front of aiscan.airi.uz probes it
+# for liveness and cannot present a session. It returns only {"status": "ok"} -
+# nothing about cameras, people or the gallery - precisely so that being public
+# leaks nothing.
+PUBLIC = {"/login", "/logout", "/favicon.ico", "/health"}
 
 
 # Sent as an explicit header rather than TestClient's `cookies=` kwarg: that
