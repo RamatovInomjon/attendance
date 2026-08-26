@@ -42,6 +42,7 @@ interface, served from `templates/` and fed by the v3 recognition core.
 |---|---|
 | [docs/ALGORITHM.md](docs/ALGORITHM.md) | **start here** - how the algorithm works, end to end |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | shipping to another machine: licence, encrypted models, bundle |
+| [docs/DEPLOY_AISCAN.md](docs/DEPLOY_AISCAN.md) | the AIRI GPU-server deployment: hosts, ports, proxy, traps |
 | [docs/PLAN.md](docs/PLAN.md) | the implementation plan and the decisions behind it |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | how the pipeline works, module by module |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | running, deploying, tuning, troubleshooting |
