@@ -238,6 +238,23 @@ shipped here.
 
 ---
 
+## Status (2026-08-26)
+
+Running on `10.10.0.72:8021`, verified:
+
+```
+providers   ['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+licence     'AIRI aiscan gpu6', 365 days
+models      6.2 / 2.0 / 130.4 MB decrypted in memory from .enc
+routes      200 on /faceid/{,attendance,users,api/health,api/attendance}
+            303 anonymous -> login, 200 /faceid/health (public probe)
+```
+
+Install took 51 minutes, almost all of it fetching torch's CUDA wheels
+(~13 GB cached, venv ~6 GB). `torch` is needed only for ENROLMENT - the live
+recognition path is pure ONNX - so a recognition-only deployment could drop
+`ultralytics`/`torch` and shrink to well under 1 GB.
+
 ## Open items
 
 - **The proxy block is not installed yet.** Until it is, the app answers only on

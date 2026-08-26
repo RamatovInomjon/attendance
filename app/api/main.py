@@ -89,7 +89,7 @@ def _today() -> date:
 
 
 # --------------------------------------------------------------- stream ----
-@app.get("/video/{camera_id}")
+@app.get(f"{PREFIX}/video/{{camera_id}}")
 async def video(camera_id: int):
     w = runtime.workers.get(camera_id)
     if w is None:
@@ -108,7 +108,7 @@ async def video(camera_id: int):
 
 
 # ------------------------------------------------------------------ api ----
-@app.get("/api/health")
+@app.get(f"{PREFIX}/api/health")
 def health():
     ok = all(w.source.connected and not w.source.is_stale for w in runtime.workers.values())
     errs = sum(w.pipeline_errors for w in runtime.workers.values())
@@ -121,7 +121,7 @@ def health():
     }
 
 
-@app.get("/api/events")
+@app.get(f"{PREFIX}/api/events")
 def events(limit: int = 40):
     return runtime.events(limit)
 
@@ -147,7 +147,7 @@ def _filtered_attendance_rows(day: str | None = None, query: str | None = None,
         } for r, e in rows]
 
 
-@app.get("/api/attendance")
+@app.get(f"{PREFIX}/api/attendance")
 def attendance(day: str | None = None, query: str | None = None,
                department: str | None = None, start_date: str | None = None,
                end_date: str | None = None, status: str | None = None):
@@ -157,7 +157,7 @@ def attendance(day: str | None = None, query: str | None = None,
     return rows
 
 
-@app.get("/api/attendance/export")
+@app.get(f"{PREFIX}/api/attendance/export")
 def export(day: str | None = None, query: str | None = None,
            department: str | None = None, start_date: str | None = None,
            end_date: str | None = None, status: str | None = None):
@@ -180,7 +180,7 @@ def export(day: str | None = None, query: str | None = None,
         headers={"Content-Disposition": f"attachment; filename=attendance_{suffix}.csv"})
 
 
-@app.get("/api/debug/captures")
+@app.get(f"{PREFIX}/api/debug/captures")
 def debug_captures():
     """What the debug folder holds, per person."""
     merged: dict[str, int] = {}
@@ -191,7 +191,7 @@ def debug_captures():
             "captured": dict(sorted(merged.items(), key=lambda kv: -kv[1]))}
 
 
-@app.post("/api/gallery/reload")
+@app.post(f"{PREFIX}/api/gallery/reload")
 def reload_gallery():
     g = runtime.reload_gallery()
     return {"embeddings": len(g), "people": g.n_people}
