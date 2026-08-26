@@ -232,6 +232,68 @@ A known-good copy with our block already applied is kept alongside it as
 
 ---
 
+## The server owns capture (handover, 2026-08-26)
+
+Capture moved from the laptop to the GPU server. Only ONE host may capture:
+both writing means two independent attendance databases for the same people and
+double the RTSP load on the cameras.
+
+```bash
+# 1 - stop the laptop cleanly, so its workers flush
+kill <pid of scripts/run.py>          # SIGTERM; wait for "worker stopped"
+
+# 2 - hand the database over. It is WAL, so cp corrupts it - use the backup API
+sqlite3 data/ematsy.db ".backup '/tmp/handover.db'"
+sqlite3 /tmp/handover.db "pragma integrity_check;"     # must say ok
+scp /tmp/handover.db gpu6@10.10.0.72:/tmp/
+
+# 3 - on the server: STOP the service first, it holds the db open
+cp data/ematsy.db data/ematsy.db.pre-handover-$(date +%Y%m%d-%H%M)
+rm -f data/ematsy.db-wal data/ematsy.db-shm     # stale WAL of the old db
+cp /tmp/handover.db data/ematsy.db
+```
+
+**Do the media copy AFTER the final database backup, not before.** Copying
+snapshots first and the database second leaves the database referencing images
+that were written in between, and every one of them 404s on the dashboard.
+
+**Carry the whole database, not just the gallery.** Anyone still checked in
+(`presence='INSIDE'`) has an open session; without their row the next
+check-out has nothing to close and lands as `NO_CHECKIN`. Eleven people were
+open at this handover.
+
+### The timezone will bite you
+
+The GPU server runs **UTC**; the cameras, the operators and all existing
+attendance data are **Asia/Tashkent (UTC+5)**. Left alone, the service writes
+UTC rows into a table full of Tashkent rows: check-in times display five hours
+early and open sessions compute nonsense durations.
+
+The host clock belongs to the other projects on this machine and is not ours to
+change (and there is no sudo). So the timezone is pinned per-process, in
+`~/faceid/start.sh` — always start through it:
+
+```bash
+#!/bin/bash
+export TZ=Asia/Tashkent
+cd /home/gpu6/faceid/ematsy
+exec /home/gpu6/faceid/venv/bin/python scripts/run.py
+```
+
+Confirm it took: the log timestamps must lead `date -u` by five hours, and
+`/faceid/api/attendance` must return offsets of `+05:00`.
+
+### Known limitation: the MJPEG endpoint
+
+`_extra_proxy` buffers a whole response (`rr.content`) before returning it, so
+`/faceid/video/<id>` — an endless multipart stream — never completes and pins a
+proxy worker for its 900 s timeout. No page embeds it (the live view uses the
+WebSocket bridge instead), so this is latent; do not link to it from a template
+without first making the proxy stream, or it will affect every project on the
+domain.
+
+---
+
 ## Verify
 
 ```bash
@@ -349,15 +411,11 @@ recognition path is pure ONNX — so a recognition-only deployment could drop
 ## Open items
 
 - **No systemd unit** — `gpu6` has no sudo, so the service runs under
-  `setsid nohup` and does **not** survive a reboot. Restart with:
-  ```bash
-  cd ~/faceid/ematsy && setsid nohup ~/faceid/venv/bin/python scripts/run.py \
-      > ~/faceid/run.log 2>&1 < /dev/null &
-  ```
-- **Cameras are disabled here** (`enabled=0`). They are reachable from this
-  server, but the laptop currently owns capture; running both would write two
-  independent attendance databases for the same people and double the RTSP
-  load. Decide which host owns capture before enabling the workers.
+  `setsid nohup ~/faceid/start.sh &` and does **not** survive a reboot.
 - **The default password is still `123456`.** Change it at `/faceid/users`.
-- The migrated database carries history from the laptop, so the dashboard
-  shows events that predate this deployment.
+- 59 snapshots from 24-25 Aug are referenced by the database but were deleted
+  in an earlier cleanup, so those rows show a placeholder. Today's are intact.
+- Unchanged pipeline items, not specific to this deployment: suppressing
+  emission when the direction verdict is UNKNOWN, transition-keyed debounce,
+  honest `direction_reason` logging, and `NO_CHECKIN` not clearing on a later
+  check-in (visible in the migrated data).
