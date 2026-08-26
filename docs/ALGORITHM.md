@@ -213,6 +213,14 @@ with full information.
 | per-frame cost | ~10 ms median, ~18 ms p90 (20% of the 50 ms budget) |
 | gallery | 268 vectors / 55 people, d′ 10.03, rank-1 100% |
 
+## Debug capture
+
+Clip recording and per-frame saving are **debug tools, off by default**. They
+built the replay corpus that made the detector A/B, the direction comparison
+and the fp16 validation measurable with the cameras switched off - but a
+release keeps only one best-shot image per recognition, capped at 40 per
+person, as attendance evidence.
+
 ## Where it can still fail
 
 Honest list, in rough order of how often it bites:

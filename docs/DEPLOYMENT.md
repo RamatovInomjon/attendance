@@ -130,6 +130,36 @@ Compare against the figures the bundle shipped with. On the reference machine
 
 ---
 
+## Debug capture is off in a release
+
+Three switches exist for tuning and are **off by default**, because a customer
+site is not a debugging session:
+
+| setting | default | what it does |
+|---|---|---|
+| `record_clips` | `False` | records a video clip per person-pass |
+| `save_all_frames` | `False` | writes every gate-passing frame |
+| `debug_max_per_person` | `40` | caps per-person evidence images (`0` = unbounded) |
+
+One day of two cameras produced **1,156 clips / 3.2 GB** of video and 15,724
+images — all of it footage of identified people. On a customer site that is a
+privacy exposure as much as a disk problem, so `package_release.py` **refuses
+to build a bundle** while any of them is enabled.
+
+What a release *does* keep is `debug_capture`: one best-shot image and a JSON
+sidecar per recognition, capped, which is the evidence the console shows when
+somebody disputes an attendance row.
+
+To collect a replay corpus on a live site, enable it for that session only:
+
+```bash
+record_clips=1 save_all_frames=1 debug_max_per_person=0 ./run.sh
+```
+
+Then turn it off. `scripts/maintenance.py` prunes what it leaves behind.
+
+---
+
 ## Re-licensing an existing install
 
 When a licence expires or hardware changes, reuse the **same key material** so

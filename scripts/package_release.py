@@ -33,6 +33,7 @@ import tarfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
 INCLUDE_DIRS = ["app", "templates", "static", "docs", "deploy"]
 INCLUDE_FILES = ["requirements.txt", "README.md", "run.sh", "env.example"]
@@ -72,7 +73,35 @@ def _copy_app(dst: Path) -> tuple[int, int]:
     return so_kept, py_dropped
 
 
+def _debug_capture_is_off() -> list[str]:
+    """Debug capture is for tuning, not for customer sites.
+
+    Clip recording produced 3.2 GB of video of identified people in one day and
+    save_all_frames wrote 15,724 face images. Shipping either enabled fills a
+    customer's disk with biometric imagery they never asked for, so this is
+    checked BEFORE anything is copied rather than after.
+    """
+    from app.config import settings as s
+    hot = []
+    if s.record_clips:
+        hot.append("record_clips=True")
+    if s.save_all_frames:
+        hot.append("save_all_frames=True")
+    if s.debug_max_per_person == 0:
+        hot.append("debug_max_per_person=0 (unbounded)")
+    return hot
+
+
 def build(args) -> int:
+    hot = _debug_capture_is_off()
+    if hot:
+        print("  REFUSING TO SHIP - debug capture is enabled:", file=sys.stderr)
+        for h in hot:
+            print(f"    {h}", file=sys.stderr)
+        print("  These are debug-only; unset them (or the matching env var) "
+              "and try again.", file=sys.stderr)
+        return 1
+
     out = Path(args.out)
     if out.exists():
         shutil.rmtree(out)
