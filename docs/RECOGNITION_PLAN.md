@@ -294,6 +294,34 @@ bailing out at three votes, a 5-second walk at 20 fps yields far more than five
 usable frames. What remains under the floor is only the genuinely brief or
 badly-angled pass.
 
+**MEASURED 2026-08-28 — the floor is expensive and the number needs revisiting.**
+
+Across 179 recognised passes in the local database, embedded frames per pass:
+
+| frames | passes |
+|---|---|
+| 3 | 58 |
+| 4 | 29 |
+| 5 | 10 |
+| 6-11 | 34 |
+| 12+ | 5 |
+
+median 5, max 74. **A floor of 5 would have rejected 49% of them** (87/179);
+a floor of 4 rejects 32%.
+
+This is an **upper bound**, not the expected loss: those counts were taken
+under the old stop-at-commit behaviour, where a pass that committed at frame 3
+stopped embedding. Under T1 the same pass keeps embedding for the rest of the
+track, so the distribution shifts right and fewer passes fall under the floor.
+By how much is **not yet known** — the recordings available locally are
+low-traffic and their tracks are gate-limited (max 11 embeddings over 60 s), so
+they cannot answer it.
+
+**Do not trust the floor until this is measured on live data.** The correct
+sequence is: deploy T1, let a day of traffic accumulate, re-run this
+distribution, and only then confirm or adjust `vote_min_recognitions`. Setting
+it from pre-T1 data risks halving the recognition rate.
+
 **Still measure the cost.** After T1+T2 land, replay a day of live passes and
 count how many *genuine* recognitions the floor rejects. If that number is
 material the floor can be revisited with evidence rather than intuition.

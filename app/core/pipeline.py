@@ -289,10 +289,16 @@ class CameraPipeline:
             t = self.tracks.pop(tid)
             if t.embedded == 0:
                 continue
-            # THE decision point. Everything before this is provisional: the
-            # overlay name, the running best frame, the leader of the tally.
-            # The pass is over, so the whole of its evidence is in, and the
-            # consensus rule gets the last word. Attendance reads only this.
+            # THE decision point, and the only one. Everything before this is
+            # provisional: the overlay name, the running best frame, the leader
+            # of the tally. The pass is over, so the whole of its evidence is
+            # in, and the consensus rule gets the last word.
+            #
+            # Exactly one attendance decision per pass follows from this:
+            # worker._persist_completed consumes CompletedTrack and nothing
+            # else writes attendance. res.outcomes, emitted during the pass, is
+            # a live feed for scripts/live_test.py and must never be persisted -
+            # it carries provisional identities that the consensus can overturn.
             final_id = t.vote.finalize()
             t.employee_id = final_id
             t.name = self.gallery.name(final_id) if final_id is not None else ""
@@ -629,24 +635,36 @@ class CameraPipeline:
                     if m.employee_id is not None:
                         st.score = max(st.score, m.score)
 
-                    # Display only. The identity is not settled until the track
-                    # ends, so this name may change as the pass accumulates
-                    # evidence - which is the point. `emitted` records that the
-                    # track has had a name at some point, for the live feed.
+                    # DISPLAY ONLY. Attendance never reads any of this: the one
+                    # decision per pass is taken in _prune() from vote.finalize()
+                    # and written by worker._persist_completed. res.outcomes is a
+                    # live feed consumed by scripts/live_test.py.
+                    #
+                    # The name follows the leader and may change as the pass
+                    # accumulates evidence - that is the point of deciding at the
+                    # end. An outcome is appended only when the leader CHANGES,
+                    # not every frame: the leader is recomputed per frame now, so
+                    # an unguarded append would emit one record per frame for the
+                    # whole time a person is in view.
                     if provisional is not None:
+                        changed = st.employee_id != provisional
                         st.employee_id = provisional
                         st.name = self.gallery.name(provisional)
                         st.emitted = True
-                        votes = "/".join("?" if v is None else str(v) for v in st.vote.votes)
-                        res.outcomes.append(RecognitionOutcome(
-                            track_id=st.track_id, employee_id=provisional, name=st.name,
-                            score=st.vote.best_score, margin=m.margin,
-                            face_px=int(q.face_px), votes=votes, ts=now,
-                            crop=st.vote.best_snapshot if st.vote.best_snapshot is not None else st.best_crop,
-                            box=st.box.copy(), quality=q,
-                            direction=st.direction.value, direction_reason=st.direction_reason,
-                        ))
-                        st.reported_direction = st.direction
+                        if changed:
+                            votes = "/".join("?" if v is None else str(v)
+                                             for v in st.vote.votes)
+                            res.outcomes.append(RecognitionOutcome(
+                                track_id=st.track_id, employee_id=provisional, name=st.name,
+                                score=st.vote.best_score, margin=m.margin,
+                                face_px=int(q.face_px), votes=votes, ts=now,
+                                crop=(st.vote.best_snapshot
+                                      if st.vote.best_snapshot is not None else st.best_crop),
+                                box=st.box.copy(), quality=q,
+                                direction=st.direction.value,
+                                direction_reason=st.direction_reason,
+                            ))
+                            st.reported_direction = st.direction
                     elif not st.emitted:
                         st.name = "…" if m.employee_id is None else self.gallery.name(m.employee_id)
 
