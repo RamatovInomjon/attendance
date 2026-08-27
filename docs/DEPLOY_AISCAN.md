@@ -421,6 +421,32 @@ recognition path is pure ONNX — so a recognition-only deployment could drop
 
 ## Open items
 
+### Restarting: verify the old process is gone
+
+`SIGTERM` is not always enough — a worker blocked on an RTSP read can ignore it
+well past 20 s. If the restart proceeds anyway you get **two** processes on the
+same cameras: the second binds the port and looks healthy, while the first keeps
+running the OLD code and writing to the same database. It shows up as doubled
+log lines with slightly different durations for one person.
+
+```bash
+PID=$(ps -eo pid,cmd | awk '/faceid\/venv\/bin\/python/ && !/awk/ {print $1; exit}')
+kill "$PID"
+for i in $(seq 1 25); do sleep 1; kill -0 "$PID" 2>/dev/null || break; done
+kill -0 "$PID" 2>/dev/null && kill -9 "$PID"        # do not skip this
+cd ~/faceid/ematsy && setsid nohup ~/faceid/start.sh > ~/faceid/run.log 2>&1 < /dev/null &
+
+# then PROVE there is exactly one, and that it owns the port:
+ps -eo pid,etime,cmd | grep '[f]aceid/venv'
+ss -ltnp | grep 8021
+```
+
+Never use `pkill -f "scripts/run.py"` over SSH: the pattern matches the remote
+shell's own command string and kills the session instead.
+
+Updating the compiled core means shipping `.so` files, since the server has no
+sources. Delete `app/core/__pycache__` after replacing them.
+
 - **No systemd unit** — `gpu6` has no sudo, so the service runs under
   `setsid nohup ~/faceid/start.sh &` and does **not** survive a reboot.
 - **The default password is still `123456`.** Change it at `/faceid/users`.
