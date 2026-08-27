@@ -93,8 +93,10 @@ class TrackVote:
     window: int
     required: int
     votes: deque = field(default_factory=deque)
-    best_score: float = 0.0
-    best_snapshot: np.ndarray | None = None      # highest-SCORING frame (diagnosis)
+    # Best score and frame PER IDENTITY.  Keyed by employee id, so the evidence
+    # for the person we commit can never be another person's frame - see the
+    # note on best_snapshot below.
+    per_identity: dict = field(default_factory=dict)   # emp_id -> [score, frame]
     best_quality: float = 0.0
     quality_snapshot: np.ndarray | None = None   # clearest frame (what a human sees)
     committed: int | None = None
@@ -114,10 +116,12 @@ class TrackVote:
         as the evidence makes a wrong answer look inexplicable.
         """
         self.votes.append(m.employee_id)
-        if m.employee_id is not None and m.score > self.best_score:
-            self.best_score = m.score
-            if snapshot is not None:
-                self.best_snapshot = snapshot
+        if m.employee_id is not None:
+            cur = self.per_identity.get(m.employee_id)
+            if cur is None or m.score > cur[0]:
+                self.per_identity[m.employee_id] = [
+                    m.score, snapshot if snapshot is not None
+                    else (cur[1] if cur is not None else None)]
         if snapshot is not None and quality > self.best_quality:
             self.best_quality = quality
             self.quality_snapshot = snapshot
@@ -132,6 +136,47 @@ class TrackVote:
                 self.committed = emp
                 return emp
         return None
+
+    def best_for(self, employee_id: int | None) -> tuple[float, np.ndarray | None]:
+        """Best score and frame observed FOR ONE identity."""
+        v = self.per_identity.get(employee_id)
+        return (v[0], v[1]) if v is not None else (0.0, None)
+
+    def _global_best(self) -> tuple[float, np.ndarray | None]:
+        if not self.per_identity:
+            return 0.0, None
+        return tuple(max(self.per_identity.values(), key=lambda v: v[0]))
+
+    @property
+    def best_score(self) -> float:
+        """The score behind the committed identity, not the track's maximum.
+
+        These used to be a single running maximum over every frame, regardless
+        of WHICH person each frame matched.  When one track saw two people -
+        two colleagues walking together, or a ByteTrack id switch - the vote
+        would commit person A by majority while the maximum belonged to a frame
+        of person B.  The event then carried A's name with B's score and B's
+        face, which is exactly how a correct-looking recognition ends up
+        displaying a stranger.  Observed live: track 601 committed one employee
+        while reporting 0.277 and an aligned crop that were another employee's.
+        """
+        if self.committed is not None:
+            return self.best_for(self.committed)[0]
+        return self._global_best()[0]
+
+    @property
+    def best_snapshot(self) -> np.ndarray | None:
+        """The highest-scoring frame FOR the committed identity.
+
+        Before a commit there is no identity to scope to, so the running best
+        is the only thing available; after one, the answer is definitionally
+        the committed person's own best frame.
+        """
+        if self.committed is not None:
+            snap = self.best_for(self.committed)[1]
+            if snap is not None:
+                return snap
+        return self._global_best()[1]
 
     @property
     def decided(self) -> bool:

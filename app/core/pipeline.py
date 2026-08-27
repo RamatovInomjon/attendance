@@ -296,7 +296,14 @@ class CameraPipeline:
                              settings.debug_dir)
             out.append(CompletedTrack(
                 track_id=tid, employee_id=t.employee_id, name=t.name,
-                best_score=float(max(t.best_seen, t.vote.best_score or 0.0)),
+                # A DECIDED track reports the committed identity's own best
+                # score.  best_seen is the top similarity across every frame
+                # including misses and other people, which is what you want to
+                # explain a pass that matched nobody - and exactly what you must
+                # not print next to a name, because it can belong to somebody
+                # else who happened to share the track.
+                best_score=float(t.vote.best_score if t.vote.decided
+                                 else max(t.best_seen, t.vote.best_score or 0.0)),
                 embedded_frames=t.embedded, gated_frames=t.gated,
                 direction=t.direction.value, direction_reason=t.direction_reason,
                 face_px=t.best_face_px, duration_s=max(0.0, t.last_seen - t.first_seen),
@@ -307,10 +314,15 @@ class CameraPipeline:
                 # has walked on, so a completion-time box lands on empty floor.
                 box=(t.disp_box.copy() if t.disp_box is not None
                      else (t.box.copy() if t.box is not None else None)),
-                # HIGHEST-SCORING aligned face first: this is what the dashboard
-                # shows. It is the frame that actually drove the identity, so it
-                # is the one to judge the decision by - if the match is wrong,
-                # this is the image that made it wrong.
+                # Highest-scoring aligned face FOR THE COMMITTED IDENTITY:
+                # this is what the dashboard shows. It is the frame that drove
+                # the identity, so it is the one to judge the decision by - if
+                # the match is wrong, this is the image that made it wrong.
+                #
+                # "For the committed identity" is load-bearing. This was once
+                # the best frame over ALL identities, so a track holding two
+                # people showed the higher-scoring stranger under the voted
+                # person's name - a correct-looking row with the wrong face.
                 #
                 # This used to be the *clearest* frame instead, because
                 # score-best kept surfacing foreheads and backs of heads. That
