@@ -76,8 +76,12 @@ dmypy.json
 # Logs
 *.log
 
-# Local settings
-config.py
+# Local settings.  Anchored to the repo root ON PURPOSE: an unanchored
+# `config.py` also matches app/config.py, which is the application's central
+# settings module and must ship. It was silently excluded, so a clone had code
+# reading settings.vote_consensus with nothing defining it - the app crashed on
+# import and the tuned thresholds never reached a deployment made by git.
+/config.py
 
 # OS generated files
 .DS_Store
