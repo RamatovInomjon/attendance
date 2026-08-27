@@ -114,3 +114,15 @@ db.sqlite3-*
 vendor_private_key.pem
 licence.key
 *.onnx.enc
+
+# --- never publish: licence + key material ----------------------------------
+# The licence carries the key material the model vault derives its AES key
+# from, so committing one hands over the ability to decrypt the shipped
+# weights - the exact thing the encryption exists to prevent. `licence.key`
+# was already covered; the per-site names from docs/DEPLOY_AISCAN.md were not,
+# and a routine `git add -A` after following that guide would have published
+# one. Match any licence key, anywhere.
+*.key
+licence*.key
+license*.key
+!**/public*.key
