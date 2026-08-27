@@ -289,6 +289,13 @@ class CameraPipeline:
             t = self.tracks.pop(tid)
             if t.embedded == 0:
                 continue
+            # THE decision point. Everything before this is provisional: the
+            # overlay name, the running best frame, the leader of the tally.
+            # The pass is over, so the whole of its evidence is in, and the
+            # consensus rule gets the last word. Attendance reads only this.
+            final_id = t.vote.finalize()
+            t.employee_id = final_id
+            t.name = self.gallery.name(final_id) if final_id is not None else ""
             if t.employee_id is not None and settings.debug_trace_tracks:
                 self.traced_passes += 1
                 if self.traced_passes == settings.debug_trace_limit:
@@ -441,7 +448,9 @@ class CameraPipeline:
             if st is None:
                 st = TrackState(
                     track_id=tid, first_seen=now, last_seen=now, box=box,
-                    vote=TrackVote(window=settings.vote_window, required=settings.vote_required),
+                    vote=TrackVote(window=settings.vote_window, required=settings.vote_required,
+                                   consensus=settings.vote_consensus,
+                                   min_recognitions=settings.vote_min_recognitions),
                 )
                 self.tracks[tid] = st
             st.last_seen = now
@@ -612,17 +621,21 @@ class CameraPipeline:
                         st.best_quality = q.score
                         st.best_crop = f.aligned
 
-                    committed = st.vote.add(m, f.aligned, quality=q.score)
+                    provisional = st.vote.add(m, f.aligned, quality=q.score)
                     if m.employee_id is not None:
                         st.score = max(st.score, m.score)
 
-                    if committed is not None and not st.emitted:
-                        st.employee_id = committed
-                        st.name = self.gallery.name(committed)
+                    # Display only. The identity is not settled until the track
+                    # ends, so this name may change as the pass accumulates
+                    # evidence - which is the point. `emitted` records that the
+                    # track has had a name at some point, for the live feed.
+                    if provisional is not None:
+                        st.employee_id = provisional
+                        st.name = self.gallery.name(provisional)
                         st.emitted = True
                         votes = "/".join("?" if v is None else str(v) for v in st.vote.votes)
                         res.outcomes.append(RecognitionOutcome(
-                            track_id=st.track_id, employee_id=committed, name=st.name,
+                            track_id=st.track_id, employee_id=provisional, name=st.name,
                             score=st.vote.best_score, margin=m.margin,
                             face_px=int(q.face_px), votes=votes, ts=now,
                             crop=st.vote.best_snapshot if st.vote.best_snapshot is not None else st.best_crop,

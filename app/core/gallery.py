@@ -84,15 +84,43 @@ class Gallery:
 
 @dataclass
 class TrackVote:
-    """K-of-N agreement over a track's best frames.
+    """Consensus over EVERY recognition of one track.
 
-    A single frame never commits an identity.  The old pipeline recognized the
-    first frame a track appeared in and locked that answer for an hour — a
+    A single frame never commits an identity.  The original pipeline recognized
+    the first frame a track appeared in and locked that answer for an hour — a
     motion-blurred profile at the moment of entry decided who the person was.
+    K-of-N agreement fixed that but was still "first to 3 of the last 5": an
+    identity could be settled from the opening frames of a pass and never
+    revisited, even though a pass yields dozens of frames and the opening ones
+    are not reliably its best.  Live scores for one person spanned 0.196-0.473
+    within a single day.
+
+    So the decision now waits for the whole pass:
+
+    * every frame votes, into an unbounded tally;
+    * `provisional_id` is the current leader, for the live overlay only;
+    * `finalize()` at track end applies the consensus rule and yields the one
+      answer attendance is allowed to use.
+
+    The rule is `vote_consensus` of the IDENTIFIED frames, and at least
+    `vote_min_recognitions` of them.  See app/config.py for why misses are
+    excluded from the denominator and why the floor exists.
+
+    This is also the strongest available defence against a false accept.  An
+    impostor has no true identity in the gallery, so their frames scatter over
+    whoever is nearest by noise; a real person's frames converge.  Consensus
+    measures precisely that, and it is a different axis from score - which is
+    unusable alone here, two confirmed impostors having scored 0.218 and 0.180
+    inside a genuine range reaching down to 0.177.
     """
     window: int
     required: int
-    votes: deque = field(default_factory=deque)
+    consensus: float = 0.65
+    min_recognitions: int = 5
+    votes: deque = field(default_factory=deque)        # recent window, for display
+    tally: Counter = field(default_factory=Counter)    # UNBOUNDED, identified only
+    identified: int = 0                                # frames that named somebody
+    missed: int = 0                                    # frames that named nobody
     # Best score and frame PER IDENTITY.  Keyed by employee id, so the evidence
     # for the person we commit can never be another person's frame - see the
     # note on best_snapshot below.
@@ -100,6 +128,7 @@ class TrackVote:
     best_quality: float = 0.0
     quality_snapshot: np.ndarray | None = None   # clearest frame (what a human sees)
     committed: int | None = None
+    finalized: bool = False
 
     def __post_init__(self):
         self.votes = deque(maxlen=self.window)
@@ -116,7 +145,11 @@ class TrackVote:
         as the evidence makes a wrong answer look inexplicable.
         """
         self.votes.append(m.employee_id)
-        if m.employee_id is not None:
+        if m.employee_id is None:
+            self.missed += 1
+        else:
+            self.identified += 1
+            self.tally[m.employee_id] += 1
             cur = self.per_identity.get(m.employee_id)
             if cur is None or m.score > cur[0]:
                 self.per_identity[m.employee_id] = [
@@ -126,22 +159,64 @@ class TrackVote:
         if snapshot is not None and quality > self.best_quality:
             self.best_quality = quality
             self.quality_snapshot = snapshot
+        return self.provisional_id
 
-        if self.committed is not None:
+    @property
+    def provisional_id(self) -> int | None:
+        """Current leader — for the LIVE overlay, never for attendance.
+
+        Deliberately cheap to satisfy: the live view showing a name that later
+        changes is a cosmetic wobble, whereas an attendance row naming the wrong
+        person is a real error.  `finalize()` is the only thing attendance reads.
+        """
+        if not self.tally:
+            return None
+        emp, n = self.tally.most_common(1)[0]
+        return emp if n >= self.required else None
+
+    @property
+    def agreement(self) -> float:
+        """Leader's share of the identified frames. 0.0 when nothing matched."""
+        if not self.tally or self.identified <= 0:
+            return 0.0
+        return self.tally.most_common(1)[0][1] / self.identified
+
+    def finalize(self) -> int | None:
+        """Decide the pass. Called once, when the tracker drops the person.
+
+        Idempotent: the answer is cached, so a second call cannot change an
+        identity that has already been written to attendance.
+        """
+        if self.finalized:
             return self.committed
+        self.finalized = True
+        self.committed = self._consensus_winner()
+        return self.committed
 
-        counts = Counter(v for v in self.votes if v is not None)
-        if counts:
-            emp, n = counts.most_common(1)[0]
-            if n >= self.required:
-                self.committed = emp
-                return emp
-        return None
+    def _consensus_winner(self) -> int | None:
+        if not self.tally or self.identified <= 0:
+            return None
+        emp, n = self.tally.most_common(1)[0]
+        if n < self.min_recognitions:
+            return None                      # too little evidence to judge
+        if (n / self.identified) < self.consensus:
+            return None                      # the pass disagreed with itself
+        return emp
 
     def best_for(self, employee_id: int | None) -> tuple[float, np.ndarray | None]:
         """Best score and frame observed FOR ONE identity."""
         v = self.per_identity.get(employee_id)
         return (v[0], v[1]) if v is not None else (0.0, None)
+
+    def _scope_id(self) -> int | None:
+        """Whose evidence the `best_*` accessors describe.
+
+        The final identity once decided; the current leader before that, so the
+        live overlay never shows one person's name beside another's face.  A
+        bare running maximum over all identities is exactly the bug fixed in
+        99cf420 and must not come back.
+        """
+        return self.committed if self.committed is not None else self.provisional_id
 
     def _global_best(self) -> tuple[float, np.ndarray | None]:
         if not self.per_identity:
@@ -161,8 +236,9 @@ class TrackVote:
         displaying a stranger.  Observed live: track 601 committed one employee
         while reporting 0.277 and an aligned crop that were another employee's.
         """
-        if self.committed is not None:
-            return self.best_for(self.committed)[0]
+        scope = self._scope_id()
+        if scope is not None:
+            return self.best_for(scope)[0]
         return self._global_best()[0]
 
     @property
@@ -173,8 +249,9 @@ class TrackVote:
         is the only thing available; after one, the answer is definitionally
         the committed person's own best frame.
         """
-        if self.committed is not None:
-            snap = self.best_for(self.committed)[1]
+        scope = self._scope_id()
+        if scope is not None:
+            snap = self.best_for(scope)[1]
             if snap is not None:
                 return snap
         return self._global_best()[1]
@@ -189,7 +266,8 @@ class TrackVote:
         and then thrown away - every stored event read margin 0.0 - so there
         was no way to tell the two apart after the fact.
         """
-        v = self.per_identity.get(self.committed) if self.committed is not None else None
+        scope = self._scope_id()
+        v = self.per_identity.get(scope) if scope is not None else None
         if v is None:
             g = self._global_best()
             return float(g[2]) if len(g) > 2 else 0.0
@@ -197,4 +275,10 @@ class TrackVote:
 
     @property
     def decided(self) -> bool:
-        return self.committed is not None
+        """True only after finalize() has named somebody.
+
+        Nothing is decided mid-pass any more, so this is False for a track's
+        whole life.  Recognition therefore continues for as long as the person
+        is in view, which is the intent - see T1 in docs/RECOGNITION_PLAN.md.
+        """
+        return self.finalized and self.committed is not None

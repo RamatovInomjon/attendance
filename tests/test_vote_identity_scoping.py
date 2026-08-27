@@ -30,16 +30,25 @@ FACE_B = np.full((3, 8, 8), 0.75, np.float32)
 
 
 def _vote() -> TrackVote:
-    return TrackVote(window=5, required=3)
+    return TrackVote(window=5, required=3, consensus=0.65, min_recognitions=5)
+
+
+# The scores A is given in these tests. Six frames, so the pass clears the
+# 5-recognition floor and A holds 6/7 = 86% of the identified frames against
+# B's single high-scoring one - a clear consensus either way. The exact values
+# are the live ones from the 2026-08-27 report; only the count has changed,
+# because the decision moved from "first to 3 of the last 5" to a consensus
+# taken when the track ends.
+A_SCORES = (0.201, 0.208, 0.212, 0.215, 0.219, 0.222)
 
 
 def test_committed_identity_reports_its_own_score_not_the_tracks_maximum():
     v = _vote()
-    for s in (0.201, 0.215, 0.222):                 # A wins the majority
+    for s in A_SCORES:                              # A wins the consensus
         v.add(Match(A_ID, s, 0.1, None), snapshot=FACE_A, quality=1.0)
     v.add(Match(B_ID, 0.277, 0.1, None), snapshot=FACE_B, quality=1.0)   # B scores higher
 
-    assert v.committed == A_ID
+    assert v.finalize() == A_ID
     assert v.best_score == pytest.approx(0.222), (
         "reported score must be the committed identity's best, not the "
         "track-wide maximum belonging to somebody else"
@@ -48,9 +57,10 @@ def test_committed_identity_reports_its_own_score_not_the_tracks_maximum():
 
 def test_committed_identity_shows_its_own_face():
     v = _vote()
-    for s in (0.201, 0.215, 0.222):
+    for s in A_SCORES:
         v.add(Match(A_ID, s, 0.1, None), snapshot=FACE_A, quality=1.0)
     v.add(Match(B_ID, 0.277, 0.1, None), snapshot=FACE_B, quality=1.0)
+    v.finalize()
 
     assert np.array_equal(v.best_snapshot, FACE_A), (
         "the dashboard crop must be the committed person's face; showing the "
@@ -61,9 +71,10 @@ def test_committed_identity_shows_its_own_face():
 def test_the_other_identity_is_still_available_for_diagnosis():
     """Scoping the report must not throw away what else the track saw."""
     v = _vote()
-    for s in (0.201, 0.215, 0.222):
+    for s in A_SCORES:
         v.add(Match(A_ID, s, 0.1, None), snapshot=FACE_A, quality=1.0)
     v.add(Match(B_ID, 0.277, 0.1, None), snapshot=FACE_B, quality=1.0)
+    v.finalize()
 
     assert v.best_for(B_ID)[0] == pytest.approx(0.277)
     assert np.array_equal(v.best_for(B_ID)[1], FACE_B)
@@ -73,10 +84,10 @@ def test_order_does_not_matter():
     """The stranger's frame may arrive before the majority forms."""
     v = _vote()
     v.add(Match(B_ID, 0.277, 0.1, None), snapshot=FACE_B, quality=1.0)
-    for s in (0.201, 0.215, 0.222):
+    for s in A_SCORES:
         v.add(Match(A_ID, s, 0.1, None), snapshot=FACE_A, quality=1.0)
 
-    assert v.committed == A_ID
+    assert v.finalize() == A_ID
     assert v.best_score == pytest.approx(0.222)
     assert np.array_equal(v.best_snapshot, FACE_A)
 
@@ -96,10 +107,10 @@ def test_before_a_commit_the_running_best_is_still_reported():
 def test_a_single_identity_track_is_unaffected():
     """The common case must behave exactly as before."""
     v = _vote()
-    for s in (0.21, 0.33, 0.28):
+    for s in (0.21, 0.33, 0.28, 0.24, 0.26, 0.22):
         v.add(Match(A_ID, s, 0.1, None), snapshot=FACE_A, quality=1.0)
 
-    assert v.committed == A_ID
+    assert v.finalize() == A_ID
     assert v.best_score == pytest.approx(0.33)
     assert np.array_equal(v.best_snapshot, FACE_A)
 
@@ -107,11 +118,11 @@ def test_a_single_identity_track_is_unaffected():
 def test_misses_never_become_the_reported_evidence():
     """A miss carries a score but no identity; it must not be reportable."""
     v = _vote()
-    for s in (0.201, 0.215, 0.222):
+    for s in A_SCORES:
         v.add(Match(A_ID, s, 0.1, None), snapshot=FACE_A, quality=1.0)
     v.add(Match(None, 0.99, 0.0, B_ID), snapshot=FACE_B, quality=1.0)
 
-    assert v.committed == A_ID
+    assert v.finalize() == A_ID
     assert v.best_score == pytest.approx(0.222)
     assert np.array_equal(v.best_snapshot, FACE_A)
 
@@ -125,11 +136,12 @@ def test_misses_never_become_the_reported_evidence():
 
 def test_margin_follows_the_committed_identity():
     v = _vote()
-    for s, mg in ((0.201, 0.050), (0.215, 0.061), (0.222, 0.070)):
+    for s, mg in ((0.201, 0.050), (0.208, 0.052), (0.212, 0.055),
+                  (0.215, 0.061), (0.219, 0.066), (0.222, 0.070)):
         v.add(Match(A_ID, s, mg, None), snapshot=FACE_A, quality=1.0)
     v.add(Match(B_ID, 0.277, 0.900, None), snapshot=FACE_B, quality=1.0)
 
-    assert v.committed == A_ID
+    assert v.finalize() == A_ID
     assert v.best_margin == pytest.approx(0.070), (
         "the margin must come from the frame that decided the committed "
         "identity, not from a stranger's high-margin frame"
