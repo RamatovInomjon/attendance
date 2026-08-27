@@ -96,7 +96,7 @@ class TrackVote:
     # Best score and frame PER IDENTITY.  Keyed by employee id, so the evidence
     # for the person we commit can never be another person's frame - see the
     # note on best_snapshot below.
-    per_identity: dict = field(default_factory=dict)   # emp_id -> [score, frame]
+    per_identity: dict = field(default_factory=dict)   # emp_id -> [score, frame, margin]
     best_quality: float = 0.0
     quality_snapshot: np.ndarray | None = None   # clearest frame (what a human sees)
     committed: int | None = None
@@ -121,7 +121,8 @@ class TrackVote:
             if cur is None or m.score > cur[0]:
                 self.per_identity[m.employee_id] = [
                     m.score, snapshot if snapshot is not None
-                    else (cur[1] if cur is not None else None)]
+                    else (cur[1] if cur is not None else None),
+                    m.margin]
         if snapshot is not None and quality > self.best_quality:
             self.best_quality = quality
             self.quality_snapshot = snapshot
@@ -177,6 +178,22 @@ class TrackVote:
             if snap is not None:
                 return snap
         return self._global_best()[1]
+
+    @property
+    def best_margin(self) -> float:
+        """Gap to the runner-up on the frame that decided the identity.
+
+        The single most informative number for judging a false accept: a score
+        of 0.216 means one thing when the next candidate was 0.05 behind and
+        quite another when it was 0.002 behind.  It was computed at match time
+        and then thrown away - every stored event read margin 0.0 - so there
+        was no way to tell the two apart after the fact.
+        """
+        v = self.per_identity.get(self.committed) if self.committed is not None else None
+        if v is None:
+            g = self._global_best()
+            return float(g[2]) if len(g) > 2 else 0.0
+        return float(v[2])
 
     @property
     def decided(self) -> bool:

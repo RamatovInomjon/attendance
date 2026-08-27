@@ -114,3 +114,34 @@ def test_misses_never_become_the_reported_evidence():
     assert v.committed == A_ID
     assert v.best_score == pytest.approx(0.222)
     assert np.array_equal(v.best_snapshot, FACE_A)
+
+
+# --- the margin must survive to the event ---------------------------------
+# Every stored event read margin 0.0, because CompletedTrack had no margin
+# field and the worker passed a literal. The gap to the runner-up is the one
+# number that tells a confident match from a lucky one - a 0.216 with 0.05 of
+# daylight is a different event from a 0.216 that edged out the next candidate
+# by 0.002 - and without it a reported false accept cannot be diagnosed.
+
+def test_margin_follows_the_committed_identity():
+    v = _vote()
+    for s, mg in ((0.201, 0.050), (0.215, 0.061), (0.222, 0.070)):
+        v.add(Match(A_ID, s, mg, None), snapshot=FACE_A, quality=1.0)
+    v.add(Match(B_ID, 0.277, 0.900, None), snapshot=FACE_B, quality=1.0)
+
+    assert v.committed == A_ID
+    assert v.best_margin == pytest.approx(0.070), (
+        "the margin must come from the frame that decided the committed "
+        "identity, not from a stranger's high-margin frame"
+    )
+
+
+def test_margin_is_reported_before_a_commit():
+    v = _vote()
+    v.add(Match(A_ID, 0.201, 0.033, None), snapshot=FACE_A, quality=1.0)
+    assert v.committed is None
+    assert v.best_margin == pytest.approx(0.033)
+
+
+def test_margin_defaults_to_zero_with_no_observations():
+    assert _vote().best_margin == pytest.approx(0.0)

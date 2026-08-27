@@ -120,6 +120,7 @@ class CompletedTrack:
     employee_id: int | None
     name: str
     best_score: float
+    best_margin: float
     embedded_frames: int
     gated_frames: int
     direction: str
@@ -304,6 +305,7 @@ class CameraPipeline:
                 # else who happened to share the track.
                 best_score=float(t.vote.best_score if t.vote.decided
                                  else max(t.best_seen, t.vote.best_score or 0.0)),
+                best_margin=float(t.vote.best_margin),
                 embedded_frames=t.embedded, gated_frames=t.gated,
                 direction=t.direction.value, direction_reason=t.direction_reason,
                 face_px=t.best_face_px, duration_s=max(0.0, t.last_seen - t.first_seen),

@@ -167,7 +167,7 @@ class CameraWorker:
                             name=ct.name, frame_bgr=ct.context, box=self._scale_box(
                                 ct.box, ct.context.shape[1]),
                             aligned_chw=ct.crop, camera=self.name, role=self.role.value,
-                            score=ct.best_score, margin=0.0, track_id=ct.track_id,
+                            score=ct.best_score, margin=ct.best_margin, track_id=ct.track_id,
                             ts=ts, quality=ct.quality, native=ct.native,
                             extra={"embedded_frames": ct.embedded_frames,
                                    "traj_points": ct.traj_points,
@@ -181,7 +181,7 @@ class CameraWorker:
                         log.exception("[%s] debug capture failed", self.name)
                 d = self.attendance.record(
                     s, employee_id=ct.employee_id, camera_id=self.camera_id,
-                    role=self.role, ts=ts, score=ct.best_score, margin=0.0,
+                    role=self.role, ts=ts, score=ct.best_score, margin=ct.best_margin,
                     track_id=ct.track_id, face_px=ct.face_px,
                     votes=f"emb{ct.embedded_frames}/traj{ct.traj_points}",
                     snapshot=snap, direction=ct.direction,
@@ -197,10 +197,10 @@ class CameraWorker:
                 }
                 self.recent_events.insert(0, entry)
                 del self.recent_events[40:]
-                log.info("[%s] %-12s %-20s score=%.3f embedded=%d traj=%d travel=%.3f "
+                log.info("[%s] %-12s %-20s score=%.3f margin=%.3f embedded=%d traj=%d travel=%.3f "
                          "dur=%.1fs dir=%s (%s)",
                          self.name, d.transition, ct.name[:20], ct.best_score,
-                         ct.embedded_frames, ct.traj_points, ct.travel,
+                         ct.best_margin, ct.embedded_frames, ct.traj_points, ct.travel,
                          ct.duration_s, ct.direction, ct.direction_reason)
 
     # -- main loop --------------------------------------------------------
