@@ -495,10 +495,14 @@ class CameraPipeline:
             # person tracking a track can live for many frames with no head at
             # all, and those frames have nothing to align.
             #
-            # Normally recognition stops once the vote commits. While tracing,
-            # keep scoring for the whole life of the track so the score curve
-            # across the entire pass is recorded, not just its run-up.
-            if st.face_box is not None and (not st.vote.decided or self._tracing()):
+            # EVERY gate-passing frame is recognized, for as long as the person
+            # is in view. Recognition used to stop the moment the vote
+            # committed, which capped a pass at a handful of frames; the
+            # identity is now a consensus taken when the track ends, so more
+            # frames is strictly more evidence for that decision. There is no
+            # cap: accuracy comes first, and if the frame budget is ever
+            # genuinely exhausted the answer is more GPU, not less evidence.
+            if st.face_box is not None:
                 pending.append(st)
 
         # Pre-gate on head-box size before paying for alignment. face_px is
