@@ -131,6 +131,7 @@ class CompletedTrack:
     travel: float = 0.0
     native: np.ndarray | None = None
     score_crop: np.ndarray | None = None   # top-scoring frame, for diagnosis
+    person_crop: np.ndarray | None = None  # BODY crop, what the dashboard shows
     context: np.ndarray | None = None
     quality: object = None
     box: np.ndarray | None = None
@@ -160,6 +161,29 @@ class FrameResult:
     completed: list[CompletedTrack] = field(default_factory=list)
     candidates: list[FrameCandidate] = field(default_factory=list)
     timings: dict = field(default_factory=dict)
+
+
+def _body_crop(image: np.ndarray, person_box: np.ndarray,
+               max_w: int = 320) -> np.ndarray | None:
+    """A display-sized copy of the person box.
+
+    Person boxes are tall (roughly 1:2.5) and at 4K a full-resolution copy is
+    several megabytes, so it is downscaled here rather than at render time -
+    these are written to disk for every recognised pass and kept indefinitely.
+    Aspect is preserved; the dashboard letterboxes rather than distorting.
+    """
+    h, w = image.shape[:2]
+    x1, y1, x2, y2 = [int(v) for v in person_box[:4]]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(w, x2), min(h, y2)
+    if x2 - x1 < 8 or y2 - y1 < 8:
+        return None
+    crop = image[y1:y2, x1:x2]
+    if crop.shape[1] > max_w:
+        scale = max_w / crop.shape[1]
+        crop = cv2.resize(crop, (max_w, max(1, int(crop.shape[0] * scale))),
+                          interpolation=cv2.INTER_AREA)
+    return crop.copy()
 
 
 def _head_in(person: np.ndarray, heads: np.ndarray) -> np.ndarray | None:
@@ -319,6 +343,7 @@ class CameraPipeline:
                 best_score=float(t.vote.best_score if t.vote.decided
                                  else max(t.best_seen, t.vote.best_score or 0.0)),
                 best_margin=float(t.vote.best_margin),
+                person_crop=t.vote.best_person,
                 embedded_frames=t.embedded, gated_frames=t.gated,
                 direction=t.direction.value, direction_reason=t.direction_reason,
                 face_px=t.best_face_px, duration_s=max(0.0, t.last_seen - t.first_seen),
@@ -631,7 +656,15 @@ class CameraPipeline:
                         st.best_quality = q.score
                         st.best_crop = f.aligned
 
-                    provisional = st.vote.add(m, f.aligned, quality=q.score)
+                    # Crop the body only when this frame will become the new
+                    # best for its identity. A 4K person region is a large copy
+                    # and every other frame's would be discarded immediately.
+                    body = None
+                    if (m.employee_id is not None and st.person_box is not None
+                            and m.score > st.vote.best_for(m.employee_id)[0]):
+                        body = _body_crop(frame.image, st.person_box)
+                    provisional = st.vote.add(m, f.aligned, quality=q.score,
+                                              person=body)
                     if m.employee_id is not None:
                         st.score = max(st.score, m.score)
 

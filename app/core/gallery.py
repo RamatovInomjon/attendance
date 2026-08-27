@@ -124,7 +124,7 @@ class TrackVote:
     # Best score and frame PER IDENTITY.  Keyed by employee id, so the evidence
     # for the person we commit can never be another person's frame - see the
     # note on best_snapshot below.
-    per_identity: dict = field(default_factory=dict)   # emp_id -> [score, frame, margin]
+    per_identity: dict = field(default_factory=dict)   # emp_id -> [score, face, margin, body]
     best_quality: float = 0.0
     quality_snapshot: np.ndarray | None = None   # clearest frame (what a human sees)
     committed: int | None = None
@@ -134,7 +134,7 @@ class TrackVote:
         self.votes = deque(maxlen=self.window)
 
     def add(self, m: Match, snapshot: np.ndarray | None = None,
-            quality: float = 0.0) -> int | None:
+            quality: float = 0.0, person: np.ndarray | None = None) -> int | None:
         """Record one observation; returns an employee id once agreement is met.
 
         Two snapshots are kept, deliberately. The highest-SCORING frame explains
@@ -152,10 +152,15 @@ class TrackVote:
             self.tally[m.employee_id] += 1
             cur = self.per_identity.get(m.employee_id)
             if cur is None or m.score > cur[0]:
+                # The body crop is stored with the face from the SAME frame, so
+                # the dashboard shows the person whose face decided the identity
+                # at the moment it did - not a body from some other instant.
                 self.per_identity[m.employee_id] = [
                     m.score, snapshot if snapshot is not None
                     else (cur[1] if cur is not None else None),
-                    m.margin]
+                    m.margin,
+                    person if person is not None
+                    else (cur[3] if cur is not None and len(cur) > 3 else None)]
         if snapshot is not None and quality > self.best_quality:
             self.best_quality = quality
             self.quality_snapshot = snapshot
@@ -272,6 +277,18 @@ class TrackVote:
             g = self._global_best()
             return float(g[2]) if len(g) > 2 else 0.0
         return float(v[2])
+
+    @property
+    def best_person(self) -> np.ndarray | None:
+        """Body crop from the frame that produced the committed identity's best
+        face. This is what the dashboard shows: a person is recognisable to a
+        human by build, clothing and gait, where a 112x112 aligned face is not.
+        The face is kept alongside as the diagnostic image."""
+        scope = self._scope_id()
+        if scope is None:
+            return None
+        v = self.per_identity.get(scope)
+        return v[3] if v is not None and len(v) > 3 else None
 
     @property
     def decided(self) -> bool:

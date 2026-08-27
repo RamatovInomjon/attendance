@@ -224,3 +224,54 @@ def test_the_consensus_boundary(share, expected):
     n = round(share * 100)
     _add(v, A, n); _add(v, B, 100 - n)
     assert v.finalize() == expected
+
+
+# --- the body crop travels with the identity's best face -------------------
+# The dashboard shows a body crop, not the 112x112 aligned face: a person is
+# recognisable to a human by build, clothing and posture, where a tight face
+# crop often is not - especially the crops that turn out to be wrong. The body
+# must come from the SAME frame as the face that decided the identity, or the
+# row shows one moment's face beside another moment's body.
+
+BODY_A = np.full((40, 16, 3), 11, np.uint8)
+BODY_B = np.full((40, 16, 3), 22, np.uint8)
+
+
+def test_body_crop_belongs_to_the_committed_identity():
+    v = _vote()
+    for s in (0.20, 0.21, 0.22, 0.23, 0.24):
+        v.add(Match(A, s, 0.1, None), snapshot=FACE_A, quality=1.0, person=BODY_A)
+    v.add(Match(B, 0.90, 0.5, None), snapshot=FACE_B, quality=1.0, person=BODY_B)
+    assert v.finalize() == A
+    assert np.array_equal(v.best_person, BODY_A), (
+        "the body shown must be the committed person's, not the higher-scoring "
+        "stranger's"
+    )
+
+
+def test_body_crop_is_the_one_from_the_best_frame():
+    """Only the frame that becomes the identity's best contributes its body."""
+    v = _vote()
+    v.add(Match(A, 0.20, 0.1, None), snapshot=FACE_A, quality=1.0, person=BODY_A)
+    v.add(Match(A, 0.40, 0.1, None), snapshot=FACE_A, quality=1.0, person=BODY_B)
+    _add(v, A, 3)                       # later, lower-scoring frames, no body
+    assert v.finalize() == A
+    assert v.best_score == pytest.approx(0.40)
+    assert np.array_equal(v.best_person, BODY_B)
+
+
+def test_a_missing_body_falls_back_rather_than_erasing_the_old_one():
+    """Frames that do not beat the current best pass person=None; that must not
+    wipe the body already captured."""
+    v = _vote()
+    v.add(Match(A, 0.40, 0.1, None), snapshot=FACE_A, quality=1.0, person=BODY_A)
+    _add(v, A, 4)                       # no person= on these
+    assert v.finalize() == A
+    assert np.array_equal(v.best_person, BODY_A)
+
+
+def test_no_body_is_not_an_error():
+    v = _vote()
+    _add(v, A, 6)
+    assert v.finalize() == A
+    assert v.best_person is None

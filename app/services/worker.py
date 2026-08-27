@@ -116,6 +116,20 @@ class CameraWorker:
             log.exception("[%s] snapshot write failed", self.name)
             return None
 
+    def _save_body(self, crop, employee_id: int) -> str | None:
+        """Write a raw BGR body crop. Separate from _save_snapshot because that
+        one expects an aligned CHW face in [-1, 1]; this is already an image."""
+        if crop is None:
+            return None
+        try:
+            rel = f"snapshots/body_{employee_id}_{int(time.time())}.jpg"
+            cv2.imwrite(str(settings.media_dir / rel), crop,
+                        [cv2.IMWRITE_JPEG_QUALITY, 88])
+            return rel
+        except Exception:
+            log.exception("[%s] body snapshot write failed", self.name)
+            return None
+
     def _persist_completed(self, res: FrameResult):
         """One attendance decision per completed track — per person-pass.
 
@@ -154,7 +168,13 @@ class CameraWorker:
                     continue
 
                 self.passes_recognized += 1
-                snap = self._save_snapshot(ct.crop, ct.employee_id, "evt")
+                # The dashboard shows the BODY: a person is recognisable to a
+                # human by build, clothing and posture, where a 112x112 aligned
+                # face often is not - especially on the crops that turn out to
+                # be wrong. The aligned face is still written next to it under
+                # "evt_", so a questionable match can still be examined.
+                face_snap = self._save_snapshot(ct.crop, ct.employee_id, "evt")
+                snap = self._save_body(ct.person_crop, ct.employee_id) or face_snap
                 # The frame that actually drove the match, kept beside the clear
                 # one: on a wrong answer this is the frame that explains it.
                 if ct.score_crop is not None:
