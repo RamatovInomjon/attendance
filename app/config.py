@@ -119,15 +119,26 @@ class Settings(BaseSettings):
     # largest loss in the pipeline, dwarfing aligner (418), yaw (54) and blur
     # (40) put together. A 26-second pass embedded 12 of its ~520 frames.
     #
-    # Sweeping it showed 66 was costing recognitions for nothing: at 56 one more
-    # person is recognised, embeddings per pass rise 43%, and the mean committed
-    # score RISES 0.324 -> 0.358, because more frames per pass means a better
-    # best frame. Held flat down to 40; at 32 unnamed tracks start climbing.
+    # CAREFUL - the sweep behind this was run on RECORDINGS, and
+    # `record_width = 1920` halves them. The live cameras are 3840x2160, so the
+    # same person at the same distance yields a head box TWICE the size in
+    # production as in a clip. The sweep's 56 is a 1080p number; its 4K
+    # equivalent is ~112.
     #
-    # 56 is the conservative end of that plateau - it captures the whole measured
-    # gain while staying furthest from the size where AdaFace degrades. 40-48
-    # yields still more evidence and may be better, but that cannot be justified
-    # until false accepts can be measured against labelled impostors.
+    # On the recordings, 66 rejected 5 575 of 7 578 head-bearing frames and
+    # dropping it to 56 recognised one more person, raised evidence per pass 43%
+    # and lifted the mean committed score 0.324 -> 0.358. None of that transfers
+    # to 4K.
+    #
+    # What the LIVE data says (179 recognised passes, real 4K): face_px runs
+    # min 66, p25 76, median 89, p90 250. The minimum is exactly the old gate,
+    # because the gate set the floor - and 56 would reject 0% of them. On 4K
+    # this threshold is barely binding.
+    #
+    # 56 is kept because it cannot reject anything 66 accepted, and it admits
+    # the 56-66 px band that was previously refused. But it is close to a no-op
+    # in production, and the recording-derived gains above must not be quoted as
+    # production gains. Re-derive it from live face_px, not from clips.
     min_face_px: int = 56
     min_laplacian_var: float = 25.0
     # The DFA aligner's own confidence that it found a face - and the only gate

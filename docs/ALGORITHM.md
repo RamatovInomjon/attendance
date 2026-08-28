@@ -140,7 +140,7 @@ A face must pass all of these to be embedded:
 
 | gate | value | why |
 |---|---|---|
-| `min_face_px` | 56 | below this there is not enough face to identify. Was 66, which rejected 5 575 of 7 578 head-bearing frames and cost recognitions for no accuracy gain |
+| `min_face_px` | 56 | below this there is not enough face to identify. Was 66. Measured on 1080p clips, where it was binding; on live 4K it rejects nothing (live face_px: min 66, median 89) |
 | `min_laplacian_var` | 25 | motion blur destroys the texture AdaFace keys on |
 | `min_aligner_score` | 0.40 | the aligner's own confidence in its landmarks |
 | `max_yaw_deg` | 45 | profile faces embed poorly |
@@ -301,6 +301,14 @@ Rejection reasons, and they are not close:
 | yaw | 54 |
 | blur | 40 |
 | pitch | 9 |
+
+> **These numbers are from 1080p recordings, not production.**
+> `record_width = 1920` halves clips when saving, so a head box in a recording
+> is **half** its live size. On the real 4K cameras the same scene clears the
+> gate easily: across 179 live recognised passes `face_px` runs min 66, median
+> 89, p90 250. The funnel below shows where evidence is lost *in a clip replay*;
+> on 4K the size gate is barely binding. Any gate tuning must be re-derived from
+> live `face_px`.
 
 A head is found on almost every frame; the **size gate then discards nearly all
 of them**. A 26-second pass embedded 12 of its ~520 frames. That single gate is
