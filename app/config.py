@@ -112,8 +112,23 @@ class Settings(BaseSettings):
     # genuinely unusable frames; the threshold and the 3-of-5 vote do the real
     # filtering.
     # Measured against HEAD boxes, which run ~1.33x the face box, so this is
-    # about a 50 px face.
-    min_face_px: int = 66
+    # about a 42 px face.
+    #
+    # Was 66. Measured 2026-08-28 by replaying 20 recordings: the face-size gate
+    # was rejecting 5 575 of 7 578 frames that had a head box - by far the
+    # largest loss in the pipeline, dwarfing aligner (418), yaw (54) and blur
+    # (40) put together. A 26-second pass embedded 12 of its ~520 frames.
+    #
+    # Sweeping it showed 66 was costing recognitions for nothing: at 56 one more
+    # person is recognised, embeddings per pass rise 43%, and the mean committed
+    # score RISES 0.324 -> 0.358, because more frames per pass means a better
+    # best frame. Held flat down to 40; at 32 unnamed tracks start climbing.
+    #
+    # 56 is the conservative end of that plateau - it captures the whole measured
+    # gain while staying furthest from the size where AdaFace degrades. 40-48
+    # yields still more evidence and may be better, but that cannot be justified
+    # until false accepts can be measured against labelled impostors.
+    min_face_px: int = 56
     min_laplacian_var: float = 25.0
     # The DFA aligner's own confidence that it found a face - and the only gate
     # that can tell a face from the BACK OF A HEAD. It is not a face detector:
