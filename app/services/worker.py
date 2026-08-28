@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import cv2
@@ -153,7 +153,13 @@ class CameraWorker:
                     snap = self._save_snapshot(ct.crop, 0, "unknown")
                     s.add(UnknownSighting(
                         camera_id=self.camera_id, track_id=ct.track_id,
-                        first_seen=ts, last_seen=ts, business_date=bdate,
+                        # first_seen was written equal to last_seen, so every
+                        # duration in the table read 0.00s and the column could
+                        # never answer "how long was this person in view" - the
+                        # signal that separates a real transit from somebody
+                        # standing still. duration_s is on the track; use it.
+                        first_seen=ts - timedelta(seconds=ct.duration_s),
+                        last_seen=ts, business_date=bdate,
                         frames=ct.embedded_frames, best_score=ct.best_score,
                         nearest_employee_id=ct.nearest_employee_id,
                         vector=ct.vector.astype("float32").tobytes() if ct.vector is not None else None,
