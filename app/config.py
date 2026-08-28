@@ -190,6 +190,19 @@ class Settings(BaseSettings):
     vote_consensus: float = 0.65
     vote_min_recognitions: int = 5
 
+    # How long a direction verdict may be relied on after the evidence for it
+    # left the trajectory window. The window is 90 points - 4.5 s at 20 fps - so
+    # a verdict older than that was computed from data the trajectory no longer
+    # holds, and nothing has confirmed it since.
+    #
+    # Without this, `st.direction` latched the last non-UNKNOWN verdict forever
+    # while `direction_reason` kept refreshing, so a person standing still was
+    # committed with a direction up to TEN MINUTES old. Seven live instances on
+    # 2026-08-27, including check-outs on the entrance camera for people who had
+    # not moved. The latch itself is right - somebody pausing at a door should
+    # keep their direction - it just may not outlive the window that produced it.
+    direction_max_age_s: float = 5.0
+
     # ---- tracking -------------------------------------------------------
     track_high_thresh: float = 0.5
     track_low_thresh: float = 0.2

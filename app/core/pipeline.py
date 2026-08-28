@@ -71,6 +71,11 @@ class TrackState:
     trajectory: Trajectory = field(default_factory=Trajectory)
     direction: Direction = Direction.UNKNOWN
     direction_reason: str = ""
+    # When `direction` was last actually SUPPORTED by the trajectory. The latch
+    # keeps a verdict across frames that cannot produce one, which is right for
+    # a brief pause - but a verdict whose evidence has aged out of the window is
+    # not a current fact, and must not move somebody in or out.
+    direction_at: float = 0.0
     reported_direction: Direction | None = None   # what we already wrote an event for
     embedded: int = 0
     best_face_px: int = 0
@@ -323,6 +328,26 @@ class CameraPipeline:
             # else writes attendance. res.outcomes, emitted during the pass, is
             # a live feed for scripts/live_test.py and must never be persisted -
             # it carries provisional identities that the consensus can overturn.
+            # A latched direction whose evidence has aged out of the trajectory
+            # window is not a current fact. Reporting it as one is what booked
+            # check-outs for people standing still on the entrance camera.
+            direction = t.direction
+            direction_reason = t.direction_reason
+            # Age is measured against the track's LAST SIGHTING, not against
+            # `now`. The question is "how long before this person disappeared
+            # was their direction last supported" - a property of the pass
+            # itself. Using `now` would instead measure how long ago the track
+            # was pruned, which depends on when the caller happens to sweep and
+            # made every replayed track look stale.
+            age = max(0.0, t.last_seen - t.direction_at)
+            if (direction is not Direction.UNKNOWN
+                    and t.direction_at > 0.0
+                    and age > settings.direction_max_age_s):
+                direction_reason = f"stale({age:.0f}s, was {direction.value})"
+                direction = Direction.UNKNOWN
+            elif direction is not Direction.UNKNOWN and t.direction_at <= 0.0:
+                direction = Direction.UNKNOWN     # never supported at all
+
             final_id = t.vote.finalize()
             t.employee_id = final_id
             t.name = self.gallery.name(final_id) if final_id is not None else ""
@@ -345,7 +370,7 @@ class CameraPipeline:
                 best_margin=float(t.vote.best_margin),
                 person_crop=t.vote.best_person,
                 embedded_frames=t.embedded, gated_frames=t.gated,
-                direction=t.direction.value, direction_reason=t.direction_reason,
+                direction=direction.value, direction_reason=direction_reason,
                 face_px=t.best_face_px, duration_s=max(0.0, t.last_seen - t.first_seen),
                 traj_points=len(t.trajectory.points), travel=t.trajectory.travel(),
                 # Display artifacts all from the quality-best frame.
@@ -522,6 +547,7 @@ class CameraPipeline:
             st.direction_reason = why          # refresh: a stale reason misleads
             if d is not Direction.UNKNOWN:
                 st.direction = d
+                st.direction_at = now              # ...and record WHEN it held
             # Only tracks showing a head this frame can be recognized. With
             # person tracking a track can live for many frames with no head at
             # all, and those frames have nothing to align.
