@@ -35,7 +35,7 @@ RTSP 4K @20fps
                 |
           [10] gallery match ..... cosine vs 268 enrolled vectors
                 |
-          [11] K-of-N vote ....... 3 agreeing frames commit an identity
+          [11] consensus ......... >=65% of identified frames, >=5 agreeing
                 |
   [12] track ends -> combine identity + direction -> attendance row
 ```
@@ -140,7 +140,7 @@ A face must pass all of these to be embedded:
 
 | gate | value | why |
 |---|---|---|
-| `min_face_px` | 66 | below this there is not enough face to identify |
+| `min_face_px` | 56 | below this there is not enough face to identify. Was 66, which rejected 5 575 of 7 578 head-bearing frames and cost recognitions for no accuracy gain |
 | `min_laplacian_var` | 25 | motion blur destroys the texture AdaFace keys on |
 | `min_aligner_score` | 0.40 | the aligner's own confidence in its landmarks |
 | `max_yaw_deg` | 45 | profile faces embed poorly |
@@ -164,32 +164,69 @@ nearly equally close to two people is not an identification.
 > model it was fine-tuned from. Swapping the recognizer without re-calibrating
 > would silently change what counts as a match.
 
-## 11. K-of-N voting
+## 11. Consensus voting
 
-An identity is committed when **3 of the last 5** scored frames agree on the
-same person. One good frame is not enough; a single lucky match on a blurred or
-half-turned face is exactly how a false accept happens.
+**Every gate-passing frame is recognised, for as long as the person is in
+view**, and the identity is decided when the track ends — from all of it.
 
-For attendance, a **false accept is far worse than a miss**: one person is
+A person is committed when they hold:
+
+* at least **65%** (`vote_consensus`) of the frames that produced *any*
+  identity, **and**
+* at least **5** (`vote_min_recognitions`) agreeing frames.
+
+Otherwise the pass names nobody and is recorded as an unknown sighting.
+
+**Misses are excluded from the denominator.** A frame matching nobody says
+nothing about which of two candidates is right, so it does not dilute the
+winner: 8 for A, 2 for B and 20 misses is 80% for A.
+
+**The floor is what guards a short pass.** One agreeing frame out of one is
+100% consensus and clears any percentage rule on its own — the fraction alone
+cannot tell a confident pass from a lucky frame.
+
+For attendance a **false accept is far worse than a miss**: one person is
 recorded as another and nothing in the data reveals it, whereas a miss costs
-nothing because the person is seen again.
+nothing because the person is seen again. That asymmetry is why the floor
+exists and why it is set where it is.
 
-The track keeps two snapshots, deliberately different:
+Consensus is also the strongest available defence against a false accept, and
+it works on a different axis from score. An impostor has no true identity in
+the gallery, so their frames scatter across whoever is nearest by noise; a real
+person's converge. Score alone cannot separate them — two impostors confirmed
+on 2026-08-27 scored 0.218 and 0.180, inside a genuine range reaching down to
+0.177.
 
-- the **highest-scoring** frame — for diagnosing why a match happened
-- the **clearest** frame — what a human is shown
+> **This replaced "first to 3 of the last 5".** That rule could settle an
+> identity from the opening frames of a pass and never revisit it, and made the
+> answer depend on arrival order. Live scores for one person spanned 0.196-0.473
+> within a single day, so a pass's opening frames are not reliably its best
+> evidence.
 
-These are usually not the same frame, and showing the score-best one to a person
-reviewing a decision is misleading.
+While the pass is running, `provisional_id` — the current leader — drives the
+live overlay so the view is not anonymous until someone walks out of frame.
+Attendance ignores it entirely and waits for the final consensus.
+
+Every piece of evidence reported is **scoped to the identity being named**: the
+score, the runner-up margin, the face and the body crop all come from that
+person's own best frame. A track that holds two people cannot show one person's
+name beside another's face — which it did, once, in production.
 
 ## 12. Attendance
 
-The decision is made when the **track ends**, not when the vote commits — by
-then the whole trajectory is known, so identity and direction are combined once,
-with full information.
+The decision is made when the **track ends** — the only decision point. By then
+the whole pass is known, so identity and direction are settled once, with full
+information. `worker._persist_completed` is the only writer; the live feed
+emitted during a pass carries provisional identities the consensus can still
+overturn, and must never be persisted.
 
 - **Direction wins over camera role.** The role only says where the camera
   points; the trajectory says what the person did.
+- **A stale direction is no direction.** The verdict is timestamped when the
+  trajectory supports it and discarded once older than `direction_max_age_s`
+  (5 s) at the track's last sighting. Without this a person standing still kept
+  a verdict up to ten minutes old, which booked check-outs on the entrance
+  camera for people who had not moved.
 - **Business day starts at 04:00** (Asia/Tashkent), so a late shift ending at
   01:00 files against the day it started.
 - **First check-in of the day is kept**, not overwritten by later entries.
@@ -209,7 +246,8 @@ with full information.
 | tracker | ByteTrack, frame_rate 20, buffer 36 (~1.2 s tolerance) |
 | aligner | DFA-mobilenet, 160 px window, margin 1.30, sharp warp |
 | recognizer | AdaFace IR-101 fine-tune, threshold 0.18, margin 0.045 |
-| vote | 3 of 5 |
+| vote | consensus: >=65% of identified frames, >=5 agreeing |
+| direction latch | expires after 5 s without support |
 | per-frame cost | ~10 ms median, ~18 ms p90 (20% of the 50 ms budget) |
 | gallery | 268 vectors / 55 people, d′ 10.03, rank-1 100% |
 
@@ -239,3 +277,56 @@ Honest list, in rough order of how often it bites:
 5. **Direction near the frame edge.** Someone who enters and leaves on the same
    side never crosses the tripwire and may not travel far enough for a
    depth-only verdict.
+
+---
+
+## Where the frames actually go
+
+Measured 2026-08-28 by replaying 20 recordings and counting the funnel. This is
+the most useful single view of the pipeline, because it says where evidence is
+lost rather than where time is spent.
+
+| stage | frames | share |
+|---|---|---|
+| track alive | 8 247 | 100% |
+| head box present | 7 578 | **92%** |
+| **embedded** | **85** | **1%** |
+
+Rejection reasons, and they are not close:
+
+| reason | frames |
+|---|---|
+| **face too small** | **5 575** |
+| aligner score | 418 |
+| yaw | 54 |
+| blur | 40 |
+| pitch | 9 |
+
+A head is found on almost every frame; the **size gate then discards nearly all
+of them**. A 26-second pass embedded 12 of its ~520 frames. That single gate is
+why a pass yields a handful of recognitions from ~196 frames, and it is the
+first place to look for further recognition-rate gains — not the detector, not
+the tracker, not the vote.
+
+### Pass duration
+
+From 107 live passes (2026-08-27) and replayed recordings, which agree:
+
+| | |
+|---|---|
+| median | **9.8 s** |
+| p25 / p75 | 7.2 s / 17.8 s |
+| p90 | 76 s |
+| max | 593 s |
+
+Half of all passes are 5-10 s — a normal walk through the corridor. The
+distribution is strongly right-skewed, so the mean (33 s) is misleading. The
+13% running over 60 s are not slow walkers but **people standing still in
+view**, and they are the ones that expose direction bugs: every stale-latch
+instance came from a track of 76 s or longer.
+
+Unrecognised tracks last *longer* than recognised ones (median 18.3 s vs 6.6 s).
+Someone who walks briskly through presents a clean frontal face and is
+recognised quickly; someone distant, turned away or loitering lingers without
+ever offering a usable frame. Time in view is not the constraint — face quality
+is.
