@@ -250,6 +250,10 @@ class CameraPipeline:
         self.name = name
         self.gallery = gallery
         self.direction_cfg = direction_cfg or DirectionConfig()
+        # Resolved from the recognizer in use, not read from a single global:
+        # thresholds are calibrated per model and do not transfer. See
+        # settings.recognizer_thresholds.
+        self.threshold = settings.threshold_for(settings.recognizer_model)
 
         # Tracking runs on HEADS, not faces. Faces vanish the moment somebody
         # turns or looks down, which left tracks with a median of 1-4 usable
@@ -280,6 +284,7 @@ class CameraPipeline:
             margin=settings.align_margin,
             mode=settings.align_mode,
         )
+        self._log_recognizer = True
         self.recognizer = recognizer or FaceRecognizer(
             settings.model_path(settings.recognizer_model), batch_size=settings.embed_batch
         )
@@ -298,6 +303,9 @@ class CameraPipeline:
             track_buffer=settings.track_buffer,
         )
 
+        log.info("recognizer %s: keypoints=%s threshold=%.3f",
+                 Path(str(settings.recognizer_model)).name,
+                 getattr(self.recognizer, "needs_keypoints", False), self.threshold)
         self.tracks: dict[int, TrackState] = {}
         # Recognised passes traced so far. Tracing embeds every frame of every
         # track, which is far more GPU work than the pipeline normally does, so
@@ -632,13 +640,17 @@ class CameraPipeline:
             if keep:
                 t0 = time.perf_counter()
                 aligned = np.stack([f.aligned for _st, f in keep])
-                embs = self.recognizer.embed(aligned)
+                # keypoints ride along with the faces; the recognizer ignores
+                # them unless its graph asks for them.
+                embs = self.recognizer.embed(
+                    aligned, keypoints=np.stack([f.keypoints for f in faces])
+                    if self.recognizer.needs_keypoints else None)
                 t_embed = (time.perf_counter() - t0) * 1000
                 self.faces_embedded += len(embs)
 
                 for (st, f), q, emb in zip(keep, quals, embs):
                     m: Match = self.gallery.match(
-                        emb, settings.recognition_threshold, settings.second_best_margin
+                        emb, self.threshold, settings.second_best_margin
                     )
                     st.embedded += 1
                     st.best_face_px = max(st.best_face_px, int(q.face_px))
@@ -734,9 +746,11 @@ class CameraPipeline:
         if gated_trace:
             try:
                 g_aligned = np.stack([f.aligned for _st, f, _q in gated_trace])
-                g_embs = self.recognizer.embed(g_aligned)
+                g_embs = self.recognizer.embed(
+                    g_aligned, keypoints=np.stack([f.keypoints for _st, f, _q in gated_trace])
+                    if self.recognizer.needs_keypoints else None)
                 for (st, f, q), emb in zip(gated_trace, g_embs):
-                    gm = self.gallery.match(emb, settings.recognition_threshold,
+                    gm = self.gallery.match(emb, self.threshold,
                                             settings.second_best_margin)
                     who = (self.gallery.name(gm.employee_id) if gm.employee_id
                            else f"_near_{self.gallery.name(gm.runner_up)}")

@@ -82,6 +82,12 @@ class AlignedFace:
     landmarks: np.ndarray    # (5, 2) pixel coords in the ORIGINAL frame
     score: float             # aligner's own face confidence
     crop_box: tuple          # (x1, y1, x2, y2) of the crop in the original frame
+    # The same 5 points mapped into the aligned 112x112 frame and normalised to
+    # 0-1. Keypoint-conditioned recognizers (KPRPE) need these, and the
+    # convention is not recoverable from their graph: passing raw pixels instead
+    # drops gallery d-prime from 12.22 to 0.75. Computed here, once, so no
+    # caller has to rediscover it.
+    keypoints: np.ndarray = None    # (5, 2) float32 in [0, 1]
 
 
 class FaceAligner:
@@ -201,5 +207,13 @@ class FaceAligner:
         for i, cb in enumerate(crop_boxes):
             side = cb[2] - cb[0]
             lm = ldmk[i] * side + np.array([[cb[0], cb[1]]])
-            faces.append(AlignedFace(aligned[i], lm.astype(np.float32), float(score[i][0]), cb))
+            lm = lm.astype(np.float32)
+            # Where those landmarks land AFTER the warp. The similarity
+            # transform maps them close to the canonical template but not onto
+            # it, and that residual is the signal a keypoint-conditioned model
+            # reads - so it must be the transformed points, not the template.
+            M = G.umeyama(lm.astype(np.float64),
+                          G.REFERENCE_LANDMARKS.astype(np.float64))
+            kp = ((lm @ M[:2, :2].T + M[:2, 2]) / G.OUTPUT_SIZE).astype(np.float32)
+            faces.append(AlignedFace(aligned[i], lm, float(score[i][0]), cb, kp))
         return faces

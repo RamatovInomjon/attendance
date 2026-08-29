@@ -332,7 +332,9 @@ class Enroller:
             return None
         f = faces[0]
 
-        emb = self.recognizer.embed(f.aligned[None])[0]
+        emb = self.recognizer.embed(
+            f.aligned[None],
+            keypoints=f.keypoints[None] if self.recognizer.needs_keypoints else None)[0]
         face_px = float(max(d.box[2] - d.box[0], d.box[3] - d.box[1]))
         return emb, f.score, sharpness_of(f.aligned), face_px
 
@@ -368,7 +370,10 @@ class Enroller:
             raise EnrollmentCaptureError(_quality_guidance(quality.reason))
 
         try:
-            vector = self.recognizer.embed(face.aligned[None])[0]
+            vector = self.recognizer.embed(
+                face.aligned[None],
+                keypoints=face.keypoints[None]
+                if self.recognizer.needs_keypoints else None)[0]
         except Exception as exc:
             raise EnrollmentCaptureError(
                 "Embedding yaratilmadi. Namunani qayta oling; muammo takrorlansa administratorga murojaat qiling."

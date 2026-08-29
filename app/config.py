@@ -213,6 +213,28 @@ class Settings(BaseSettings):
     # rule.  Below the floor the pass commits nobody and is recorded as an
     # unknown sighting, which is the FAR-favouring choice: better to miss a
     # quick walk-through than to name the wrong person from two frames.
+    # Thresholds are calibrated PER RECOGNIZER and are not transferable. Swapping
+    # the model without swapping the threshold is a silent false-accept
+    # generator: on the enrolment gallery the deployed IR-101 puts its best
+    # impostor at 0.202, while KPRPE puts its best impostor at 0.368 - so
+    # KPRPE running at IR-101's 0.18 would accept essentially anybody.
+    #
+    # `threshold_for()` resolves it from the model actually loaded, so the two
+    # cannot drift apart. An unknown model falls back to recognition_threshold
+    # and logs a warning rather than guessing.
+    #
+    # The KPRPE value is PROVISIONAL. It is scaled from the gallery ratio that
+    # calibrated IR-101 (live 0.18 against a 0.452 worst-genuine, so ~0.40 of
+    # it) applied to KPRPE's 0.629, giving ~0.25. Gallery scores are much higher
+    # than corridor scores for both models, so this MUST be recalibrated on live
+    # footage before it is trusted.
+    recognizer_thresholds: dict = {
+        "adaface_ir101_finetune_fp16.onnx": 0.18,
+        "adaface_ir101_finetune.onnx": 0.18,
+        "adaface_vit_kprpe_fp16.onnx": 0.25,
+        "adaface_vit_kprpe.onnx": 0.25,
+    }
+
     vote_consensus: float = 0.65
     vote_min_recognitions: int = 5
 
@@ -328,6 +350,25 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     secret_key: str = Field(default="change-me-in-production")
+
+    def threshold_for(self, model_name: str | None = None) -> float:
+        """The recognition threshold calibrated for the recognizer in use.
+
+        Thresholds do not transfer between models - see recognizer_thresholds.
+        Resolved from the model rather than read from a single global so that
+        changing `recognizer_model` cannot silently leave the old threshold in
+        place.
+        """
+        import logging
+        name = Path(str(model_name or self.recognizer_model)).name
+        name = name.replace(".enc", "")
+        if name in self.recognizer_thresholds:
+            return float(self.recognizer_thresholds[name])
+        logging.getLogger(__name__).warning(
+            "no calibrated threshold for recognizer %r; falling back to %.3f. "
+            "Thresholds are NOT transferable between models - calibrate before "
+            "trusting this.", name, self.recognition_threshold)
+        return float(self.recognition_threshold)
 
     @property
     def tz(self) -> ZoneInfo:

@@ -338,3 +338,53 @@ Someone who walks briskly through presents a clean frontal face and is
 recognised quickly; someone distant, turned away or loitering lingers without
 ever offering a usable frame. Time in view is not the constraint — face quality
 is.
+
+---
+
+## Switching recognizer
+
+The recognizer is selected by one setting, and everything else follows from the
+model's own graph:
+
+```bash
+# .env — corridor test build
+recognizer_model=adaface_vit_kprpe_fp16.onnx
+```
+
+`FaceRecognizer` inspects its inputs at load. A second input named `keypoints`
+makes it keypoint-conditioned, and the pipeline then passes
+`AlignedFace.keypoints` — the 5 landmarks mapped into the aligned 112×112 frame
+and divided by 112. Nothing else needs configuring, and the model and its
+calling convention cannot drift apart.
+
+Two safeguards, both because the failure mode is silence rather than a crash:
+
+- **A keypoint model given no keypoints is refused**, not fed zeros. Zeros
+  produce plausible-looking vectors that are quietly wrong, and that error would
+  enter the gallery and every live match at once.
+- **The threshold is resolved from the model** via `settings.threshold_for()`,
+  never read from a single global. Thresholds are calibrated per recognizer and
+  do not transfer: IR-101 puts its best gallery impostor at 0.202 and KPRPE puts
+  its at 0.368, so KPRPE running at IR-101's 0.18 would accept almost anybody.
+  An unknown model falls back with a warning rather than guessing.
+
+**Re-enrol after switching.** Gallery vectors from one recognizer are
+meaningless to another; run `scripts/enroll.py` before trusting any result.
+
+### Measured, 2026-08-29
+
+Same eight clips, same pipeline, gallery re-embedded per model:
+
+| | ir101_fp16 | vit_kprpe_fp16 |
+|---|---|---|
+| passes recognised | 2 | **3** |
+| Nodira | 0.349 | **0.405** |
+| Komoliddin | 0.332 | **0.529** |
+| Murodullayev | missed | **0.407** |
+| ms/face (batch 8) | 1.94 | 2.98 |
+| gallery d′ | 9.91 | 12.22 |
+
+KPRPE recognises one more pass and scores higher on the ones both find, at
+about 1.5× the per-face cost. **The 0.25 threshold is provisional** — scaled
+from the gallery, not calibrated on corridor footage — and these clips are
+1080p, so this needs redoing on 4K before adoption.
