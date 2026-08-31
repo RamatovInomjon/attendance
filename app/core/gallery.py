@@ -39,12 +39,23 @@ class Gallery:
             self.M = np.zeros((0, 512), dtype=np.float32)
             self.owner = np.zeros((0,), dtype=np.int64)
         else:
-            M = np.asarray(vectors, dtype=np.float32)
+            # copy=True, not np.asarray: asarray hands back the CALLER'S array
+            # when it is already float32, and the `/=` below then normalises
+            # their data under them. Enrolment and the benchmarks both keep the
+            # array they passed in.
+            M = np.array(vectors, dtype=np.float32, copy=True)
             M /= np.linalg.norm(M, axis=1, keepdims=True) + 1e-12   # normalize once
             self.M = np.ascontiguousarray(M)
             self.owner = np.asarray(employee_ids, dtype=np.int64)
         self.names = names
         self._people = np.unique(self.owner) if len(self.owner) else np.zeros((0,), np.int64)
+        # Dense 0..P-1 index per row, so the per-person max is a scatter-reduce
+        # instead of a Python loop over every enrolment image. See `match`.
+        if len(self.owner):
+            self._slot = np.searchsorted(self._people, self.owner).astype(np.int64)
+        else:
+            self._slot = np.zeros((0,), np.int64)
+        self._MT = np.ascontiguousarray(self.M.T)
 
     def __len__(self):
         return len(self.M)
@@ -56,30 +67,58 @@ class Gallery:
     def name(self, employee_id: int | None) -> str:
         return self.names.get(employee_id, "Unknown") if employee_id is not None else "Unknown"
 
+    def _decide(self, per_person: np.ndarray, threshold: float, margin: float) -> Match:
+        """Apply the two acceptance rules to one person-scored row."""
+        if len(per_person) == 1:
+            top = 0
+            top_s = float(per_person[0])
+            return (Match(int(self._people[0]), top_s, top_s, None)
+                    if top_s >= threshold else Match(None, top_s, top_s,
+                                                     int(self._people[0])))
+        # argpartition, not a full sort: only the top two matter, and this is
+        # the one part of matching that grows with headcount.
+        idx = np.argpartition(per_person, -2)[-2:]
+        if per_person[idx[0]] > per_person[idx[1]]:
+            idx = idx[::-1]
+        second, top = int(idx[0]), int(idx[1])
+        top_s, second_s = float(per_person[top]), float(per_person[second])
+        gap = top_s - second_s
+        if top_s >= threshold and gap >= margin:
+            return Match(int(self._people[top]), top_s, gap, int(self._people[second]))
+        return Match(None, top_s, gap, int(self._people[top]))   # near miss
+
+    def _per_person(self, sims: np.ndarray) -> np.ndarray:
+        """(..., N images) similarities -> (..., P people) best-image-per-person.
+
+        This replaced a Python loop over every enrolment row. The matmul above
+        it is microseconds; the loop was ~50x that at 268 images, and it grew
+        with the gallery - the one part of matching that does.
+        """
+        out = np.full(sims.shape[:-1] + (len(self._people),), -2.0, dtype=np.float32)
+        np.maximum.at(out, (Ellipsis, self._slot), sims)
+        return out
+
     def match(self, embedding: np.ndarray, threshold: float, margin: float) -> Match:
         """Best person for one query embedding."""
         if len(self.M) == 0:
             return Match(None, 0.0, 0.0)
-
         q = np.asarray(embedding, dtype=np.float32).ravel()
         q = q / (np.linalg.norm(q) + 1e-12)
-        sims = self.M @ q                              # (N,)
+        return self._decide(self._per_person(self.M @ q), threshold, margin)
 
-        # Max similarity per person, not per image.
-        best_per_person: dict[int, float] = {}
-        for owner, s in zip(self.owner, sims):
-            o = int(owner)
-            if s > best_per_person.get(o, -2.0):
-                best_per_person[o] = float(s)
+    def match_batch(self, embeddings: np.ndarray, threshold: float,
+                    margin: float) -> list[Match]:
+        """Every face in one frame, in one GEMM.
 
-        ranked = sorted(best_per_person.items(), key=lambda kv: kv[1], reverse=True)
-        top_id, top_s = ranked[0]
-        second_id, second_s = (ranked[1] if len(ranked) > 1 else (None, -1.0))
-        gap = top_s - second_s if second_id is not None else top_s
-
-        if top_s >= threshold and gap >= margin:
-            return Match(top_id, top_s, gap, second_id)
-        return Match(None, top_s, gap, top_id)      # runner_up carries the near miss
+        Detection, alignment and embedding are all batched per frame; matching
+        was the only stage still looping in Python, once per face.
+        """
+        E = np.atleast_2d(np.asarray(embeddings, dtype=np.float32))
+        if len(self.M) == 0:
+            return [Match(None, 0.0, 0.0) for _ in range(len(E))]
+        E = E / (np.linalg.norm(E, axis=1, keepdims=True) + 1e-12)
+        per = self._per_person(E @ self._MT)           # (K, P)
+        return [self._decide(per[i], threshold, margin) for i in range(len(E))]
 
 
 @dataclass

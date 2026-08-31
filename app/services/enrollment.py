@@ -332,9 +332,7 @@ class Enroller:
             return None
         f = faces[0]
 
-        emb = self.recognizer.embed(
-            f.aligned[None],
-            keypoints=f.keypoints[None] if self.recognizer.needs_keypoints else None)[0]
+        emb = self.recognizer.embed(f.aligned[None])[0]
         face_px = float(max(d.box[2] - d.box[0], d.box[3] - d.box[1]))
         return emb, f.score, sharpness_of(f.aligned), face_px
 
@@ -370,10 +368,7 @@ class Enroller:
             raise EnrollmentCaptureError(_quality_guidance(quality.reason))
 
         try:
-            vector = self.recognizer.embed(
-                face.aligned[None],
-                keypoints=face.keypoints[None]
-                if self.recognizer.needs_keypoints else None)[0]
+            vector = self.recognizer.embed(face.aligned[None])[0]
         except Exception as exc:
             raise EnrollmentCaptureError(
                 "Embedding yaratilmadi. Namunani qayta oling; muammo takrorlansa administratorga murojaat qiling."
@@ -562,18 +557,69 @@ def enroll_employee_captures(
     return result
 
 
-def load_gallery() -> Gallery:
-    """Read every embedding out of the database into one matrix."""
+def _model_key(name) -> str:
+    """Identity of a recognizer for gallery-compatibility purposes.
+
+    Two things are deliberately NOT part of it:
+
+    * `.enc` - the same weights, encrypted for a licensed deployment.
+    * the precision suffix - `_fp16` and `_fp32` of one export produce the same
+      embeddings to well inside the noise floor (d-prime 10.0271 vs 10.0283 on
+      this gallery), so a gallery built by one is valid for the other. The live
+      gallery is stamped `adaface_ir101_finetune.onnx` while the deployed model
+      is `adaface_ir101_finetune_fp16.onnx`; treating those as incompatible
+      would refuse to start on a gallery that is perfectly good.
+
+    What it MUST separate is genuinely different architectures, whose
+    embeddings are not comparable at all.
+    """
+    n = Path(str(name or "")).name
+    n = n.replace(".enc", "")
+    for suffix in (".onnx", ".pt"):
+        if n.endswith(suffix):
+            n = n[: -len(suffix)]
+    for prec in ("_fp16", "_fp32", "_int8"):
+        if n.endswith(prec):
+            n = n[: -len(prec)]
+    return n
+
+
+def load_gallery(strict: bool = True) -> Gallery:
+    """Read every embedding out of the database into one matrix.
+
+    `strict` refuses a gallery that was not built by the recognizer now loaded.
+    Embeddings from two different models are not comparable, but nothing about
+    them says so: both are 512-d and L2-normalised, so the matmul succeeds and
+    returns entirely plausible cosine scores against the wrong vectors. There is
+    no error, no warning, and nothing in the data to reveal it - just silently
+    wrong matching, in the gallery AND in every live comparison at once.
+
+    That is exactly what switching `recognizer_model` without re-enrolling does,
+    and it is why this is checked rather than documented.
+    """
     with session_scope() as s:
         rows = s.execute(
             select(FaceEmbedding.employee_id, FaceEmbedding.vector,
-                   Employee.full_name, Employee.is_active)
+                   Employee.full_name, Employee.is_active,
+                   FaceEmbedding.model_name)
             .join(Employee, Employee.id == FaceEmbedding.employee_id)
             .where(Employee.is_active.is_(True))
         ).all()
 
     if not rows:
         return Gallery(np.zeros((0, 512), np.float32), np.zeros((0,), np.int64), {})
+
+    want = _model_key(settings.recognizer_model)
+    got = {_model_key(r[4]) for r in rows}
+    if strict and got != {want}:
+        listed = ", ".join(sorted(x or "<unset>" for x in got))
+        raise RuntimeError(
+            f"gallery/recognizer mismatch: the loaded recognizer is {want!r} but "
+            f"the {len(rows)} stored embeddings were built by {{{listed}}}. "
+            f"Vectors from one recognizer are meaningless to another - the "
+            f"comparison still succeeds and returns plausible-looking scores, "
+            f"which is why this refuses rather than warns. "
+            f"Run `python scripts/enroll.py` to rebuild the gallery.")
 
     vecs = np.stack([np.frombuffer(r[1], dtype=np.float32) for r in rows])
     owners = np.array([r[0] for r in rows], dtype=np.int64)
