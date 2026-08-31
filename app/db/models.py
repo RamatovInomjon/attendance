@@ -166,6 +166,13 @@ class RecognitionEvent(Base):
     __table_args__ = (
         Index("ix_event_emp_date", "employee_id", "business_date"),
         Index("ix_event_date_ts", "business_date", "ts"),
+        # The debounce lookup - "this person, this camera, most recent first" -
+        # runs on the CAPTURE THREAD inside a write transaction, once per
+        # completed pass. Without this it could only use the employee_id
+        # prefix, so SQLite read every event that person had ever produced and
+        # then built a temp B-tree to sort them. Fine at 179 rows; at 90 days
+        # of retention it is thousands, per pass.
+        Index("ix_event_emp_cam_ts", "employee_id", "camera_id", "ts"),
     )
 
 
@@ -209,8 +216,12 @@ class UnknownSighting(Base):
     id = Column(Integer, primary_key=True)
     camera_id = Column(Integer, ForeignKey("camera.id", ondelete="SET NULL"), nullable=True)
     track_id = Column(Integer, default=-1)
-    first_seen = Column(UtcDateTime(), default=utcnow, index=True)
-    last_seen = Column(UtcDateTime(), default=utcnow)
+    # last_seen is indexed, first_seen is not: /attendance/unknown orders by
+    # last_seen, and that was a full table scan plus a temp B-tree. The index
+    # that did exist was on first_seen, which no query in the codebase orders
+    # or filters on - it only cost a write on every insert.
+    first_seen = Column(UtcDateTime(), default=utcnow)
+    last_seen = Column(UtcDateTime(), default=utcnow, index=True)
     business_date = Column(Date, nullable=False, index=True)
     frames = Column(Integer, default=1)
     best_score = Column(Float, default=0.0)      # best match that still missed

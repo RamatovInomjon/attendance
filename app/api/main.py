@@ -28,6 +28,44 @@ from app.api import ws as ws_router
 log = logging.getLogger(__name__)
 
 
+async def _eod_sweep_loop():
+    """Close out finished days from inside the service.
+
+    `close_open_intervals` existed only in scripts/maintenance.py, driven by
+    deploy/ematsy-maintenance.timer - which is not installed on either host, so
+    it had never run. 21 rows still claimed people were inside the building on
+    business dates up to five days old, and their final interval was never
+    accumulated into worked_seconds.
+
+    Attendance correctness may not depend on somebody remembering to install a
+    cron job, so it runs here. `scripts/maintenance.py` still works for manual
+    runs; the sweep is idempotent, so both running is harmless.
+    """
+    from datetime import timedelta
+    from app.services.attendance import AttendanceService, business_date
+
+    while True:
+        now = datetime.now(settings.tz)
+        target = now.replace(hour=settings.day_boundary_hour, minute=0,
+                             second=0, microsecond=0) + timedelta(
+                                 minutes=settings.eod_sweep_offset_min)
+        if target <= now:
+            target += timedelta(days=1)
+        await asyncio.sleep(max(60.0, (target - now).total_seconds()))
+        try:
+            # Everything up to and including yesterday. Sweeping only one date
+            # means a day the service was down is never revisited.
+            yesterday = business_date(datetime.now(settings.tz)) - timedelta(days=1)
+            def _sweep():
+                with session_scope() as s:
+                    return AttendanceService().close_open_intervals(s, yesterday)
+            n = await asyncio.to_thread(_sweep)
+            log.info("end-of-day sweep: flagged %d open interval(s) up to %s",
+                     n, yesterday)
+        except Exception:
+            log.exception("end-of-day sweep failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Before anything is served: make sure the console is reachable. On a fresh
@@ -39,7 +77,11 @@ async def lifespan(app: FastAPI):
     except Exception:
         log.exception("could not ensure a default admin account")
     runtime.start()
+    sweep = (asyncio.create_task(_eod_sweep_loop())
+             if settings.eod_sweep_enabled else None)
     yield
+    if sweep is not None:
+        sweep.cancel()
     runtime.stop()
 
 
@@ -96,10 +138,13 @@ async def video(camera_id: int):
         raise HTTPException(404, "camera not running")
 
     async def gen():
-        # Each viewer renders its own copy from the shared latest frame, so
-        # opening a second tab does not steal the first one's frames.
+        # `render()` resizes a 4K frame and JPEG-encodes it - tens of
+        # milliseconds. Called directly in this generator it ran ON THE EVENT
+        # LOOP, ten times a second per viewer, stalling every other request,
+        # WebSocket send and page render in the process. The WebSocket path
+        # (app/api/ws.py) always got this right; this one did not.
         while True:
-            jpg = w.render()
+            jpg = await asyncio.to_thread(w.render)
             if jpg:
                 yield b"--f\r\nContent-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
             await asyncio.sleep(1 / 10)
@@ -112,8 +157,17 @@ async def video(camera_id: int):
 def health():
     ok = all(w.source.connected and not w.source.is_stale for w in runtime.workers.values())
     errs = sum(w.pipeline_errors for w in runtime.workers.values())
+    # Replay has real gaps between clips, so `is_stale` goes true between
+    # passes. Reporting that as "degraded" would be misleading, and reporting
+    # it as "healthy" would be untrue - so it is named for what it is. A
+    # pipeline error still degrades it, in replay as in production.
+    if settings.replay_dir:
+        status = "degraded" if errs else "replay"
+    else:
+        status = ("degraded" if errs else "healthy") if ok and runtime.workers else "degraded"
     return {
-        "status": ("degraded" if errs else "healthy") if ok and runtime.workers else "degraded",
+        "status": status,
+        "replay": str(settings.replay_dir) if settings.replay_dir else None,
         "pipeline_errors": errs,
         "gallery": {"embeddings": len(runtime.gallery or []),
                     "people": runtime.gallery.n_people if runtime.gallery else 0},
