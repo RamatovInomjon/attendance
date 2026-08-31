@@ -73,6 +73,25 @@ def _copy_app(dst: Path) -> tuple[int, int]:
     return so_kept, py_dropped
 
 
+def _recognizer_is_shippable() -> list[str]:
+    """The bundle must contain the recognizer it is configured to load.
+
+    `_leaks()` below refuses plaintext .onnx, so a recognizer with no `.enc`
+    ends up in the bundle in NEITHER form. The service then starts on the
+    customer's machine, fails to construct FaceRecognizer, and dies - a failure
+    discovered at their site rather than at build time. That is exactly what
+    switching `recognizer_model` to a model that had never been encrypted
+    would have produced.
+    """
+    from app.config import settings
+    bad = []
+    for name in (settings.recognizer_model, settings.head_model,
+                 settings.aligner_model):
+        if not (settings.models_dir / (str(name) + ".enc")).is_file():
+            bad.append(f"{name} has no .enc (run scripts/encrypt_models.py)")
+    return bad
+
+
 def _debug_capture_is_off() -> list[str]:
     """Debug capture is for tuning, not for customer sites.
 
@@ -93,6 +112,12 @@ def _debug_capture_is_off() -> list[str]:
 
 
 def build(args) -> int:
+    missing = _recognizer_is_shippable()
+    if missing:
+        print('  REFUSING: the configured models cannot be shipped:')
+        for x in missing:
+            print(f'    {x}')
+        return 1
     hot = _debug_capture_is_off()
     if hot:
         print("  REFUSING TO SHIP - debug capture is enabled:", file=sys.stderr)

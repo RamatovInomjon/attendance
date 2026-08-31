@@ -343,48 +343,56 @@ is.
 
 ## Switching recognizer
 
-The recognizer is selected by one setting, and everything else follows from the
-model's own graph:
+One setting selects it:
 
 ```bash
-# .env — corridor test build
-recognizer_model=adaface_vit_kprpe_fp16.onnx
+# .env
+recognizer_model=adaface_ir101_finetune_fp16.onnx
 ```
 
-`FaceRecognizer` inspects its inputs at load. A second input named `keypoints`
-makes it keypoint-conditioned, and the pipeline then passes
-`AlignedFace.keypoints` — the 5 landmarks mapped into the aligned 112×112 frame
-and divided by 112. Nothing else needs configuring, and the model and its
-calling convention cannot drift apart.
+The pipeline supplies exactly one thing — the aligned 112×112 face — and expects
+one 512-d embedding back. A model wanting anything else is **refused at load**
+rather than fed a default for its extra input, because that would return
+plausible-looking vectors that are quietly wrong, in the gallery and in every
+live match at once.
 
-Two safeguards, both because the failure mode is silence rather than a crash:
+Three things do not follow automatically, and each is checked rather than
+trusted:
 
-- **A keypoint model given no keypoints is refused**, not fed zeros. Zeros
-  produce plausible-looking vectors that are quietly wrong, and that error would
-  enter the gallery and every live match at once.
-- **The threshold is resolved from the model** via `settings.threshold_for()`,
-  never read from a single global. Thresholds are calibrated per recognizer and
-  do not transfer: IR-101 puts its best gallery impostor at 0.202 and KPRPE puts
-  its at 0.368, so KPRPE running at IR-101's 0.18 would accept almost anybody.
-  An unknown model falls back with a warning rather than guessing.
+- **The threshold** is resolved from the loaded model via
+  `settings.threshold_for()`, never read from a single global. Thresholds are
+  calibrated per recognizer and do not transfer: each model places its impostor
+  distribution on a different scale, so a value that is safe on one can accept
+  nearly anybody on another. An unknown model falls back with a warning rather
+  than guessing.
+- **The gallery must be rebuilt.** Vectors from one recognizer are meaningless
+  to another, and comparing them SUCCEEDS — same dimensionality, same
+  normalisation, cosines in the usual range, no error anywhere. `load_gallery()`
+  refuses a gallery whose `model_name` does not match the loaded recognizer.
+  Run `scripts/enroll.py` after switching.
+- **The encrypted model must exist** for a licensed deployment.
+  `package_release.py` refuses to build a bundle whose configured recognizer has
+  no `.enc`, because the bundle ships no plaintext `.onnx` and the service would
+  otherwise fail to start at the customer's site rather than here.
 
-**Re-enrol after switching.** Gallery vectors from one recognizer are
-meaningless to another; run `scripts/enroll.py` before trusting any result.
+### Why AdaFace ViT+KPRPE was evaluated and dropped, 2026-08-31
 
-### Measured, 2026-08-29
+A keypoint-conditioned recognizer looked clearly better on the enrolment
+gallery — d′ 12.22 against IR-101's 9.91. It was implemented, converted to fp16
+with a dynamic batch, calibrated, and tested against native-4K corridor footage.
 
-Same eight clips, same pipeline, gallery re-embedded per model:
+On the deployment domain it agreed with IR-101 on **12 of 12 passes**: the same
+eight recognitions, the same four misses, the same identities. Its raw scores
+were higher, but so was its calibrated threshold, and what matters is the ratio:
 
-| | ir101_fp16 | vit_kprpe_fp16 |
+| | IR-101 | KPRPE |
 |---|---|---|
-| passes recognised | 2 | **3** |
-| Nodira | 0.349 | **0.405** |
-| Komoliddin | 0.332 | **0.529** |
-| Murodullayev | missed | **0.407** |
-| ms/face (batch 8) | 1.94 | 2.98 |
-| gallery d′ | 9.91 | 12.22 |
+| genuine score ÷ threshold | **2.50×** | 2.07× |
+| genuine frames kept at FAR=0 | **87%** | 79% |
+| embed, batch 1 / 2 | **5.69 / 11.38 ms** | 6.59 / 11.77 ms |
+| model size | **130 MB** | 231 MB |
 
-KPRPE recognises one more pass and scores higher on the ones both find, at
-about 1.5× the per-face cost. **The 0.25 threshold is provisional** — scaled
-from the gallery, not calibrated on corridor footage — and these clips are
-1080p, so this needs redoing on 4K before adoption.
+So it was removed. The lesson is about the measurement, not the model: **the
+gallery was saturated** — both reached rank-1 1.0000 — so gallery d′ could not
+discriminate between them at all, and the number that looked decisive was
+meaningless for this decision. Only corridor footage answered it.

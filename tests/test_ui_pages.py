@@ -1576,6 +1576,10 @@ def test_live_camera_context_treats_real_zero_rtsp_stats_as_unavailable(monkeypa
         (CameraRole.OUT, "CHECK_IN", "IN"),
         (CameraRole.IN, "CHECK_OUT", "OUT"),
         (CameraRole.OUT, "RE_SIGHTING", "OUT"),
+        # The losing half of a cross-camera pair moved no state, so it must not
+        # be drawn as a check-in or check-out.
+        (CameraRole.IN, "DUPLICATE_VIEW", "SEEN"),
+        (CameraRole.OUT, "DUPLICATE_VIEW", "SEEN"),
     ],
 )
 def test_event_vm_action_prefers_attendance_transition_over_camera_role(role, transition, expected):

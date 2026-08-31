@@ -44,27 +44,26 @@ class FaceRecognizer:
         self.input_name = inp.name
         self.dtype = np.float16 if "float16" in inp.type else np.float32
 
-        # Keypoint-conditioned models (AdaFace ViT + KPRPE) take a second input
-        # of 5 landmarks. Detected from the graph rather than configured, so
-        # swapping `recognizer_model` is the only switch needed and the two can
-        # never disagree.
-        extra = [i for i in self.session.get_inputs()[1:]]
-        self.keypoint_name = next(
-            (i.name for i in extra if "key" in i.name.lower() or "point" in i.name.lower()),
-            extra[0].name if extra else None)
-        self.needs_keypoints = self.keypoint_name is not None
-        self.keypoint_dtype = np.float32
-        if self.needs_keypoints:
-            kp = next(i for i in extra if i.name == self.keypoint_name)
-            self.keypoint_dtype = np.float16 if "float16" in kp.type else np.float32
+        # One input, one output. A model wanting anything else is not a drop-in
+        # replacement and must not be treated as one - it would be fed nothing
+        # for its second input and return plausible-looking vectors that are
+        # quietly wrong, in the gallery and in every live match at once.
+        extra = self.session.get_inputs()[1:]
+        if extra:
+            raise ValueError(
+                f"{Path(str(model_path)).name} takes {len(extra) + 1} inputs "
+                f"({', '.join(i.name for i in extra)} besides the image). This "
+                f"pipeline supplies only the aligned face.")
 
         # A fixed batch dimension is a research export; run it one row at a time
         # rather than failing, and say so, because it costs ~2.4x.
         b = inp.shape[0]
         self.fixed_batch = b if isinstance(b, int) and b > 0 else None
         if self.fixed_batch:
-            log.warning("recognizer %s has a FIXED batch of %d - throughput will "
-                        "suffer; convert it with scripts/convert_recognizer.py",
+            log.warning("recognizer %s has a FIXED batch of %d - a research "
+                        "export. Throughput will suffer: the pipeline embeds a "
+                        "whole frame's faces at once and this forces them one "
+                        "at a time. Re-export with a dynamic batch dimension.",
                         Path(str(model_path)).name, self.fixed_batch)
             self.batch_size = self.fixed_batch
 
@@ -72,42 +71,18 @@ class FaceRecognizer:
     def provider(self) -> str:
         return self.session.get_providers()[0]
 
-    def embed(self, aligned: np.ndarray, normalize: bool = True,
-              keypoints: np.ndarray | None = None) -> np.ndarray:
-        """(N,3,112,112) -> (N,512). `keypoints` (N,5,2) in 0-1 for KPRPE models.
-
-        A keypoint model given no keypoints is refused rather than fed zeros:
-        it would return plausible-looking vectors that are quietly wrong, and
-        that error would land in the gallery and in every live match at once,
-        with nothing in the data to reveal it.
-        """
+    def embed(self, aligned: np.ndarray, normalize: bool = True) -> np.ndarray:
+        """(N,3,112,112) in [-1,1] -> (N,512) L2-normalized embeddings."""
         aligned = np.asarray(aligned)
         if aligned.ndim == 3:
             aligned = aligned[None]
         if aligned.dtype != self.dtype:
             aligned = aligned.astype(self.dtype)
 
-        if self.needs_keypoints:
-            if keypoints is None:
-                raise ValueError(
-                    f"{Path(str(self.model_name)).name} is keypoint-conditioned "
-                    f"and requires `keypoints` (N,5,2) normalised to 0-1; got None. "
-                    f"AlignedFace.keypoints carries them.")
-            keypoints = np.asarray(keypoints)
-            if keypoints.ndim == 2:
-                keypoints = keypoints[None]
-            if len(keypoints) != len(aligned):
-                raise ValueError(f"keypoints/faces length mismatch: "
-                                 f"{len(keypoints)} vs {len(aligned)}")
-            keypoints = keypoints.astype(self.keypoint_dtype)
-
         outs = []
         for i in range(0, len(aligned), self.batch_size):
-            chunk = aligned[i : i + self.batch_size]
-            feeds = {self.input_name: chunk}
-            if self.needs_keypoints:
-                feeds[self.keypoint_name] = keypoints[i : i + self.batch_size]
-            outs.append(self.session.run(None, feeds)[0])
+            outs.append(self.session.run(
+                None, {self.input_name: aligned[i : i + self.batch_size]})[0])
         emb = np.concatenate(outs, axis=0).astype(np.float32)
 
         if normalize:

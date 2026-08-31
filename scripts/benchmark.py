@@ -87,9 +87,7 @@ def _gallery_metrics(limit_people: int | None = None) -> dict:
             faces = ali.align(bgr, [box], is_bgr=True)
             if not faces:
                 continue
-            e = rec.embed(np.stack([faces[0].aligned]),
-                          keypoints=np.stack([faces[0].keypoints])
-                          if rec.needs_keypoints else None)
+            e = rec.embed(np.stack([faces[0].aligned]))
             embs.append(e[0] / (np.linalg.norm(e[0]) + 1e-12))
             labels.append(pid)
     dt = time.perf_counter() - t0
