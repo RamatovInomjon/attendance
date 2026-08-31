@@ -175,8 +175,13 @@ class Trajectory:
 
 def config_from_camera(cam) -> DirectionConfig:
     """Build a DirectionConfig from the Camera row's stored geometry."""
+    # ALL FOUR, not just the x pair. A row with x1/x2 set and y1 NULL built a
+    # line containing None, and `_side()` then raised TypeError for every track
+    # on every frame - recognition stops dead while frames keep flowing and the
+    # stream stats stay green, which is the hardest failure here to notice.
     line = None
-    if cam.line_x1 is not None and cam.line_x2 is not None:
+    coords = (cam.line_x1, cam.line_y1, cam.line_x2, cam.line_y2)
+    if all(c is not None for c in coords):
         line = ((cam.line_x1, cam.line_y1), (cam.line_x2, cam.line_y2))
     return DirectionConfig(
         line=line,

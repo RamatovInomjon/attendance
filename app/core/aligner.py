@@ -82,12 +82,6 @@ class AlignedFace:
     landmarks: np.ndarray    # (5, 2) pixel coords in the ORIGINAL frame
     score: float             # aligner's own face confidence
     crop_box: tuple          # (x1, y1, x2, y2) of the crop in the original frame
-    # The same 5 points mapped into the aligned 112x112 frame and normalised to
-    # 0-1. Keypoint-conditioned recognizers (KPRPE) need these, and the
-    # convention is not recoverable from their graph: passing raw pixels instead
-    # drops gallery d-prime from 12.22 to 0.75. Computed here, once, so no
-    # caller has to rediscover it.
-    keypoints: np.ndarray = None    # (5, 2) float32 in [0, 1]
 
 
 class FaceAligner:
@@ -138,8 +132,21 @@ class FaceAligner:
         sx2, sy2 = min(w, cx2), min(h, cy2)
 
         crop = frame_rgb[sy1:sy2, sx1:sx2]
-        if crop.size and (pl or pt or pr or pb):
-            crop = cv2.copyMakeBorder(crop, pt, pb, pl, pr, cv2.BORDER_CONSTANT, value=(0, 0, 0))
+        if crop.size:
+            if pl or pt or pr or pb:
+                crop = cv2.copyMakeBorder(crop, pt, pb, pl, pr, cv2.BORDER_CONSTANT,
+                                          value=(0, 0, 0))
+        else:
+            # A box entirely off-frame. Returning an empty crop made `align()`
+            # yield a SHORTER list than it was given, and its caller pairs
+            # results with inputs positionally - so every face after the gap
+            # was attributed to the wrong track. A wrong identity that looks
+            # entirely plausible is the worst failure this system has, so the
+            # length is guaranteed instead: a black crop scores ~0 on the
+            # aligner and is rejected by the face-presence gate a moment later,
+            # which is the gate that exists for exactly this.
+            side = max(1, cx2 - cx1)
+            crop = np.zeros((side, side, frame_rgb.shape[2]), dtype=frame_rgb.dtype)
         return crop, (cx1, cy1, cx2, cy2)
 
     def align(self, frame_rgb: np.ndarray, boxes, is_bgr: bool = False) -> list[AlignedFace]:
@@ -157,8 +164,6 @@ class FaceAligner:
         natives, small, crop_boxes = [], [], []
         for b in boxes:
             crop, cb = self._cut(frame_rgb, b)
-            if crop.size == 0:
-                continue
             if is_bgr:
                 crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
             # Cap the warp source: past ~384 px the extra detail cannot reach a
@@ -173,6 +178,7 @@ class FaceAligner:
 
         if not natives:
             return []
+        assert len(natives) == len(boxes), "align() must answer one face per box"
 
         batch = np.stack(small).astype(np.float32)
         ldmk, _bbox, score, resized = self.session.run(None, {"image": batch})
@@ -208,12 +214,5 @@ class FaceAligner:
             side = cb[2] - cb[0]
             lm = ldmk[i] * side + np.array([[cb[0], cb[1]]])
             lm = lm.astype(np.float32)
-            # Where those landmarks land AFTER the warp. The similarity
-            # transform maps them close to the canonical template but not onto
-            # it, and that residual is the signal a keypoint-conditioned model
-            # reads - so it must be the transformed points, not the template.
-            M = G.umeyama(lm.astype(np.float64),
-                          G.REFERENCE_LANDMARKS.astype(np.float64))
-            kp = ((lm @ M[:2, :2].T + M[:2, 2]) / G.OUTPUT_SIZE).astype(np.float32)
-            faces.append(AlignedFace(aligned[i], lm, float(score[i][0]), cb, kp))
+            faces.append(AlignedFace(aligned[i], lm, float(score[i][0]), cb))
         return faces

@@ -303,9 +303,8 @@ class CameraPipeline:
             track_buffer=settings.track_buffer,
         )
 
-        log.info("recognizer %s: keypoints=%s threshold=%.3f",
-                 Path(str(settings.recognizer_model)).name,
-                 getattr(self.recognizer, "needs_keypoints", False), self.threshold)
+        log.info("recognizer %s: threshold=%.3f",
+                 Path(str(settings.recognizer_model)).name, self.threshold)
         self.tracks: dict[int, TrackState] = {}
         # Recognised passes traced so far. Tracing embeds every frame of every
         # track, which is far more GPU work than the pipeline normally does, so
@@ -456,6 +455,23 @@ class CameraPipeline:
     def _tracing(self) -> bool:
         return (settings.debug_trace_tracks
                 and self.traced_passes < settings.debug_trace_limit)
+
+    def flush(self) -> list["CompletedTrack"]:
+        """Finalize every live track, whatever its age.
+
+        `_prune` only runs inside `process()` and is driven by `frame.ts`, so
+        when frames stop - shutdown, or a camera that dies - every track still
+        in view was simply dropped. The pass produced NEITHER a recognition
+        event NOR an unknown sighting: somebody walked past and the system has
+        no record of it at all. Anyone still mid-corridor at a restart was lost
+        this way, every restart.
+        """
+        if not self.tracks:
+            return []
+        newest = max(t.last_seen for t in self.tracks.values())
+        # Push the clock past every track's age so _prune retires all of them,
+        # and reuse it rather than duplicating the finalization rules.
+        return self._prune(newest + settings.track_max_age_s + 1.0)
 
     # -- main -------------------------------------------------------------
     def process(self, frame: Frame) -> FrameResult:
@@ -609,7 +625,17 @@ class CameraPipeline:
             faces = self.aligner.align(frame.image,
                                        [st.face_box for st in pending], is_bgr=True)
             t_align = (time.perf_counter() - t0) * 1000
-            assert len(faces) == len(pending), (len(faces), len(pending))
+            # `zip(pending, faces)` below pairs tracks to faces BY POSITION, so
+            # a short list would silently attribute one person's face to another
+            # track. The aligner now guarantees one face per box, but this was
+            # an `assert` - which vanishes under `python -O`, exactly the build
+            # a customer runs. Checked for real, and the frame's recognition is
+            # abandoned rather than risk a wrong name.
+            if len(faces) != len(pending):
+                log.error("aligner returned %d faces for %d boxes; skipping "
+                          "recognition this frame rather than mispairing them",
+                          len(faces), len(pending))
+                faces, pending = [], []
 
             keep, quals = [], []
             for st, f in zip(pending, faces):
@@ -640,26 +666,26 @@ class CameraPipeline:
             if keep:
                 t0 = time.perf_counter()
                 aligned = np.stack([f.aligned for _st, f in keep])
-                # keypoints ride along with the faces; the recognizer ignores
-                # them unless its graph asks for them.
-                embs = self.recognizer.embed(
-                    aligned, keypoints=np.stack([f.keypoints for f in faces])
-                    if self.recognizer.needs_keypoints else None)
+                embs = self.recognizer.embed(aligned)
                 t_embed = (time.perf_counter() - t0) * 1000
                 self.faces_embedded += len(embs)
 
-                for (st, f), q, emb in zip(keep, quals, embs):
-                    m: Match = self.gallery.match(
-                        emb, self.threshold, settings.second_best_margin
-                    )
+                # One GEMM for the whole frame, and ONE gallery reference for
+                # every read below. reload_gallery() swaps the attribute from
+                # another thread, so re-reading it per face could score against
+                # one snapshot and resolve the name against the next.
+                gallery = self.gallery
+                matches = gallery.match_batch(
+                    embs, self.threshold, settings.second_best_margin)
+                for (st, f), q, emb, m in zip(keep, quals, embs, matches):
                     st.embedded += 1
                     st.best_face_px = max(st.best_face_px, int(q.face_px))
                     if settings.save_all_frames or self._tracing():
                         x1, y1, x2, y2 = [int(v) for v in st.face_box]
                         res.candidates.append(FrameCandidate(
                             track_id=st.track_id,
-                            name=self.gallery.name(m.employee_id) if m.employee_id
-                                 else f"_near_{self.gallery.name(m.runner_up)}",
+                            name=gallery.name(m.employee_id) if m.employee_id
+                                 else f"_near_{gallery.name(m.runner_up)}",
                             score=float(m.score), aligned=f.aligned,
                             native=frame.image[max(0, y1):y2, max(0, x1):x2],
                             quality=q, accepted=m.employee_id is not None,
@@ -720,7 +746,7 @@ class CameraPipeline:
                     if provisional is not None:
                         changed = st.employee_id != provisional
                         st.employee_id = provisional
-                        st.name = self.gallery.name(provisional)
+                        st.name = gallery.name(provisional)
                         st.emitted = True
                         if changed:
                             votes = "/".join("?" if v is None else str(v)
@@ -737,7 +763,7 @@ class CameraPipeline:
                             ))
                             st.reported_direction = st.direction
                     elif not st.emitted:
-                        st.name = "…" if m.employee_id is None else self.gallery.name(m.employee_id)
+                        st.name = "…" if m.employee_id is None else gallery.name(m.employee_id)
 
         # Trace: score the faces the gates rejected, so the saved frames show the
         # whole pass rather than only its winners. Deliberately after the real
@@ -746,9 +772,7 @@ class CameraPipeline:
         if gated_trace:
             try:
                 g_aligned = np.stack([f.aligned for _st, f, _q in gated_trace])
-                g_embs = self.recognizer.embed(
-                    g_aligned, keypoints=np.stack([f.keypoints for _st, f, _q in gated_trace])
-                    if self.recognizer.needs_keypoints else None)
+                g_embs = self.recognizer.embed(g_aligned)
                 for (st, f, q), emb in zip(gated_trace, g_embs):
                     gm = self.gallery.match(emb, self.threshold,
                                             settings.second_best_margin)
