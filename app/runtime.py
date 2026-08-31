@@ -9,6 +9,7 @@ from app.core.direction import config_from_camera
 from app.core.gallery import Gallery
 from app.db.models import Camera
 from app.db.session import init_db, session_scope
+from app.services.arbiter import PassArbiter
 from app.services.enrollment import load_gallery
 from app.services.worker import CameraWorker
 
@@ -19,6 +20,10 @@ class Runtime:
     def __init__(self):
         self.gallery: Gallery | None = None
         self.workers: dict[int, CameraWorker] = {}
+        # One arbiter for the whole process. Both cameras watch the same
+        # corridor, so a single walk arrives twice and only one of them may
+        # move attendance state.
+        self.arbiter = PassArbiter()
 
     def start(self):
         init_db()
@@ -44,7 +49,8 @@ class Runtime:
                 for c in s.execute(select(Camera).where(Camera.enabled.is_(True))).scalars()
             ]
         for cid, name, role, url, dcfg in cams:
-            w = CameraWorker(cid, name, role, url, self.gallery, direction_cfg=dcfg)
+            w = CameraWorker(cid, name, role, url, self.gallery,
+                             direction_cfg=dcfg, arbiter=self.arbiter)
             self.workers[cid] = w.start()
             if dcfg.configured:
                 log.info("started worker %s (%s) with direction line", name, role.value)
@@ -68,8 +74,14 @@ class Runtime:
     def events(self, limit: int = 40) -> list[dict]:
         out: list[dict] = []
         for w in self.workers.values():
-            out.extend(w.recent_events)
-        out.sort(key=lambda e: e["ts"], reverse=True)
+            # Copy under the worker's lock: the capture thread inserts into
+            # this list while request threads read it.
+            with w._lock:
+                out.extend(w.recent_events)
+        # Sorted on the REAL timestamp. This used to sort on the "%H:%M:%S"
+        # display string, which puts 23:59 above 00:01 and silently interleaves
+        # days either side of the 04:00 business boundary.
+        out.sort(key=lambda e: e.get("sort_ts", 0.0), reverse=True)
         return out[:limit]
 
 

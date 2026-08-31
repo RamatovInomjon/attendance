@@ -21,7 +21,7 @@ from app.core.gallery import Gallery
 from app.core.geometry import aligned_to_uint8
 from app.core.direction import DirectionConfig
 from app.core.pipeline import CameraPipeline, FrameResult
-from app.core.stream import RtspSource
+from app.core.stream import ReplaySource, RtspSource
 from app.db.models import CameraRole, UnknownSighting
 from app.db.session import session_scope
 from app.services.attendance import AttendanceService
@@ -33,19 +33,34 @@ log = logging.getLogger(__name__)
 
 class CameraWorker:
     def __init__(self, camera_id: int, name: str, role: CameraRole, rtsp_url: str,
-                 gallery: Gallery, direction_cfg: DirectionConfig | None = None):
+                 gallery: Gallery, direction_cfg: DirectionConfig | None = None,
+                 arbiter=None):
         self.camera_id = camera_id
         self.name = name
         self.role = role
         self.rtsp_url = rtsp_url
         self.direction_cfg = direction_cfg or DirectionConfig()
 
-        self.source = RtspSource(
-            rtsp_url, name=name, transport=settings.rtsp_transport,
-            queue_size=settings.frame_queue_size, stale_after_s=settings.stale_after_s,
-        )
+        if settings.replay_dir:
+            # Recorded clips standing in for the camera. Same interface, so
+            # nothing below this line knows the difference.
+            self.source = ReplaySource(
+                Path(settings.replay_dir) / name, name=name,
+                fps=settings.track_frame_rate,
+                queue_size=settings.frame_queue_size,
+                stale_after_s=settings.stale_after_s,
+            )
+        else:
+            self.source = RtspSource(
+                rtsp_url, name=name, transport=settings.rtsp_transport,
+                queue_size=settings.frame_queue_size, stale_after_s=settings.stale_after_s,
+            )
         self.pipeline = CameraPipeline(name, gallery, direction_cfg=self.direction_cfg)
         self.attendance = AttendanceService()
+        # Shared with the other camera: one walk past this corridor is seen by
+        # both, and only one of them may move attendance state.
+        from app.services.arbiter import PassArbiter
+        self.arbiter = arbiter if arbiter is not None else PassArbiter()
         self.debug = DebugCapture()
         self.recorder = (ClipRecorder(
             name, fps=max(1.0, 20.0 / settings.process_every_nth),
@@ -65,6 +80,8 @@ class CameraWorker:
         self._lock = threading.Lock()
         self.recent_events: list[dict] = []
         self.frames_seen = 0
+        # Timestamp of the previous frame, to notice a break in the stream.
+        self._last_frame_ts = 0.0
         # Person-pass accounting. A completed track is roughly one pass, and is
         # the denominator for "how many of the people who walked by did we
         # recognize" - a question recognition events alone cannot answer.
@@ -96,6 +113,26 @@ class CameraWorker:
         self.source.stop()
         if self._thread:
             self._thread.join(timeout=5.0)
+        # Anybody still in view when the service stops has a live track with a
+        # perfectly good identity that nothing would ever write. Finalize them,
+        # then drain whatever the arbiter is still holding.
+        try:
+            completed = self.pipeline.flush()
+            if completed:
+                log.info("[%s] flushing %d in-flight track(s) at shutdown",
+                         self.name, len(completed))
+                self._persist_completed(FrameResult(frame=self.latest.frame
+                                                    if self.latest else None,
+                                                    completed=completed))
+            groups = self.arbiter.drain()
+            if groups:
+                with session_scope() as s:
+                    for g in groups:
+                        self._apply(s, g.winner, winner=True)
+                        for loser in g.others:
+                            self._apply(s, loser, winner=False)
+        except Exception:
+            log.exception("[%s] shutdown flush failed", self.name)
 
     # -- helpers ----------------------------------------------------------
     def _scale_box(self, box, ctx_width: int):
@@ -103,11 +140,19 @@ class CameraWorker:
         r = ctx_width / float(full_w) if full_w else 1.0
         return [v * r for v in box]
 
-    def _save_snapshot(self, crop: np.ndarray | None, employee_id: int, kind: str) -> str | None:
+    def _save_snapshot(self, crop: np.ndarray | None, employee_id: int, kind: str,
+                       track_id: int = -1) -> str | None:
         if crop is None:
             return None
         try:
-            rel = f"snapshots/{kind}_{employee_id}_{int(time.time())}.jpg"
+            # Camera and track in the name, not just a whole second. Two
+            # cameras completing the same person's track in the same second is
+            # routine here - it is the cross-camera pair the arbiter exists for
+            # - and both wrote the same path, so one image silently replaced
+            # the other and both database rows pointed at the survivor. Every
+            # unknown was worse: they all pass employee_id=0.
+            rel = (f"snapshots/{kind}_{employee_id}_{self.camera_id}_"
+                   f"{track_id}_{int(time.time())}.jpg")
             rgb = aligned_to_uint8(crop)
             cv2.imwrite(str(settings.media_dir / rel), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
                         [cv2.IMWRITE_JPEG_QUALITY, 92])
@@ -116,13 +161,14 @@ class CameraWorker:
             log.exception("[%s] snapshot write failed", self.name)
             return None
 
-    def _save_body(self, crop, employee_id: int) -> str | None:
+    def _save_body(self, crop, employee_id: int, track_id: int = -1) -> str | None:
         """Write a raw BGR body crop. Separate from _save_snapshot because that
         one expects an aligned CHW face in [-1, 1]; this is already an image."""
         if crop is None:
             return None
         try:
-            rel = f"snapshots/body_{employee_id}_{int(time.time())}.jpg"
+            rel = (f"snapshots/body_{employee_id}_{self.camera_id}_"
+                   f"{track_id}_{int(time.time())}.jpg")
             cv2.imwrite(str(settings.media_dir / rel), crop,
                         [cv2.IMWRITE_JPEG_QUALITY, 88])
             return rel
@@ -131,103 +177,142 @@ class CameraWorker:
             return None
 
     def _persist_completed(self, res: FrameResult):
-        """One attendance decision per completed track — per person-pass.
+        """One attendance decision per PERSON-PASS - not per completed track.
 
         Identity and direction mature at different points in a walk: the vote
         commits within a few good frames, while direction needs real travel.
         Deciding at completion is the only moment both are final.
+
+        Two things happen here that used to happen differently:
+
+        * **Images are written before any transaction is opened.** Up to seven
+          JPEG encodes plus a 24 MB full-frame copy ran while the SQLite write
+          lock was held, because `_daily()` flushes and promotes the
+          transaction. The other camera then blocked on `busy_timeout` waiting
+          for this one's disk I/O, on the capture thread, inside the frame
+          budget.
+        * **Identified passes go to the arbiter, not straight to attendance.**
+          Both cameras see the same corridor, so one walk arrives twice. The
+          arbiter holds a pass briefly and lets only the strongest of a group
+          move attendance state.
         """
-        if not res.completed:
-            return
         from app.services.attendance import business_date
-        ts = datetime.fromtimestamp(res.frame.ts, tz=timezone.utc)
-        bdate = business_date(ts)
-        with session_scope() as s:
-            for ct in res.completed:
-                self.passes_total += 1
-                self.passes_by_direction[ct.direction] = \
-                    self.passes_by_direction.get(ct.direction, 0) + 1
+        from app.services.arbiter import PendingPass
 
-                if ct.employee_id is None:
-                    self.passes_unknown += 1
-                    snap = self._save_snapshot(ct.crop, 0, "unknown")
-                    s.add(UnknownSighting(
-                        camera_id=self.camera_id, track_id=ct.track_id,
-                        # first_seen was written equal to last_seen, so every
-                        # duration in the table read 0.00s and the column could
-                        # never answer "how long was this person in view" - the
-                        # signal that separates a real transit from somebody
-                        # standing still. duration_s is on the track; use it.
-                        first_seen=ts - timedelta(seconds=ct.duration_s),
-                        last_seen=ts, business_date=bdate,
-                        frames=ct.embedded_frames, best_score=ct.best_score,
-                        nearest_employee_id=ct.nearest_employee_id,
-                        vector=ct.vector.astype("float32").tobytes() if ct.vector is not None else None,
-                        snapshot=snap,
-                    ))
-                    log.info("[%s] MISS best=%.3f nearest=%-20s embedded=%d traj=%d "
-                             "travel=%.3f dur=%.1fs dir=%s (%s)",
-                             self.name, ct.best_score,
-                             self.pipeline.gallery.name(ct.nearest_employee_id)[:20],
-                             ct.embedded_frames, ct.traj_points, ct.travel,
-                             ct.duration_s, ct.direction, ct.direction_reason)
-                    continue
+        now_mono = time.monotonic()
+        unknowns = []
+        # At shutdown there may be no frame to take a timestamp from.
+        frame_ts = res.frame.ts if res.frame is not None else time.time()
 
-                self.passes_recognized += 1
-                # The dashboard shows the BODY: a person is recognisable to a
-                # human by build, clothing and posture, where a 112x112 aligned
-                # face often is not - especially on the crops that turn out to
-                # be wrong. The aligned face is still written next to it under
-                # "evt_", so a questionable match can still be examined.
-                face_snap = self._save_snapshot(ct.crop, ct.employee_id, "evt")
-                snap = self._save_body(ct.person_crop, ct.employee_id) or face_snap
-                # The frame that actually drove the match, kept beside the clear
-                # one: on a wrong answer this is the frame that explains it.
-                if ct.score_crop is not None:
-                    self._save_snapshot(ct.score_crop, ct.employee_id, "why")
-                # Capture the track's BEST frame, not the frame it happened to
-                # be pruned on - by then the person has already walked out.
-                if ct.context is not None and ct.box is not None:
-                    try:
-                        self.debug.capture(
-                            name=ct.name, frame_bgr=ct.context, box=self._scale_box(
-                                ct.box, ct.context.shape[1]),
-                            aligned_chw=ct.crop, camera=self.name, role=self.role.value,
-                            score=ct.best_score, margin=ct.best_margin, track_id=ct.track_id,
-                            ts=ts, quality=ct.quality, native=ct.native,
-                            extra={"embedded_frames": ct.embedded_frames,
-                                   "traj_points": ct.traj_points,
-                                   "travel": round(ct.travel, 3),
-                                   "duration_s": round(ct.duration_s, 1),
-                                   "direction": ct.direction,
-                                   "direction_reason": ct.direction_reason,
-                                   "employee_id": ct.employee_id},
-                        )
-                    except Exception:
-                        log.exception("[%s] debug capture failed", self.name)
-                d = self.attendance.record(
-                    s, employee_id=ct.employee_id, camera_id=self.camera_id,
-                    role=self.role, ts=ts, score=ct.best_score, margin=ct.best_margin,
-                    track_id=ct.track_id, face_px=ct.face_px,
-                    votes=f"emb{ct.embedded_frames}/traj{ct.traj_points}",
-                    snapshot=snap, direction=ct.direction,
-                    direction_reason=ct.direction_reason,
-                    require_direction=self.direction_cfg.configured,
-                )
-                entry = {
-                    "ts": ts.astimezone(settings.tz).strftime("%H:%M:%S"),
-                    "name": ct.name, "employee_id": ct.employee_id,
-                    "camera": self.name, "role": self.role.value,
-                    "score": round(ct.best_score, 3), "transition": d.transition,
-                    "snapshot": snap, "direction": ct.direction,
-                }
-                self.recent_events.insert(0, entry)
-                del self.recent_events[40:]
-                log.info("[%s] %-12s %-20s score=%.3f margin=%.3f embedded=%d traj=%d travel=%.3f "
-                         "dur=%.1fs dir=%s (%s)",
-                         self.name, d.transition, ct.name[:20], ct.best_score,
-                         ct.best_margin, ct.embedded_frames, ct.traj_points, ct.travel,
+        # ---- phase 1: all disk I/O, no transaction open --------------------
+        for ct in (res.completed or []):
+            self.passes_total += 1
+            self.passes_by_direction[ct.direction] = \
+                self.passes_by_direction.get(ct.direction, 0) + 1
+            ts = datetime.fromtimestamp(frame_ts, tz=timezone.utc)
+
+            if ct.employee_id is None:
+                self.passes_unknown += 1
+                snap = self._save_snapshot(ct.crop, 0, "unknown", ct.track_id)
+                unknowns.append((ct, ts, snap))
+                log.info("[%s] MISS best=%.3f nearest=%-20s embedded=%d traj=%d "
+                         "travel=%.3f dur=%.1fs dir=%s (%s)",
+                         self.name, ct.best_score,
+                         self.pipeline.gallery.name(ct.nearest_employee_id)[:20],
+                         ct.embedded_frames, ct.traj_points, ct.travel,
                          ct.duration_s, ct.direction, ct.direction_reason)
+                continue
+
+            self.passes_recognized += 1
+            # The dashboard shows the BODY: a person is recognisable to a human
+            # by build, clothing and posture, where a 112x112 aligned face often
+            # is not - especially on the crops that turn out to be wrong. The
+            # aligned face is still written next to it under "evt_", so a
+            # questionable match can still be examined.
+            face_snap = self._save_snapshot(ct.crop, ct.employee_id, "evt", ct.track_id)
+            snap = self._save_body(ct.person_crop, ct.employee_id, ct.track_id) or face_snap
+            if ct.score_crop is not None:
+                self._save_snapshot(ct.score_crop, ct.employee_id, "why", ct.track_id)
+            if ct.context is not None and ct.box is not None:
+                try:
+                    self.debug.capture(
+                        name=ct.name, frame_bgr=ct.context, box=self._scale_box(
+                            ct.box, ct.context.shape[1]),
+                        aligned_chw=ct.crop, camera=self.name, role=self.role.value,
+                        score=ct.best_score, margin=ct.best_margin, track_id=ct.track_id,
+                        ts=ts, quality=ct.quality, native=ct.native,
+                        extra={"embedded_frames": ct.embedded_frames,
+                               "traj_points": ct.traj_points,
+                               "travel": round(ct.travel, 3),
+                               "duration_s": round(ct.duration_s, 1),
+                               "direction": ct.direction,
+                               "direction_reason": ct.direction_reason,
+                               "employee_id": ct.employee_id},
+                    )
+                except Exception:
+                    log.exception("[%s] debug capture failed", self.name)
+
+            self.arbiter.submit(PendingPass(
+                employee_id=ct.employee_id, camera_id=self.camera_id,
+                role=self.role, ts=ts, monotonic=now_mono, track=ct,
+                snapshot=snap, camera_name=self.name))
+
+        # ---- phase 2: whatever is now decided, in one short transaction ----
+        groups = self.arbiter.due(now_mono)
+        if not unknowns and not groups:
+            return
+        with session_scope() as s:
+            for ct, ts, snap in unknowns:
+                s.add(UnknownSighting(
+                    camera_id=self.camera_id, track_id=ct.track_id,
+                    # first_seen was written equal to last_seen, so every
+                    # duration in the table read 0.00s and the column could
+                    # never answer "how long was this person in view" - the
+                    # signal that separates a real transit from somebody
+                    # standing still. duration_s is on the track; use it.
+                    first_seen=ts - timedelta(seconds=ct.duration_s),
+                    last_seen=ts, business_date=business_date(ts),
+                    frames=ct.embedded_frames, best_score=ct.best_score,
+                    nearest_employee_id=ct.nearest_employee_id,
+                    vector=ct.vector.astype("float32").tobytes() if ct.vector is not None else None,
+                    snapshot=snap,
+                ))
+            for g in groups:
+                self._apply(s, g.winner, winner=True)
+                for loser in g.others:
+                    self._apply(s, loser, winner=False)
+
+    def _apply(self, s, p, *, winner: bool):
+        """Write one pass. Only the winner of a group moves attendance state."""
+        ct = p.track
+        d = self.attendance.record(
+            s, employee_id=p.employee_id, camera_id=p.camera_id,
+            role=p.role, ts=p.ts, score=ct.best_score, margin=ct.best_margin,
+            track_id=ct.track_id, face_px=ct.face_px,
+            votes=f"emb{ct.embedded_frames}/traj{ct.traj_points}",
+            snapshot=p.snapshot, direction=ct.direction,
+            direction_reason=ct.direction_reason,
+            require_direction=self.direction_cfg.configured,
+            apply_state=winner,
+        )
+        entry = {
+            "ts": p.ts.astimezone(settings.tz).strftime("%H:%M:%S"),
+            # The display string above cannot be sorted on - 23:59 outranks
+            # 00:01 and the 04:00 business boundary interleaves two days.
+            "sort_ts": p.ts.timestamp(),
+            "name": ct.name, "employee_id": p.employee_id,
+            "camera": p.camera_name or self.name, "role": p.role.value,
+            "score": round(ct.best_score, 3), "transition": d.transition,
+            "snapshot": p.snapshot, "direction": ct.direction,
+        }
+        with self._lock:
+            self.recent_events.insert(0, entry)
+            del self.recent_events[40:]
+        log.info("[%s] %-14s %-20s score=%.3f margin=%.3f embedded=%d traj=%d "
+                 "travel=%.3f dur=%.1fs dir=%s (%s)",
+                 p.camera_name or self.name, d.transition, ct.name[:20],
+                 ct.best_score, ct.best_margin, ct.embedded_frames, ct.traj_points,
+                 ct.travel, ct.duration_s, ct.direction, ct.direction_reason)
 
     # -- main loop --------------------------------------------------------
     def _run(self):
@@ -238,6 +323,40 @@ class CameraWorker:
             if frame is None:
                 continue
             self.frames_seen += 1
+
+            # A GAP IN THE STREAM IS A DISCONTINUITY, NOT A PAUSE.
+            #
+            # ByteTrack measures its lost-track buffer in FRAMES, not seconds
+            # (max_time_lost = frame_rate/30 * track_buffer). When frames stop
+            # arriving its clock stops with them, so after a stall it happily
+            # re-associates tracks from before the gap with whoever is in view
+            # afterwards - a different person inherits the earlier person's
+            # track, and with it their vote and their identity.
+            #
+            # Seen in replay as a 55-second "pass" spanning two clips recorded
+            # eight seconds apart. The same thing happens live whenever a
+            # camera drops out and reconnects.
+            #
+            # So: finalize what was in view, and start the tracker clean.
+            # The trigger is ByteTrack's OWN buffer expressed in real time
+            # (track_buffer / track_frame_rate = 36/20 = 1.8 s): a gap longer
+            # than that is precisely a gap in which it would have dropped the
+            # track, had frames kept flowing. Anything shorter is jitter and
+            # must not split one person's pass in two.
+            gap_limit = max(1.0, settings.track_buffer / max(1, settings.track_frame_rate))
+            if self._last_frame_ts and \
+                    (frame.ts - self._last_frame_ts) > gap_limit:
+                try:
+                    stale = self.pipeline.flush()
+                    if stale:
+                        log.info("[%s] %.0fs gap in the stream: closing %d track(s)",
+                                 self.name, frame.ts - self._last_frame_ts, len(stale))
+                        self._persist_completed(FrameResult(frame=frame, completed=stale))
+                    self.pipeline.tracker.reset()
+                except Exception:
+                    log.exception("[%s] failed to close tracks across a gap", self.name)
+            self._last_frame_ts = frame.ts
+
             nth += 1
             if nth % settings.process_every_nth:
                 continue

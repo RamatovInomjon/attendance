@@ -70,20 +70,44 @@ class AttendanceService:
             s.flush()
         return row
 
-    def _debounced(self, s, employee_id: int, camera_id: int | None, ts: datetime) -> bool:
-        """Same person, same camera, inside the cooldown -> ignore."""
-        last = s.execute(
-            select(RecognitionEvent.ts)
+    def _debounced(self, s, employee_id: int, camera_id: int | None,
+                   ts: datetime, direction: str = "") -> bool:
+        """Same person, same camera, SAME direction, inside the cooldown.
+
+        The direction check is load-bearing and was missing. The rule used to
+        suppress ANY event from a camera within the cooldown, which throws away
+        genuine state changes: somebody who steps out and comes back a minute
+        later has their return silently dropped, because their departure was
+        recorded less than 90 s earlier on the same camera.
+
+        Found by inspecting `20260831_114309_Entrance.mp4`, which holds a clean
+        entrance - recognised at 0.689 with 45 agreeing frames and ENTER
+        confirmed by both the tripwire and the depth trend - whose CHECK_IN was
+        discarded because the same camera had seen that person leaving shortly
+        before. The recognition was never the problem; the event was thrown
+        away after the fact.
+
+        A REPEAT of the same direction is a re-sighting and is still
+        suppressed - that is what the cooldown is for. A CHANGE of direction is
+        never a re-sighting.
+        """
+        row = s.execute(
+            select(RecognitionEvent.ts, RecognitionEvent.direction)
             .where(
                 RecognitionEvent.employee_id == employee_id,
                 RecognitionEvent.camera_id == camera_id,
             )
             .order_by(RecognitionEvent.ts.desc())
             .limit(1)
-        ).scalar_one_or_none()
-        if last is None:
+        ).first()
+        if row is None:
             return False
-        return (ts - last) < self.cooldown
+        last_ts, last_dir = row
+        if (ts - last_ts) >= self.cooldown:
+            return False
+        if direction and last_dir and direction != last_dir:
+            return False          # a different direction is a real transition
+        return True
 
     @staticmethod
     def _effective_role(role: CameraRole, direction: str) -> CameraRole | None:
@@ -112,12 +136,31 @@ class AttendanceService:
         ts: datetime, score: float, margin: float = 0.0, track_id: int = -1,
         face_px: int = 0, votes: str = "", snapshot: str | None = None,
         direction: str = "UNKNOWN", direction_reason: str = "",
-        require_direction: bool = True,
+        require_direction: bool = True, apply_state: bool = True,
     ) -> Decision:
+        """Apply one completed pass.
+
+        `apply_state=False` records the sighting WITHOUT moving attendance
+        state. That is what the losing half of a cross-camera pair gets: both
+        cameras really did see the person, so the evidence is kept, but one walk
+        may only produce one transition. See app/services/arbiter.py.
+        """
         bdate = business_date(ts)
 
-        if self._debounced(s, employee_id, camera_id, ts):
+        if self._debounced(s, employee_id, camera_id, ts, direction):
             return Decision("DEBOUNCED")
+
+        if not apply_state:
+            daily = self._daily(s, employee_id, bdate)
+            daily.event_count = (daily.event_count or 0) + 1
+            s.add(RecognitionEvent(
+                employee_id=employee_id, camera_id=camera_id, role=role, ts=ts,
+                business_date=bdate, score=score, margin=margin, track_id=track_id,
+                face_px=face_px, votes=votes, snapshot=snapshot, accepted=True,
+                transition="DUPLICATE_VIEW", direction=direction,
+                direction_reason=direction_reason[:96],
+            ))
+            return Decision("DUPLICATE_VIEW", daily.id)
 
         eff = self._effective_role(role, direction)
         if eff is None and not require_direction:
@@ -167,10 +210,20 @@ class AttendanceService:
         # building we never saw them enter -- they came in through an uncovered
         # door, or the IN camera missed them.  Flag it for review rather than
         # inventing a check-in time out of a departure.
-        if daily.check_in_time is None and transition in ("RE_SIGHTING", "CHECK_OUT"):
-            daily.status = "NO_CHECKIN"
-        elif daily.status != "NO_CHECKIN":
-            daily.status = "PRESENT"
+        #
+        # RECOMPUTED from state, never guarded on its own previous value. The
+        # old form was `elif daily.status != "NO_CHECKIN": status = "PRESENT"`,
+        # which could set the flag but never clear it: once raised, the guard
+        # was permanently false, so a genuine check-in arriving later left the
+        # row flagged anyway. 21 of the 30 flagged rows in the live database
+        # HAVE a check-in time - 70% false positives on the one flag operators
+        # are asked to review.
+        #
+        # NO_CHECKOUT is not touched here. It is written by the end-of-day
+        # sweep, for a business date that is already over, so no live event can
+        # legitimately overwrite it.
+        if daily.status != "NO_CHECKOUT":
+            daily.status = "PRESENT" if daily.check_in_time is not None else "NO_CHECKIN"
 
         s.add(RecognitionEvent(
             employee_id=employee_id, camera_id=camera_id, role=role, ts=ts,
@@ -181,22 +234,33 @@ class AttendanceService:
         ))
         return Decision(transition, daily.id)
 
-    def close_open_intervals(self, s, bdate: date) -> int:
+    def close_open_intervals(self, s, bdate: date, *, catch_up: bool = True) -> int:
         """End-of-day sweep.
 
         An open interval is **flagged**, never closed with an invented time.
         Writing a plausible-looking check-out is the one option that destroys
         trust in the whole report.
+
+        `catch_up` sweeps every business date up to and including `bdate`, not
+        just that one day. Sweeping a single day means any day the service was
+        down is never revisited, and its rows claim those people are still in
+        the building forever. 21 such rows had accumulated, the oldest five days
+        stale, because the timer that would have run this was never installed.
+
+        A row that was already flagged NO_CHECKIN keeps that flag. It is the
+        more specific fact - we never saw them arrive - and overwriting it with
+        NO_CHECKOUT loses it for exactly the rows where both are true.
         """
-        rows = s.execute(
-            select(DailyAttendance).where(
-                DailyAttendance.business_date == bdate,
-                DailyAttendance.presence == PresenceStatus.INSIDE,
-            )
-        ).scalars().all()
+        q = select(DailyAttendance).where(
+            DailyAttendance.presence == PresenceStatus.INSIDE,
+            DailyAttendance.business_date <= bdate if catch_up
+            else DailyAttendance.business_date == bdate,
+        )
+        rows = s.execute(q).scalars().all()
         for r in rows:
             if settings.open_interval_policy == "close_at_eod":
                 r.presence = PresenceStatus.OUTSIDE
                 r.entered_at = None
-            r.status = "NO_CHECKOUT"
+            if r.status != "NO_CHECKIN":
+                r.status = "NO_CHECKOUT"
         return len(rows)

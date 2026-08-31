@@ -114,9 +114,15 @@ class EventVM:
     def of(cls, e, name, dept, cam):
         transition = e.transition or ""
         role = e.role.value if hasattr(e.role, "value") else str(e.role)
+        # DUPLICATE_VIEW is the losing half of a cross-camera pair: both
+        # cameras really saw the person, but only one may move attendance
+        # state. Falling through to the camera ROLE labelled it "IN" or "OUT"
+        # on the dashboard, which reads as a check-in that never happened.
+        # Named for what it is instead.
         action_type = {
             "CHECK_IN": "IN",
             "CHECK_OUT": "OUT",
+            "DUPLICATE_VIEW": "SEEN",
         }.get(transition, role)
         return cls(
             id=e.id, employee_name=name or "Unknown", employee_department=dept or "",

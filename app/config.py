@@ -76,6 +76,13 @@ class Settings(BaseSettings):
     # fp32 - d-prime 10.03 both, rank-1 100%, genuine mean 0.8484 both, weakest
     # genuine pair 0.4551 -> 0.4557 - so the calibrated threshold still applies.
     # 6.19 -> 4.57 ms per batch, and 261 MB -> 130 MB.
+    # Switching this is the only change needed: `threshold_for()` resolves the
+    # matching threshold from the model itself. Two things do NOT follow
+    # automatically and are checked rather than trusted:
+    #   * the gallery must be rebuilt (`scripts/enroll.py`) - `load_gallery()`
+    #     refuses a gallery built by a different recognizer;
+    #   * the encrypted model must exist for a licensed deployment
+    #     (`scripts/encrypt_models.py`), or the release cannot load it.
     recognizer_model: str = "adaface_ir101_finetune_fp16.onnx"
 
     # 960, not 1280: detector recall is unchanged (40/40 on the gallery, and
@@ -215,24 +222,37 @@ class Settings(BaseSettings):
     # quick walk-through than to name the wrong person from two frames.
     # Thresholds are calibrated PER RECOGNIZER and are not transferable. Swapping
     # the model without swapping the threshold is a silent false-accept
-    # generator: on the enrolment gallery the deployed IR-101 puts its best
-    # impostor at 0.202, while KPRPE puts its best impostor at 0.368 - so
-    # KPRPE running at IR-101's 0.18 would accept essentially anybody.
+    # generator: each model puts its impostor distribution on a different scale,
+    # so a threshold that is safe for one can accept nearly anybody on another.
     #
     # `threshold_for()` resolves it from the model actually loaded, so the two
     # cannot drift apart. An unknown model falls back to recognition_threshold
     # and logs a warning rather than guessing.
+    # CALIBRATED 2026-08-31 on native-4K corridor clips (bench/calibrate_threshold.py,
+    # 10 clips, 475 gate-passing faces of one enrolled person, each scored against
+    # all 54 enrolled identities = ~25,000 impostor comparisons):
     #
-    # The KPRPE value is PROVISIONAL. It is scaled from the gallery ratio that
-    # calibrated IR-101 (live 0.18 against a 0.452 worst-genuine, so ~0.40 of
-    # it) applied to KPRPE's 0.629, giving ~0.25. Gallery scores are much higher
-    # than corridor scores for both models, so this MUST be recalibrated on live
-    # footage before it is trusted.
+    #   genuine median   0.350
+    #   impostor MAX     0.195     <- the number that matters
+    #   FAR=0 threshold  0.215
+    #   genuine frames kept at that threshold: 87%
+    #
+    # THE PREVIOUS VALUE ACCEPTED OBSERVED IMPOSTORS. 0.18 sat below the worst
+    # corridor impostor of 0.195, so the system could - and did - name the wrong
+    # person; two such errors were reported from live traffic.
+    #
+    # Set above every impostor ever observed rather than at an equal-error
+    # point, because the two failures are not symmetric: a false accept records
+    # one person as another and nothing in the data reveals it, while a miss
+    # costs nothing - the person is seen again on their next pass.
+    #
+    # STILL PROVISIONAL on the genuine side: the impostor statistics are strong
+    # (~25,000 pairs), the genuine statistics come from one person's ten passes.
+    # Widen it with clips of more enrolled people before treating the genuine
+    # retention figure as settled.
     recognizer_thresholds: dict = {
-        "adaface_ir101_finetune_fp16.onnx": 0.18,
-        "adaface_ir101_finetune.onnx": 0.18,
-        "adaface_vit_kprpe_fp16.onnx": 0.25,
-        "adaface_vit_kprpe.onnx": 0.25,
+        "adaface_ir101_finetune_fp16.onnx": 0.215,
+        "adaface_ir101_finetune.onnx": 0.215,
     }
 
     vote_consensus: float = 0.65
@@ -272,6 +292,28 @@ class Settings(BaseSettings):
     # rate was starving on (min_points=5 rarely reached at 10 fps).
     process_every_nth: int = 1
     stale_after_s: float = 5.0
+
+    # Replay recorded clips instead of connecting to the cameras. Point it at a
+    # directory holding one folder per camera NAME, e.g.
+    #   data/recordings_4k/Entrance/*.mp4
+    #   data/recordings_4k/Exit/*.mp4
+    # and every worker reads its own folder on a loop, paced to real time.
+    #
+    # This is not a simulation: scripts/record_4k.py stream-copies the camera's
+    # own bitstream at native 3840x2160, so the pipeline sees exactly the frames
+    # the camera sent. It is how the pipeline can be exercised - and the
+    # dashboard demonstrated - from outside the office LAN, where the cameras
+    # are unreachable.
+    #
+    #   replay_dir=data/recordings_4k python scripts/run.py
+    replay_dir: Path | None = None
+    # Clips are replayed at their ORIGINAL relative times so the two cameras
+    # stay in step - one walk really was recorded by both, 1-4 s apart, and
+    # back-to-back playback would turn those pairs into unrelated events and
+    # never exercise the cross-camera fusion. Idle gaps are capped here: the
+    # recordings span an hour of a mostly empty corridor and the dead time
+    # carries nothing. Anything shorter than this is preserved exactly.
+    replay_max_gap_s: float = 8.0
     # 2 slots dropped ~8% of frames to burst spill once the pipeline ran every
     # frame. The queue is drop-oldest, so extra slots only fill when the
     # pipeline is momentarily behind - at a 15 ms median against a 50 ms budget
@@ -281,9 +323,30 @@ class Settings(BaseSettings):
 
     # ---- attendance -----------------------------------------------------
     event_cooldown_s: int = 90
+
+    # One physical walk past this corridor is seen by BOTH cameras, and their
+    # mirrored geometry makes them disagree about its direction. A completed,
+    # identified track is therefore held this long; anything else for the same
+    # person inside the window belongs to the same walk, and only the strongest
+    # of them moves attendance state. See app/services/arbiter.py.
+    #
+    # 15 s, from live measurement: the two halves of one walk arrived 2-4 s
+    # apart on 2026-08-31 (eight of eight walk-throughs) and 0.6-5.2 s apart in
+    # the 2026-08-26 database. 15 s covers that with room for a track that ends
+    # late, and is far short of a genuine leave-and-return.
+    cross_camera_window_s: float = 15.0
+
     day_boundary_hour: int = 4
     timezone: str = "Asia/Tashkent"
     open_interval_policy: str = "flag"       # flag | close_at_eod
+
+    # The end-of-day sweep runs INSIDE the service now. It used to exist only in
+    # scripts/maintenance.py, driven by a systemd timer that was never installed
+    # on either host - so it had never run. 21 rows still claimed people were
+    # inside on dates up to five days old.
+    eod_sweep_enabled: bool = True
+    # Minutes after `day_boundary_hour` to sweep, so a pass at 03:59 has landed.
+    eod_sweep_offset_min: int = 10
 
     # ---- debug ----------------------------------------------------------
     # When on, every recognition writes the full annotated frame, the native
