@@ -120,11 +120,21 @@ def main() -> int:
         raise SystemExit("  backup failed its integrity check - refusing to delete")
 
     con = sqlite3.connect(str(db))
-    with con:
+    with con:                       # one transaction: all the deletes, or none
         for t, _ in CLEAR:
             if t in have:
                 con.execute(f"delete from {t}")
+    # VACUUM cannot run inside a transaction, and `with con:` opens one - doing
+    # it there raises "cannot VACUUM from within a transaction" AFTER the
+    # deletes, which the context manager then rolls back. Harmless, because the
+    # rollback leaves the database untouched, but the reset silently does
+    # nothing. It belongs after the commit.
+    try:
         con.execute("vacuum")
+    except sqlite3.OperationalError as e:
+        # Not worth failing the reset over: the rows are already gone and the
+        # file simply keeps its old size until SQLite reuses the pages.
+        print(f"  note: vacuum skipped ({e})")
     con.close()
     print(f"  cleared {total} row(s)")
 
