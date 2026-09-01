@@ -49,6 +49,10 @@ ADDITIONS = {
 
 # (name, table, columns) - created if absent.
 INDEXES_WANTED = [
+    # The cross-camera ReID lookup: unmatched passes from the other camera on
+    # the same day.
+    ("ix_reid_date_cam_matched", "reid_pass",
+     "business_date, camera_id, matched_pass_id"),
     # The per-pass debounce lookup, which runs on the capture thread inside a
     # write transaction. Without the camera_id/ts tail it scanned every event
     # the employee ever produced and sorted them in a temp B-tree.

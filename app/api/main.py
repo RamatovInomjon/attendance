@@ -28,6 +28,38 @@ from app.api import ws as ws_router
 log = logging.getLogger(__name__)
 
 
+def _sweep_person_crops() -> int:
+    """Delete body-crop day folders older than `reid_retention_days`.
+
+    These are images of people, including people the system never identified,
+    so they get a real expiry rather than accumulating until a disk fills. The
+    layout is deliberately date-first (`known/YYYYMMDD/...`) so ageing them out
+    is a directory rename away from trivial.
+    """
+    import shutil
+    from datetime import date as _date
+    root = settings.persons_dir
+    if not root.is_dir() or settings.reid_retention_days <= 0:
+        return 0
+    cutoff = _date.today() - timedelta(days=settings.reid_retention_days)
+    removed = 0
+    for kind in ("known", "unknown"):
+        base = root / kind
+        if not base.is_dir():
+            continue
+        for day in base.iterdir():
+            if not day.is_dir() or len(day.name) != 8 or not day.name.isdigit():
+                continue
+            try:
+                when = _date(int(day.name[:4]), int(day.name[4:6]), int(day.name[6:]))
+            except ValueError:
+                continue
+            if when < cutoff:
+                shutil.rmtree(day, ignore_errors=True)
+                removed += 1
+    return removed
+
+
 async def _eod_sweep_loop():
     """Close out finished days from inside the service.
 
@@ -62,6 +94,13 @@ async def _eod_sweep_loop():
             n = await asyncio.to_thread(_sweep)
             log.info("end-of-day sweep: flagged %d open interval(s) up to %s",
                      n, yesterday)
+            # Body crops age out here rather than in a cron job, for the reason
+            # close_open_intervals had to move in-process: the timer that was
+            # supposed to run it had never been installed on either host.
+            removed = await asyncio.to_thread(_sweep_person_crops)
+            if removed:
+                log.info("retention: removed %d day-folder(s) of body crops",
+                         removed)
         except Exception:
             log.exception("end-of-day sweep failed")
 
@@ -169,6 +208,7 @@ def health():
         "status": status,
         "replay": str(settings.replay_dir) if settings.replay_dir else None,
         "pipeline_errors": errs,
+        "reid": runtime.reid.stats() if runtime.reid else None,
         "gallery": {"embeddings": len(runtime.gallery or []),
                     "people": runtime.gallery.n_people if runtime.gallery else 0},
         "cameras": [w.stats() for w in runtime.workers.values()],

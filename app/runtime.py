@@ -10,6 +10,7 @@ from app.core.gallery import Gallery
 from app.db.models import Camera
 from app.db.session import init_db, session_scope
 from app.services.arbiter import PassArbiter
+from app.services.reid_worker import ReidWorker
 from app.services.enrollment import load_gallery
 from app.services.worker import CameraWorker
 
@@ -24,6 +25,9 @@ class Runtime:
         # corridor, so a single walk arrives twice and only one of them may
         # move attendance state.
         self.arbiter = PassArbiter()
+        # One ReID worker for the whole process. It owns its own thread and its
+        # own model; the cameras only hand it crops.
+        self.reid = ReidWorker()
 
     def start(self):
         init_db()
@@ -40,6 +44,7 @@ class Runtime:
             log.info("onnxruntime providers: %s", provs[:2])
         self.gallery = load_gallery()
         log.info("gallery: %d embeddings / %d people", len(self.gallery), self.gallery.n_people)
+        self.reid.start()
         if len(self.gallery) == 0:
             log.warning("gallery is empty - run scripts/enroll.py")
 
@@ -50,7 +55,8 @@ class Runtime:
             ]
         for cid, name, role, url, dcfg in cams:
             w = CameraWorker(cid, name, role, url, self.gallery,
-                             direction_cfg=dcfg, arbiter=self.arbiter)
+                             direction_cfg=dcfg, arbiter=self.arbiter,
+                             reid=self.reid)
             self.workers[cid] = w.start()
             if dcfg.configured:
                 log.info("started worker %s (%s) with direction line", name, role.value)
@@ -64,6 +70,8 @@ class Runtime:
         for w in self.workers.values():
             w.stop()
         self.workers.clear()
+        # After the cameras, so anything they just submitted is still drained.
+        self.reid.stop()
 
     def reload_gallery(self):
         self.gallery = load_gallery()

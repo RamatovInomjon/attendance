@@ -30,6 +30,8 @@ def runtime_models() -> tuple[str, ...]:
     """
     from app.config import settings
     names = [settings.head_model, settings.aligner_model, settings.recognizer_model]
+    if settings.reid_model:
+        names.append(settings.reid_model)
     # Refresh any OTHER recognizer that has already been encrypted once, so a
     # rollback target stays deployable. Deliberately not "every model with a
     # calibrated threshold": that list includes the fp32 research masters,

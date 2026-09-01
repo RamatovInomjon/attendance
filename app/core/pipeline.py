@@ -61,6 +61,15 @@ class TrackState:
     last_reason: str = ""
     face_box: np.ndarray | None = None
     person_box: np.ndarray | None = None
+    # Periodic body-crop bookkeeping (ReID data collection). Kept on the track
+    # rather than in the caller because the cadence is per person-pass.
+    last_body_save: float = 0.0
+    body_saves: int = 0
+    # Body crop from the quality-best frame, kept for EVERY track. The voted
+    # one (`vote.best_person`) is scoped to a committed identity and is
+    # therefore None for an unknown - which left unknown passes showing a
+    # 112x112 aligned face on the dashboard, the one crop a human cannot judge.
+    disp_person: np.ndarray | None = None
     # Where the head sat inside the person box, as a fraction of that box, the
     # last time both were seen together. Used to synthesise a head point on
     # frames where the head is missed - the person box is still tracked, so the
@@ -132,6 +141,11 @@ class CompletedTrack:
     direction_reason: str
     face_px: int
     duration_s: float
+    # The track's own first sighting, carried rather than reconstructed. A
+    # consumer deriving it as `completion_time - duration_s` is wrong by
+    # `track_max_age_s`, because a track is pruned three seconds AFTER it was
+    # last seen - which silently orphaned every pass in the ReID collector.
+    first_seen: float = 0.0
     traj_points: int = 0
     travel: float = 0.0
     native: np.ndarray | None = None
@@ -159,13 +173,57 @@ class FrameCandidate:
 
 
 @dataclass
+class BodyCrop:
+    """One periodic body crop, for ReID data collection.
+
+    Taken on a timer rather than on recognition, so it also covers people the
+    face path never identifies - who are exactly the ones a ReID model is
+    wanted for. The pipeline only produces these; writing and embedding happen
+    off the capture thread in app/services/reid_worker.py.
+    """
+    track_id: int
+    ts: float                      # frame.ts, the capture instant
+    image: np.ndarray              # BGR uint8, already downscaled
+    score: float                   # detector confidence, the tracklet weight
+    first_seen: float              # identifies the pass; track ids are reused
+
+
+@dataclass
 class FrameResult:
     frame: Frame
     tracks: list[TrackState] = field(default_factory=list)
     outcomes: list[RecognitionOutcome] = field(default_factory=list)
     completed: list[CompletedTrack] = field(default_factory=list)
     candidates: list[FrameCandidate] = field(default_factory=list)
+    body_crops: list[BodyCrop] = field(default_factory=list)
     timings: dict = field(default_factory=dict)
+
+
+def _whole_body(person_box: np.ndarray, frame_w: int, frame_h: int,
+                edge_px: int = 4, min_aspect: float = 1.5) -> bool:
+    """Is this a usable body crop, or a fragment?
+
+    A track begins the instant somebody appears at the edge of view, so its
+    first box is reliably a head and one shoulder. The crop comes out wider than
+    it is tall, and it is the worst possible ReID sample: the model squashes
+    whatever it is given to 256x128, so a fragment is stretched into something
+    that resembles no real body.
+
+    ONLY THE LEFT AND RIGHT EDGES COUNT AS TRUNCATION. Measured over one
+    corridor clip (39 person boxes): 46% touch the TOP of the frame and 10% the
+    bottom, because the cameras look down a corridor and somebody walking toward
+    one has their head near the top and their feet out of shot. Rejecting those
+    threw away 56% of all crops, including the closest and largest - the best
+    samples there are. Rejecting on left/right and shape instead keeps 85%.
+
+    Horizontal truncation is different: a box against the left or right edge is
+    a person half out of view sideways, and that really is a fragment.
+    """
+    x1, y1, x2, y2 = (float(v) for v in person_box[:4])
+    if x1 <= edge_px or x2 >= frame_w - edge_px:
+        return False
+    w, h = x2 - x1, y2 - y1
+    return w > 0 and h / w >= min_aspect
 
 
 def _body_crop(image: np.ndarray, person_box: np.ndarray,
@@ -375,10 +433,18 @@ class CameraPipeline:
                 best_score=float(t.vote.best_score if t.vote.decided
                                  else max(t.best_seen, t.vote.best_score or 0.0)),
                 best_margin=float(t.vote.best_margin),
-                person_crop=t.vote.best_person,
+                # The committed identity's own best body when there is one;
+                # otherwise the quality-best body of the pass. An unknown pass
+                # has no committed identity, and showing its aligned face
+                # instead defeats the point of showing a body at all - a person
+                # is recognisable by build, clothing and posture, and least of
+                # all by a tight crop of a face the system could not place.
+                person_crop=(t.vote.best_person if t.vote.best_person is not None
+                             else t.disp_person),
                 embedded_frames=t.embedded, gated_frames=t.gated,
                 direction=direction.value, direction_reason=direction_reason,
                 face_px=t.best_face_px, duration_s=max(0.0, t.last_seen - t.first_seen),
+                first_seen=t.first_seen,
                 traj_points=len(t.trajectory.points), travel=t.trajectory.travel(),
                 # Display artifacts all from the quality-best frame.
                 native=t.disp_native, context=t.disp_context, quality=t.disp_quality_obj,
@@ -518,6 +584,7 @@ class CameraPipeline:
             tracking_persons = False
         t_det = (time.perf_counter() - t0) * 1000
 
+        fh0, fw0 = frame.image.shape[:2]
         tracked = self.tracker.update(track_boxes, track_scores)
         res.completed = self._prune(now)
 
@@ -539,6 +606,42 @@ class CameraPipeline:
             if tracking_persons:
                 st.person_box = box
                 head = _head_in(box, head_boxes)
+
+                # PERIODIC BODY CROP, taken here and nowhere else.
+                #
+                # It requires a DETECTED HEAD inside the person box, which is
+                # the only reliable way to know the crop contains one. Geometry
+                # cannot tell the difference: a box running to the top of frame
+                # is sometimes a person standing close with their head fully in
+                # view, and sometimes a person whose head is above the frame
+                # entirely. Rejecting all of them threw away 46% of crops
+                # including the closest and best; accepting all of them produced
+                # headless torsos, which are near-useless for ReID - the head
+                # and shoulders are where much of the signal is.
+                #
+                # This is deliberately BEFORE the face size, quality and
+                # identity gates, so it still covers people the face path never
+                # names - precisely the ones a ReID model is wanted for. Only
+                # the head DETECTION is required, not a recognisable face.
+                #
+                # Cost is bounded twice: once per `body_crop_interval_s` per
+                # track, and never more than `body_crop_max_per_pass`. A
+                # rejected frame does NOT advance the timer, so the next usable
+                # frame is taken immediately rather than waiting another
+                # interval.
+                if (settings.body_crop_interval_s > 0
+                        and head is not None
+                        and st.body_saves < settings.body_crop_max_per_pass
+                        and now - st.last_body_save >= settings.body_crop_interval_s
+                        and _whole_body(box, fw0, fh0)):
+                    crop = _body_crop(frame.image, box, max_w=settings.body_crop_width)
+                    if crop is not None:
+                        res.body_crops.append(BodyCrop(
+                            track_id=tid, ts=now, image=crop,
+                            score=float(score), first_seen=st.first_seen))
+                        st.last_body_save = now
+                        st.body_saves += 1
+
                 if head is not None:
                     st.face_box = head
                     st.head_offset = _offset_of(head, box)
@@ -716,6 +819,12 @@ class CameraPipeline:
                         st.disp_context = (cv2.resize(frame.image, (cw, int(fh * cw / fw)),
                                                       interpolation=cv2.INTER_AREA)
                                            if fw > cw else frame.image.copy())
+                        # ...and the body from that same frame, so an
+                        # unrecognised pass still has a person to show.
+                        if st.person_box is not None:
+                            st.disp_person = _body_crop(
+                                frame.image, st.person_box,
+                                max_w=settings.body_crop_width)
                     if q.score > st.best_quality:
                         st.best_quality = q.score
                         st.best_crop = f.aligned

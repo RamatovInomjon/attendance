@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 class CameraWorker:
     def __init__(self, camera_id: int, name: str, role: CameraRole, rtsp_url: str,
                  gallery: Gallery, direction_cfg: DirectionConfig | None = None,
-                 arbiter=None):
+                 arbiter=None, reid=None):
         self.camera_id = camera_id
         self.name = name
         self.role = role
@@ -61,6 +61,9 @@ class CameraWorker:
         # both, and only one of them may move attendance state.
         from app.services.arbiter import PassArbiter
         self.arbiter = arbiter if arbiter is not None else PassArbiter()
+        # Body-crop collection and cross-camera ReID. Everything it does happens
+        # on its own thread; submitting never blocks this one.
+        self.reid = reid
         self.debug = DebugCapture()
         self.recorder = (ClipRecorder(
             name, fps=max(1.0, 20.0 / settings.process_every_nth),
@@ -213,8 +216,17 @@ class CameraWorker:
 
             if ct.employee_id is None:
                 self.passes_unknown += 1
-                snap = self._save_snapshot(ct.crop, 0, "unknown", ct.track_id)
+                # The BODY is what the unknown-review page shows, exactly as it
+                # is for a recognised pass. A 112x112 aligned face of somebody
+                # the system could not place is the least useful image it
+                # could offer a human: build, clothing and posture are what
+                # make an unknown identifiable at all. The aligned face is
+                # still written beside it for diagnosis.
+                face_snap = self._save_snapshot(ct.crop, 0, "unknown", ct.track_id)
+                snap = self._save_body(ct.person_crop, 0, ct.track_id) or face_snap
                 unknowns.append((ct, ts, snap))
+                if self.reid is not None:
+                    self.reid.submit_pass(self.camera_id, self.name, ct, ts)
                 log.info("[%s] MISS best=%.3f nearest=%-20s embedded=%d traj=%d "
                          "travel=%.3f dur=%.1fs dir=%s (%s)",
                          self.name, ct.best_score,
@@ -251,6 +263,9 @@ class CameraWorker:
                     )
                 except Exception:
                     log.exception("[%s] debug capture failed", self.name)
+
+            if self.reid is not None:
+                self.reid.submit_pass(self.camera_id, self.name, ct, ts)
 
             self.arbiter.submit(PendingPass(
                 employee_id=ct.employee_id, camera_id=self.camera_id,
@@ -369,6 +384,13 @@ class CameraWorker:
                 continue
             with self._lock:
                 self.latest = res
+
+            # Hand the periodic body crops over and move on. The queue is
+            # bounded and drop-oldest, so a slow or failed ReID cannot stall
+            # capture - dropping a training sample is the right trade against
+            # delaying recognition.
+            if self.reid is not None and res.body_crops:
+                self.reid.submit_crops(self.camera_id, self.name, res.body_crops)
 
             if self.recorder is not None:
                 try:

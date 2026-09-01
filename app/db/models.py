@@ -230,6 +230,60 @@ class UnknownSighting(Base):
     snapshot = Column(String(255), nullable=True)
 
 
+class ReidPass(Base):
+    """One person-pass, with the body feature that lets it be matched to another.
+
+    Separate from `UnknownSighting` rather than a column on it. That table's
+    `vector` holds the FACE embedding; nothing reads it today, but quietly
+    changing what a stored vector means is how a future reader ends up comparing
+    two incompatible things and getting plausible numbers back.
+
+    `model_name` is stored for the same reason `face_embedding.model_name` is:
+    features from two ReID models are not comparable, and comparing them
+    SUCCEEDS - same dimensionality, same unit norm, cosines in the usual range.
+    Nothing errors; the matching is simply wrong.
+
+    The key is `(camera_id, track_id, first_seen)`, never `track_id` alone:
+    ByteTrack restarts its counter on `tracker.reset()` after a stream gap, and
+    the two cameras number their tracks independently.
+    """
+    __tablename__ = "reid_pass"
+
+    id = Column(Integer, primary_key=True)
+    camera_id = Column(Integer, ForeignKey("camera.id", ondelete="SET NULL"),
+                       nullable=True)
+    camera_name = Column(String(128), default="")
+    track_id = Column(Integer, default=-1)
+    first_seen = Column(UtcDateTime(), default=utcnow)
+    last_seen = Column(UtcDateTime(), default=utcnow, index=True)
+    business_date = Column(Date, nullable=False, index=True)
+    direction = Column(String(16), default="UNKNOWN")
+    # Set when the face path named this pass; NULL for an unknown. A named pass
+    # is a labelled positive for ReID training, which is why they are kept too.
+    employee_id = Column(Integer, ForeignKey("employee.id", ondelete="SET NULL"),
+                         nullable=True, index=True)
+    name = Column(String(255), default="")
+    folder = Column(String(255), default="")     # relative to settings.persons_dir
+    crops = Column(Integer, default=0)
+    vector = Column(LargeBinary, nullable=True)  # tracklet feature, float32
+    dim = Column(Integer, default=0)
+    model_name = Column(String(128), default="")
+    # Cross-camera link. Both halves of a matched pair point at each other, so
+    # either row answers "where else was this person seen".
+    matched_pass_id = Column(Integer, nullable=True, index=True)
+    match_score = Column(Float, default=0.0)
+    match_margin = Column(Float, default=0.0)
+    created_at = Column(UtcDateTime(), default=utcnow)
+
+    __table_args__ = (
+        # The matching query: unmatched passes from the other camera, same day.
+        Index("ix_reid_date_cam_matched", "business_date", "camera_id",
+              "matched_pass_id"),
+        UniqueConstraint("camera_id", "track_id", "first_seen",
+                         name="uq_reid_pass_key"),
+    )
+
+
 class User(Base):
     """An operator who may sign in to the console.
 

@@ -85,8 +85,11 @@ def _recognizer_is_shippable() -> list[str]:
     """
     from app.config import settings
     bad = []
-    for name in (settings.recognizer_model, settings.head_model,
-                 settings.aligner_model):
+    wanted = [settings.recognizer_model, settings.head_model,
+              settings.aligner_model]
+    if settings.reid_model:
+        wanted.append(settings.reid_model)
+    for name in wanted:
         if not (settings.models_dir / (str(name) + ".enc")).is_file():
             bad.append(f"{name} has no .enc (run scripts/encrypt_models.py)")
     return bad

@@ -85,6 +85,80 @@ class Settings(BaseSettings):
     #     (`scripts/encrypt_models.py`), or the release cannot load it.
     recognizer_model: str = "adaface_ir101_finetune_fp16.onnx"
 
+    # ---- person re-identification ---------------------------------------
+    # Body ReID, used to collect training data and to link one unrecognised
+    # person across the two cameras. NEVER to write attendance: on its own
+    # cross-camera test set the deployed checkpoint misses ~31% of genuine
+    # queries at a 10% false-positive identification rate.
+    #
+    # Exported by scripts/export_reid.py from the research checkpoint that won
+    # phd/dissertatsiya2's cross-camera evaluation (gallery = Entrance, query =
+    # Exit, 200 splits): mAP 92.24, Rank-1 93.49, FNIR@10% 31.10.
+    #
+    # Empty disables the whole ReID path - the pipeline then behaves exactly as
+    # it did before, which is what a deployment without the model should get.
+    reid_model: str = "reid_resnet101_ibn_256x128_e2048_fp16.onnx"
+
+    # How often a body crop is kept per person-pass, and the ceiling per pass.
+    # 2 s over a median 9.8 s pass is ~5 crops; the cap stops somebody standing
+    # in the corridor from filling the disk on their own. 0 disables collection
+    # while leaving the rest of the ReID path intact.
+    # How often a body crop is COLLECTED. 1 s, not 2: the median pass is under
+    # ten seconds, so a 2 s cadence yielded four crops and no room to choose
+    # between them. What is kept is still spread across the whole pass - see
+    # body_crop_keep_per_pass - so collecting more often buys choice, not
+    # clustering. A frame rejected for having no visible head does NOT advance
+    # this timer, so the next usable frame is taken immediately.
+    body_crop_interval_s: float = 1.0
+    # COLLECTED per pass, before selection. At 1 s this covers a 30 s pass; a
+    # loiterer is bounded here rather than filling the disk. You cannot spread
+    # a selection over samples you never took, which is why this is generous.
+    body_crop_max_per_pass: int = 30
+    # KEPT per pass, chosen as far apart in time as the pass allows. Ten is
+    # what a ReID tracklet needs; the first ten in arrival order would all come
+    # from the first twenty seconds, at one distance and one angle. A short
+    # pass simply keeps everything it collected at the 2 s cadence.
+    # Crops are stored at this width. 256x128 is what the model consumes, so
+    # 320 leaves headroom for re-cropping without keeping 4K regions.
+    body_crop_keep_per_pass: int = 10
+    body_crop_width: int = 320
+
+    # Cosine similarity for calling two passes the same person across cameras.
+    # 0.6769 is the measured FPIR=1% operating point from the research project's
+    # cross-camera evaluation, reproduced by this export at 0.68
+    # (bench/eval_reid.py). PROVISIONAL for this corridor: it comes from a
+    # 45-person test set, and the face threshold taught the same lesson - the
+    # deployed 0.18 turned out to sit BELOW the worst real impostor.
+    #
+    # MEASURED on this corridor 2026-09-01 (bench/reid_match_eval.py, 281 passes,
+    # 128 face-labelled, gallery = Entrance 59 -> query = Exit 69, using the face
+    # path's own identities as ground truth):
+    #
+    #   genuine  median 0.700  min 0.441
+    #   impostor MAX    0.585          <- the number that matters
+    #   at 0.677 + margin 0.05:  15 correct, 0 wrong of 69 queries
+    #
+    # So 0.6769 sits comfortably above the worst impostor seen here, unlike the
+    # face threshold's first outing. Dropping to 0.55 nearly doubles recall (27
+    # correct, still 0 wrong) and is tempting - but only 10 of those queries were
+    # true impostors, because most Exit passes in this corpus DO have a matching
+    # entrance. In production most unknowns will not, so the impostor rate will
+    # be far higher than this sample suggests. Kept conservative until measured
+    # against a realistic mix.
+    reid_match_threshold: float = 0.6769
+    # The runner-up must be beaten by this much, for the reason the face
+    # matcher has the same rule: the genuine and impostor distributions overlap
+    # heavily here (wrong_sim_p90 0.664 against right_sim_p10 0.521), so a top
+    # score alone is weak evidence.
+    reid_match_margin: float = 0.05
+    # A pass with fewer crops than this is not matched: a tracklet feature
+    # built from one blurred crop is not worth a cross-camera claim.
+    reid_min_crops: int = 2
+    reid_retention_days: int = 30
+    # Body crops live under data/, NOT media/. media/ is a public StaticFiles
+    # mount, and these are images of unidentified people.
+    persons_dir: Path = ROOT / "data" / "persons"
+
     # 960, not 1280: detector recall is unchanged (40/40 on the gallery, and
     # YOLOv8n-face holds 100% recall down to a 16 px face — see
     # bench/detect_resolution.py), while both the downscale and the forward
