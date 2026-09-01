@@ -347,3 +347,27 @@ def test_collection_covers_a_long_pass_before_the_cap_bites():
     assert span >= 25.0, (
         f"collection stops after {span:.0f}s, so crops kept from a longer pass "
         f"could not span it")
+
+
+# --- the threshold must be tunable on a machine with no source tree ---------
+
+def test_the_calibrated_threshold_applies_by_default():
+    from app.config import Settings
+    s = Settings(recognition_threshold_override=0.0)
+    assert s.threshold_for("adaface_ir101_finetune_fp16.onnx") == 0.215
+
+
+def test_an_override_wins_so_it_can_be_set_from_env():
+    """The server has no source tree and cannot rebuild the compiled core, so
+    editing `recognizer_thresholds` in config.py is not available there. Without
+    this the operating point could not be tuned on the deployed machine at all."""
+    from app.config import Settings
+    s = Settings(recognition_threshold_override=0.19)
+    assert s.threshold_for("adaface_ir101_finetune_fp16.onnx") == 0.19
+    assert s.threshold_for("anything_else.onnx") == 0.19
+
+
+def test_zero_means_use_the_calibration_not_accept_everything():
+    """A falsy override must not read as 'threshold 0', which accepts anybody."""
+    from app.config import Settings
+    assert Settings(recognition_threshold_override=0.0).threshold_for() > 0.2

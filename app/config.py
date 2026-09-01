@@ -333,6 +333,16 @@ class Settings(BaseSettings):
     # (~25,000 pairs), the genuine statistics come from one person's ten passes.
     # Widen it with clips of more enrolled people before treating the genuine
     # retention figure as settled.
+    # Overrides the per-model value below when > 0. For tuning on a deployed
+    # machine, which has no source tree and cannot rebuild the compiled core:
+    #
+    #     echo "recognition_threshold_override=0.19" >> .env   # then restart
+    #
+    # It logs a warning every time it is consulted, because a number set by
+    # hand and forgotten is exactly how the deployed 0.18 came to sit below the
+    # worst impostor this corridor actually produces. 0 = use the calibration.
+    recognition_threshold_override: float = 0.0
+
     recognizer_thresholds: dict = {
         "adaface_ir101_finetune_fp16.onnx": 0.215,
         "adaface_ir101_finetune.onnx": 0.215,
@@ -504,8 +514,20 @@ class Settings(BaseSettings):
         Resolved from the model rather than read from a single global so that
         changing `recognizer_model` cannot silently leave the old threshold in
         place.
+
+        `recognition_threshold_override` beats everything, so the value can be
+        tuned from `.env` on a machine that has no source tree. Without it the
+        only way to change the operating point was to edit this file and
+        rebuild the compiled core - which on the server is not possible at all.
         """
         import logging
+        if self.recognition_threshold_override > 0:
+            logging.getLogger(__name__).warning(
+                "recognition_threshold_override=%.3f is in force; the value "
+                "calibrated for this recognizer is being ignored. Remember to "
+                "clear it once tuning is done.",
+                self.recognition_threshold_override)
+            return float(self.recognition_threshold_override)
         name = Path(str(model_name or self.recognizer_model)).name
         name = name.replace(".enc", "")
         if name in self.recognizer_thresholds:
