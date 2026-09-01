@@ -1631,3 +1631,81 @@ def test_media_url_filter_prefixes_placeholder_and_files(monkeypatch):
     # absolute and data URLs are left alone
     assert media_url("https://x/y.jpg") == "https://x/y.jpg"
     assert media_url("data:image/png;base64,AA") == "data:image/png;base64,AA"
+
+
+# --- WebSocket URLs must carry the deployment prefix -----------------------
+# The same class of bug as the media URLs above, and it survived that fix
+# because .js files cannot interpolate {{ PREFIX }}. Under /faceid a bare
+# "/ws/camera/1/" resolves against the DOMAIN root, which on aiscan.airi.uz
+# belongs to a different project: the live console's camera feed and its
+# attendance push both 404, while the page itself looks fine.
+
+def test_camera_socket_urls_carry_the_deployment_prefix():
+    import subprocess
+    root = Path(__file__).resolve().parent.parent
+    contract = r"""
+const assert = require('node:assert/strict');
+global.window = { location: { protocol: 'https:', host: 'aiscan.airi.uz' },
+                  addEventListener() {} };
+global.document = {
+    querySelector: (sel) => sel === '[data-url-prefix]'
+        ? { dataset: { urlPrefix: '/faceid' } } : null,
+    querySelectorAll: () => [],
+    addEventListener() {},
+};
+const src = require('fs').readFileSync('static/js/camera_stream.js', 'utf8');
+eval(src);
+assert.equal(airiPrefix(), '/faceid');
+assert.equal(airiSocketUrl('/ws/camera/1/'),
+             'wss://aiscan.airi.uz/faceid/ws/camera/1/');
+assert.equal(airiSocketUrl('/ws/attendance/'),
+             'wss://aiscan.airi.uz/faceid/ws/attendance/');
+console.log('ok');
+"""
+    r = subprocess.run(["node", "-e", contract], cwd=root,
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+
+def test_socket_urls_are_bare_when_served_at_the_root():
+    """No prefix attribute means the app is at the domain root, which is how it
+    runs locally - the helper must not invent a path segment."""
+    import subprocess
+    root = Path(__file__).resolve().parent.parent
+    contract = r"""
+const assert = require('node:assert/strict');
+global.window = { location: { protocol: 'http:', host: '127.0.0.1:8000' },
+                  addEventListener() {} };
+global.document = { querySelector: () => null, querySelectorAll: () => [],
+                    addEventListener() {} };
+eval(require('fs').readFileSync('static/js/camera_stream.js', 'utf8'));
+assert.equal(airiSocketUrl('/ws/attendance/'), 'ws://127.0.0.1:8000/ws/attendance/');
+console.log('ok');
+"""
+    r = subprocess.run(["node", "-e", contract], cwd=root,
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+
+def test_no_javascript_points_at_a_route_that_does_not_exist():
+    """`/ws/recognition/` had two clients and no server route, one of them over
+    a hardcoded ws:// that fails on the HTTPS deployment."""
+    root = Path(__file__).resolve().parent.parent
+    routes = (root / "app" / "api" / "ws.py").read_text()
+    for js in (root / "static" / "js").glob("*.js"):
+        body = js.read_text()
+        for path in re.findall(r"/ws/[a-z]+/", body):
+            assert path.rstrip("/") in routes or "{camera_id}" in routes, (
+                f"{js.name} connects to {path}, which app/api/ws.py does not serve")
+
+
+def test_no_javascript_hardcodes_insecure_websockets():
+    """`ws://` on an HTTPS page is blocked by the browser as mixed content."""
+    root = Path(__file__).resolve().parent.parent
+    for js in (root / "static" / "js").glob("*.js"):
+        body = js.read_text()
+        for line in body.splitlines():
+            if "new WebSocket(" in line:
+                assert "ws://" not in line, (
+                    f"{js.name} hardcodes ws://; derive it from "
+                    f"window.location.protocol: {line.strip()}")

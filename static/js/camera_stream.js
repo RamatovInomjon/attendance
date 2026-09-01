@@ -4,6 +4,27 @@
  * Camera transport remains `/ws/camera/{id}/`; frames remain JSON-wrapped
  * base64 JPEGs drawn to canvas. Recognition panels retain 10-second polling.
  */
+
+// The app is served under a deployment sub-path (e.g. /faceid) by a proxy that
+// does NOT strip it, so a bare "/ws/camera/1/" resolves against the DOMAIN root
+// - which on the shared host belongs to another project entirely. Templates
+// interpolate {{ PREFIX }}; a .js file cannot, so the page hands it over on
+// data-url-prefix and every socket URL is built here.
+function airiPrefix() {
+    // Guarded: this runs before DOM-ready in some paths, and the JS contract
+    // tests drive the module with a stubbed `window` and no `document` at all.
+    // No prefix is the correct answer in both cases - that is how it is served
+    // at the domain root.
+    if (typeof document === 'undefined' || !document.querySelector) return '';
+    const el = document.querySelector('[data-url-prefix]');
+    return (el && el.dataset && el.dataset.urlPrefix)
+        ? el.dataset.urlPrefix.replace(/\/$/, '') : '';
+}
+
+function airiSocketUrl(path) {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${protocol}//${window.location.host}${airiPrefix()}${path}`;
+}
 (function initialiseLiveConsole() {
     'use strict';
 
@@ -196,8 +217,7 @@
             const streamEndpoint = canvas?.dataset.streamEndpoint;
             if (!cameraId || !canvas || !streamEndpoint || this.streams.has(cameraId)) return;
 
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${window.location.host}/ws/camera/${streamEndpoint}/`;
+            const wsUrl = airiSocketUrl(`/ws/camera/${streamEndpoint}/`);
             const stream = {
                 card, canvas, streamEndpoint, socket: null, reconnectTimer: null,
                 closed: false, frameSequence: 0,
@@ -377,8 +397,7 @@
 
         let recognitionSocket = null;
         try {
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            recognitionSocket = new WebSocket(`${protocol}//${window.location.host}/ws/attendance/`);
+            recognitionSocket = new WebSocket(airiSocketUrl('/ws/attendance/'));
             recognitionSocket.addEventListener('message', (event) => {
                 try {
                     const data = JSON.parse(event.data);

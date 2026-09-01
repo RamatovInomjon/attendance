@@ -177,39 +177,11 @@ function initialiseDismissControls() {
     });
 }
 
-function initialiseRecognitionLog() {
-    const logList = document.querySelector('#live-recognition-log');
-    if (!logList) {
-        return;
-    }
-
-    try {
-        const socket = new WebSocket(`ws://${window.location.host}/ws/recognition/`);
-        socket.onmessage = (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                const item = document.createElement('li');
-                item.className = 'list-group-item d-flex justify-content-between align-items-center';
-                item.innerHTML = `
-                    <div>
-                        <strong>${data.name}</strong>
-                        <small class="d-block text-muted">${data.department}</small>
-                    </div>
-                    <span class="badge bg-${statusToBadge(data.status)}">${data.action}</span>
-                `;
-                logList.prepend(item);
-                while (logList.children.length > 10) {
-                    logList.removeChild(logList.lastChild);
-                }
-            } catch (error) {
-                console.debug('WebSocket message parse error:', error);
-            }
-        };
-        socket.onerror = () => console.debug('WebSocket not available (optional feature)');
-    } catch (error) {
-        console.debug('WebSocket not supported or disabled');
-    }
-}
+// initialiseRecognitionLog() removed: it opened a socket to /ws/recognition/,
+// a route that does not exist, over a hardcoded ws:// that would fail on the
+// HTTPS deployment, and #live-recognition-log appears in no template - so it
+// could never run. Live recognition arrives on /ws/attendance/, handled in
+// camera_stream.js, which builds its URL with the deployment prefix.
 
 document.addEventListener('DOMContentLoaded', () => {
     initialiseTheme();
@@ -218,5 +190,4 @@ document.addEventListener('DOMContentLoaded', () => {
     initialiseAttendanceFilters();
     initialiseMobileNavigation();
     initialiseDismissControls();
-    initialiseRecognitionLog();
 });
