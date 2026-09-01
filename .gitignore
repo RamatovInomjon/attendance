@@ -96,6 +96,13 @@ media/
 # "contains personal and biometric data" - it must never enter version control.
 face_id_users/
 
+# The SAME DATA IN VECTOR FORM. `bench/validate_gallery.py` writes a cache of
+# every enrolment embedding - 268 x 512 floats over 54 named people, with the
+# source paths (and therefore the names) stored alongside. A face embedding is
+# biometric data; caching it under bench/ does not make it a build artefact.
+# Five of these were staged for the first public push and caught by an audit.
+bench/*.npz
+
 # Model weights. Tracked out of band by default, restored from models/README or
 # the training runs they were exported from.
 #

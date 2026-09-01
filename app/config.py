@@ -515,4 +515,27 @@ class Settings(BaseSettings):
         return self.models_dir / name
 
 
+def camera_credentials() -> tuple[str, str]:
+    """Camera login for the ops scripts that talk to cameras directly.
+
+    From the environment, never from source. Four scripts had the password
+    written in as a literal - a working credential for a live camera in every
+    copy of the file, and in every clone once this repository became public. An
+    audit before the first push caught it.
+
+    The running service does not use this: it reads the whole RTSP URL from the
+    `camera` table, credentials included.
+
+        export CAMERA_USER=admin CAMERA_PASSWORD='...'
+    """
+    import os
+    pwd = os.environ.get("CAMERA_PASSWORD", "")
+    if not pwd:
+        raise SystemExit(
+            "  CAMERA_PASSWORD is not set. This script connects to the cameras "
+            "directly:\n"
+            "    export CAMERA_USER=admin CAMERA_PASSWORD='<password>'")
+    return os.environ.get("CAMERA_USER", "admin"), pwd
+
+
 settings = Settings()

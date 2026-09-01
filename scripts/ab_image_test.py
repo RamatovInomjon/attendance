@@ -36,7 +36,10 @@ from app.db.models import Camera
 from app.db.session import session_scope
 from app.services.enrollment import load_gallery
 
-USER, PWD = "admin", "@a123456"
+
+
+from app.config import camera_credentials
+USER, PWD = camera_credentials()
 NS = 'xmlns="http://www.hikvision.com/ver20/XMLSchema"'
 
 CONFIGS = [

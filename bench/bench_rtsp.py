@@ -1,8 +1,11 @@
 """Measure real decode cost for each stream option on both cameras."""
 import time, cv2, os, sys
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer"
-USER, PWD = "admin", "@a123456"
 CAMS = {"in": "192.168.1.2", "out": "192.168.1.64"}
+
+
+from app.config import camera_credentials
+USER, PWD = camera_credentials()
 
 def bench(ip, ch, n=40):
     url = f"rtsp://{USER}:{PWD}@{ip}:554/Streaming/Channels/{ch}"

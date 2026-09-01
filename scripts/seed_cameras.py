@@ -8,7 +8,8 @@ from sqlalchemy import select
 from app.db.models import Camera, CameraRole
 from app.db.session import init_db, session_scope
 
-USER, PWD = "admin", "@a123456"
+from app.config import camera_credentials
+USER, PWD = camera_credentials()
 CAMS = [
     ("Entrance", CameraRole.IN,  "192.168.1.2",  "corridor, high mount, wide angle"),
     ("Exit",     CameraRole.OUT, "192.168.1.64", "corridor, high mount, wide angle"),

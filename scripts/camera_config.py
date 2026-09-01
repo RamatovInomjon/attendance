@@ -20,7 +20,8 @@ from sqlalchemy import select
 from app.db.models import Camera
 from app.db.session import session_scope
 
-USER, PWD = "admin", "@a123456"
+from app.config import camera_credentials
+USER, PWD = camera_credentials()
 # Long enough to outlast the observed 15-40 s rollback window.
 SETTLE_S = 55
 NS = 'xmlns="http://www.hikvision.com/ver20/XMLSchema"'
