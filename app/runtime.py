@@ -17,6 +17,56 @@ from app.services.worker import CameraWorker
 log = logging.getLogger(__name__)
 
 
+def _check_gpu_headroom(need_mb: int = 1100) -> None:
+    """Say plainly when the card is too full, before ONNX Runtime says it badly.
+
+    gpu6 shares one RTX 3090 with several other projects, and a training job
+    there can hold 20+ GB. When it does, the models still LOAD - they are only
+    ~220 MB of weights - and the failure arrives later, at the first inference,
+    as:
+
+        CUBLAS failure 3: CUBLAS_STATUS_ALLOC_FAILED
+
+    which names cuBLAS rather than the actual problem and appears once per
+    camera per frame. Measured need with the frugal provider options is ~1.0 GB
+    for two cameras with ReID; 1100 MB leaves a little room.
+
+    This warns rather than refuses: the operator may know the other job is
+    about to finish, and a service that starts degraded is more useful than one
+    that will not start at all.
+    """
+    import shutil
+    import subprocess
+    exe = shutil.which("nvidia-smi")
+    if not exe:
+        return
+    try:
+        out = subprocess.run(
+            [exe, "--query-gpu=memory.free,memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10).stdout.strip().splitlines()[0]
+        free_mb, total_mb = (int(x) for x in out.split(","))
+    except Exception:
+        return
+    if free_mb >= need_mb:
+        log.info("GPU: %d MB free of %d", free_mb, total_mb)
+        return
+    log.error(
+        "GPU HAS ONLY %d MB FREE of %d; this pipeline needs about %d MB for two "
+        "cameras. Models will load and the FIRST INFERENCE will then fail with "
+        "CUBLAS_STATUS_ALLOC_FAILED. Free memory on the card, or set "
+        "reid_model= (empty) in .env to save ~150 MB, or wait for the other job "
+        "to finish.", free_mb, total_mb, need_mb)
+    try:
+        who = subprocess.run(
+            [exe, "--query-compute-apps=pid,used_memory,process_name",
+             "--format=csv,noheader"], capture_output=True, text=True,
+            timeout=10).stdout.strip()
+        for line in who.splitlines():
+            log.error("  GPU in use: %s", line)
+    except Exception:
+        pass
+
+
 class Runtime:
     def __init__(self):
         self.gallery: Gallery | None = None
@@ -38,6 +88,8 @@ class Runtime:
         from app.core.onnx_env import available_providers, preload_cuda_libs
         preload_cuda_libs()
         provs = available_providers()
+        if "CUDAExecutionProvider" in provs:
+            _check_gpu_headroom()
         if "CUDAExecutionProvider" not in provs:
             log.error("CUDA execution provider NOT available (%s) - see docs/OPERATIONS.md", provs)
         else:

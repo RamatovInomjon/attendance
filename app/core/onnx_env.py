@@ -88,12 +88,50 @@ def available_providers() -> list[str]:
 
 
 def best_providers(prefer_cuda: bool = True) -> list:
+    """Execution providers, configured to share the GPU rather than take it.
+
+    The default CUDA settings assume the card is yours. On gpu6 it is not: a
+    training job routinely holds 20+ GB of the 24 GB, and the deployment notes
+    say in as many words not to disturb the other projects on that machine.
+    With ~460 MB free the pipeline died at the first inference with
+
+        CUBLAS failure 3: CUBLAS_STATUS_ALLOC_FAILED
+        expr=cublasCreate(&cublas_handle_)
+
+    - not out of weights, but out of room for cuBLAS's own workspace. Three
+    settings make it frugal:
+
+    * `arena_extend_strategy=kSameAsRequested` - the default,
+      kNextPowerOfTwo, rounds every arena growth up to the next power of two,
+      so a 300 MB need takes 512 MB and the rest is unusable by anyone else.
+    * `gpu_mem_limit` - a hard ceiling, so this process cannot creep into
+      memory another project is about to want. Off by default (0); set
+      `gpu_mem_limit_mb` when sharing.
+    * `cudnn_conv_algo_search=HEURISTIC` - the default EXHAUSTIVE benchmarks
+      every convolution algorithm at startup, allocating large scratch buffers
+      to do it. Heuristic picks from a model of the hardware instead: a little
+      slower per convolution, dramatically cheaper to start.
+
+    None of this changes results, only how much of the card is claimed.
+    """
     preload_cuda_libs()
     import onnxruntime as ort
     avail = ort.get_available_providers()
     out = []
     if prefer_cuda and "CUDAExecutionProvider" in avail:
-        out.append(("CUDAExecutionProvider", {"device_id": 0}))
+        opts = {
+            "device_id": 0,
+            "arena_extend_strategy": "kSameAsRequested",
+            "cudnn_conv_algo_search": "HEURISTIC",
+        }
+        try:
+            from app.config import settings
+            limit = int(getattr(settings, "gpu_mem_limit_mb", 0) or 0)
+            if limit > 0:
+                opts["gpu_mem_limit"] = limit * 1024 * 1024
+        except Exception:
+            pass          # config is optional here; the defaults still help
+        out.append(("CUDAExecutionProvider", opts))
     out.append("CPUExecutionProvider")
     return out
 

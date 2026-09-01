@@ -180,6 +180,15 @@ class Settings(BaseSettings):
     align_mode: str = "sharp"
     embed_batch: int = 8
 
+    # Hard ceiling on GPU memory per ONNX Runtime session, in MB. 0 = no limit.
+    # gpu6 shares one RTX 3090 with several other projects, and a training job
+    # there routinely holds 20+ GB; with the card nearly full the pipeline died
+    # at the first inference on CUBLAS_STATUS_ALLOC_FAILED - out of room for
+    # cuBLAS's workspace, not for weights. Setting this makes the failure
+    # predictable and keeps this process from creeping into memory another
+    # project is about to want. See app/core/onnx_env.best_providers.
+    gpu_mem_limit_mb: int = 0
+
     # ---- quality gates --------------------------------------------------
     # Calibrated against bench/degrade_test.py, which degraded known gallery
     # faces to corridor conditions and re-matched.  The recognizer held up far
