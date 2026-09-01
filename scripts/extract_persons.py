@@ -63,6 +63,55 @@ def _slug(name: str) -> str:
     return re.sub(r"\s+", "_", s) or "Unnamed"
 
 
+CROP = re.compile(r"^(?P<clip>\d{8}_\d{6})_(?P<cam>[A-Za-z]+)_t(?P<track>\d+)"
+                  r"_s(?P<score>[0-9.]+)\.jpg$")
+
+
+def summarise(out_root: Path) -> None:
+    """Report from the images on disk, not from what this run happens to hold.
+
+    The crop filename carries the clip, the camera and the score, so a summary
+    survives an interrupted run - which matters, because the first full pass
+    over 760 clips was killed by a reboot at 57% and the per-folder JSON was
+    only written at the very end. Everything below is recoverable from the
+    files themselves.
+    """
+    people, unknown_passes = {}, 0
+    for d in sorted(out_root.iterdir()):
+        if not d.is_dir():
+            continue
+        if d.name.startswith("unknown_t"):
+            unknown_passes += 1
+            continue
+        seen = {}
+        for f in d.glob("*.jpg"):
+            m = CROP.match(f.name)
+            if not m:
+                continue
+            cam = m.group("cam")
+            key = (m.group("clip"), cam, m.group("track"))
+            seen.setdefault(cam, set()).add(key)
+        if seen:
+            people[d.name] = seen
+
+    if not people:
+        print("  nothing on disk yet")
+        return
+    cams = sorted({c for v in people.values() for c in v})
+    print(f"\n  {'person':34s} " + "  ".join(f"{c[:9]:>9s}" for c in cams)
+          + "   both?")
+    both = 0
+    for who in sorted(people, key=lambda k: -sum(len(v) for v in people[k].values())):
+        v = people[who]
+        cells = "  ".join(f"{len(v.get(c, ())):9d}" for c in cams)
+        ok = all(v.get(c) for c in cams)
+        both += ok
+        print(f"  {who[:34]:34s} {cells}   {'yes' if ok else 'NO'}")
+    print(f"\n  {both} of {len(people)} people seen on BOTH cameras; "
+          f"{len(people) - both} on only one")
+    print(f"  {unknown_passes} unrecognised pass(es) in their own folders")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -77,6 +126,17 @@ def main() -> int:
                     help="skip passes that matched nobody")
     ap.add_argument("--jpeg-quality", type=int, default=92)
     ap.add_argument("--limit", type=int, default=0, help="stop after N clips")
+    ap.add_argument("--resume", action="store_true",
+                    help="skip clips already recorded in <out>/_progress.json. "
+                         "A full run is ~an hour; a laptop reboot should not "
+                         "cost all of it.")
+    ap.add_argument("--report-only", action="store_true",
+                    help="rebuild the summary from what is already on disk and "
+                         "exit, without running the pipeline")
+    ap.add_argument("--threshold", type=float, default=None,
+                    help="override the calibrated recognition threshold. Below "
+                         "the calibrated value this WILL admit false accepts - "
+                         "it is a coverage probe, not a configuration change.")
     args = ap.parse_args()
 
     from app.config import settings
@@ -96,7 +156,9 @@ def main() -> int:
         cams = {c.name: config_from_camera(c)
                 for c in s.execute(select(Camera)).scalars()}
 
-    thr = settings.threshold_for(settings.recognizer_model)
+    thr = (args.threshold if args.threshold is not None
+           else settings.threshold_for(settings.recognizer_model))
+    calibrated = settings.threshold_for(settings.recognizer_model)
     clips = sorted(glob.glob(str(ROOT / args.dir / "*" / "*.mp4")))
     if args.limit:
         clips = clips[: args.limit]
@@ -104,8 +166,19 @@ def main() -> int:
         raise SystemExit(f"  no clips under {args.dir}")
     out_root = ROOT / args.out
     out_root.mkdir(parents=True, exist_ok=True)
+    if args.report_only:
+        summarise(out_root)
+        return 0
 
-    print(f"  recognizer {Path(settings.recognizer_model).name}  threshold {thr:.3f}")
+    ledger_path = out_root / "_progress.json"
+    done: set = set()
+    if args.resume and ledger_path.is_file():
+        done = set(json.loads(ledger_path.read_text()).get("clips_done", []))
+        print(f"  resuming: {len(done)} clip(s) already processed")
+
+    print(f"  recognizer {Path(settings.recognizer_model).name}  threshold {thr:.3f}"
+          + ("" if abs(thr - calibrated) < 1e-9 else
+             f"   (CALIBRATED IS {calibrated:.3f} - this run admits false accepts)"))
     print(f"  gallery    {len(gallery)} embeddings / {gallery.n_people} people")
     print(f"  {len(clips)} clip(s) from {args.dir} -> {out_root}")
     print(f"  keeping the top {args.top} body crop(s) per pass\n")
@@ -151,6 +224,8 @@ def main() -> int:
     try:
         for n, path in enumerate(clips, 1):
             cam, clip_stem = Path(path).parent.name, Path(path).stem
+            if clip_stem in done:
+                continue
             if cam not in pipes:
                 p = CameraPipeline(cam, gallery, direction_cfg=cams.get(cam))
                 p.threshold = thr
@@ -192,7 +267,13 @@ def main() -> int:
             for ct in pipe.flush():
                 flush_pass(ct, tops, clip_stem, cam)
 
+            done.add(clip_stem)
             if n % 25 == 0 or n == len(clips):
+                # Checkpointed, not written once at the end: an hour of work
+                # should not evaporate because the machine went to sleep.
+                ledger_path.write_text(json.dumps(
+                    {"dir": args.dir, "threshold": thr,
+                     "clips_done": sorted(done)}, indent=2))
                 # flush=True: stdout is block-buffered when redirected to a
                 # file, so a long run shows nothing at all until it finishes -
                 # which is exactly when progress stops being useful.
@@ -202,18 +283,41 @@ def main() -> int:
     finally:
         settings.save_all_frames = prev_all
 
+    ledger_path.write_text(json.dumps(
+        {"dir": args.dir, "threshold": thr, "clips_done": sorted(done)}, indent=2))
     for who, rows in records.items():
-        (out_root / who / "_passes.json").write_text(
-            json.dumps(rows, indent=2, ensure_ascii=False))
+        f = out_root / who / "_passes.json"
+        prior = json.loads(f.read_text()) if f.is_file() else []
+        f.write_text(json.dumps(prior + rows, indent=2, ensure_ascii=False))
+
+    # Who was seen on WHICH camera. The question a day's crops should answer is
+    # whether the same people appear on both - an entrance without a matching
+    # exit is either a miss or somebody still inside.
+    by_cam: dict = {}
+    for who, rows in records.items():
+        if who.startswith("unknown_t"):
+            continue
+        c = by_cam.setdefault(who, {})
+        for r in rows:
+            c[r["camera"]] = c.get(r["camera"], 0) + 1
 
     known = {k: v for k, v in saved.items() if not k.startswith("unknown_t")}
     unk = {k: v for k, v in saved.items() if k.startswith("unknown_t")}
     print(f"\n  {'=' * 66}")
     print(f"  {n_named}/{n_pass} passes recognised "
           f"({n_named / max(n_pass, 1) * 100:.0f}%)")
-    for who in sorted(known, key=lambda k: -saved[k]):
-        print(f"    {who:38s} {saved[who]:5d} crop(s)  "
-              f"{len(records[who])} pass(es)")
+    cams_seen = sorted({c for v in by_cam.values() for c in v})
+    hdr = "  ".join(f"{c[:9]:>9s}" for c in cams_seen)
+    print(f"    {'person':34s} {hdr}   both?")
+    both = one = 0
+    for who in sorted(by_cam, key=lambda k: -sum(by_cam[k].values())):
+        v = by_cam[who]
+        cells = "  ".join(f"{v.get(c, 0):9d}" for c in cams_seen)
+        ok = all(v.get(c, 0) > 0 for c in cams_seen)
+        both += ok
+        one += not ok
+        print(f"    {who[:34]:34s} {cells}   {'yes' if ok else 'NO'}")
+    print(f"\n    {both} person(s) seen on BOTH cameras, {one} on only one")
     if unk:
         print(f"    {'unknown (one folder per pass)':38s} {sum(unk.values()):5d} "
               f"crop(s)  {len(unk)} pass(es)")
