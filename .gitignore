@@ -96,9 +96,14 @@ media/
 # "contains personal and biometric data" - it must never enter version control.
 face_id_users/
 
-# Model weights: 781 MB of ONNX. Tracked out of band, restored from
-# models/README or the training runs they were exported from.
-models/
+# Model weights. Tracked out of band by default, restored from models/README or
+# the training runs they were exported from.
+#
+# `models/*` rather than `models/`: git cannot re-include a file whose PARENT
+# DIRECTORY is excluded, so an ignored directory would make the exception below
+# impossible. Everything inside stays ignored; the exception is listed at the
+# very end of this section, because the last matching rule wins.
+models/*
 *.onnx
 *.pt
 
@@ -130,3 +135,17 @@ licence.key
 licence*.key
 license*.key
 !**/public*.key
+
+# --- the one model that IS published ----------------------------------------
+# The person-ReID network carries no biometric data and no customer weights: it
+# is a body-appearance model trained on public and in-house pedestrian imagery,
+# and the deployment needs it on a machine that only ever receives `git pull`.
+# Publishing it is what lets the server update without an out-of-band copy.
+#
+# This is LAST on purpose. `models/*`, `*.onnx` and `*.onnx.enc` above all match
+# it, and in gitignore the final matching rule decides.
+#
+# NOTHING ELSE is exempted. The face recognizer, the aligner, the head detector,
+# every `.enc`, every `.pt` and `models/_archive/` stay ignored - those are
+# either customer-encrypted or the fp32 masters that exist nowhere else.
+!models/reid_resnet101_ibn_256x128_e2048_fp16.onnx
