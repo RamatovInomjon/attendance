@@ -11,10 +11,11 @@ from app.web.django_compat import media_path
 
 import logging
 from datetime import date, datetime, timedelta
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote as _quote, urlsplit, urlunsplit
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                               RedirectResponse)
 from sqlalchemy import func, or_, select
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import FormData, UploadFile
@@ -44,6 +45,17 @@ from app.web.django_compat import build_env
 from app.web.viewmodels import DailyVM, EmployeeVM, EventVM, Page
 
 log = logging.getLogger(__name__)
+
+
+def _p(path: str) -> str:
+    """A redirect target carrying the deployment prefix.
+
+    Under /faceid a bare "/gallery/review" resolves against the
+    DOMAIN root, which on the shared host belongs to another
+    project - the same bug that has bitten the media and socket
+    URLs here before.
+    """
+    return f"{settings.url_prefix.rstrip(chr(47))}{path}"
 router = APIRouter(tags=["pages"])
 env = build_env()
 
@@ -975,6 +987,118 @@ def _unknown_activity(s, day: date, limit: int = 30) -> list[dict]:
         "last_seen_label": sighting.last_seen.astimezone(settings.tz).strftime("%H:%M:%S"),
         "snapshot": media_path(sighting.snapshot) if sighting.snapshot else None,
     } for sighting, camera_name in rows]
+
+
+# --------------------------------------------------------------- gallery ----
+# Adding corridor faces to the enrolment gallery. Admin-only, because a
+# mis-added crop becomes a permanent reference for the wrong person and the
+# error compounds silently - see app/services/augment.py.
+#
+# The scan embeds every capture, which takes seconds, so the result is cached
+# in the process and refreshed on demand rather than on every page load.
+_AUGMENT_CACHE: dict = {"candidates": None, "scanned_at": 0.0}
+
+
+def _augment_candidates(refresh: bool = False):
+    import time
+    from app.services import augment
+    if refresh or _AUGMENT_CACHE["candidates"] is None:
+        _AUGMENT_CACHE["candidates"] = augment.scan()
+        _AUGMENT_CACHE["scanned_at"] = time.time()
+    return _AUGMENT_CACHE["candidates"]
+
+
+def _admin_only(request):
+    from app.api.auth import current_user
+    me = current_user(request)
+    return me if me and me.get("adm") else None
+
+
+@router.get("/gallery/review", response_class=HTMLResponse)
+def gallery_review(request: Request, refresh: str = "", msg: str = "",
+                   error: str = ""):
+    from app.services import augment
+    if not _admin_only(request):
+        return HTMLResponse("Admin only", status_code=403)
+    cands = _augment_candidates(refresh=bool(refresh))
+    groups: dict = {}
+    for c in cands:
+        groups.setdefault((c.employee_id, c.name), []).append(c)
+    return render(
+        "gallery/review.html", request=request, current_view="gallery:review",
+        groups=sorted(groups.items(), key=lambda kv: kv[0][1]),
+        total=len(cands), existing=augment.added(),
+        threshold=settings.threshold_for(settings.recognizer_model),
+        scanned_at=_AUGMENT_CACHE["scanned_at"], msg=msg, error=error)
+
+
+@router.get("/gallery/crop/{key}")
+def gallery_crop(request: Request, key: str):
+    """Serve one candidate crop.
+
+    `data/debug` is deliberately NOT under the public media mount - it holds
+    face images of identified people. So this is admin-gated, and the key is
+    resolved through augment.crop_path(), which verifies the resolved file is
+    inside the debug directory. A key is caller input; without that check
+    "../../etc/passwd" reads whatever the service can.
+    """
+    from app.services import augment
+    if not _admin_only(request):
+        return JSONResponse({"detail": "Admin only"}, status_code=403)
+    p = augment.crop_path(key)
+    if p is None:
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    return FileResponse(str(p), media_type="image/jpeg")
+
+
+@router.post("/gallery/augment")
+async def gallery_augment(request: Request):
+    """Add the admin's selection - unless it manufactures a false accept."""
+    from app.services import augment
+    if not _admin_only(request):
+        return JSONResponse({"detail": "Admin only"}, status_code=403)
+    form = await request.form()
+    keys = set(form.getlist("key"))
+    chosen = [c for c in _augment_candidates() if c.key in keys and c.vec is not None]
+    if not chosen:
+        return RedirectResponse(_p("/gallery/review?error=Nothing+selected"),
+                                status_code=303)
+
+    check = augment.check_impostors(chosen)
+    if not check.safe:
+        why = (f"Refused: adding these would make two different people match at "
+               f"{check.after:.3f}, at or above the {check.threshold:.3f} "
+               f"threshold - a false accept. The pair: {check.pair[0]} vs "
+               f"{check.pair[1]}. Deselect the crop of whichever is wrong.")
+        return RedirectResponse(_p("/gallery/review?error=" + _quote(why)),
+                                status_code=303)
+
+    n = augment.add(chosen)
+    _AUGMENT_CACHE["candidates"] = None          # they are in the gallery now
+    try:
+        runtime.reload_gallery()
+    except Exception:
+        log.exception("gallery reload after augment failed")
+    msg = f"Added {n}. Worst impostor pair now {check.after:.3f}."
+    return RedirectResponse(_p("/gallery/review?msg=" + _quote(msg)),
+                            status_code=303)
+
+
+@router.post("/gallery/augment/remove")
+async def gallery_augment_remove(request: Request):
+    from app.services import augment
+    if not _admin_only(request):
+        return JSONResponse({"detail": "Admin only"}, status_code=403)
+    form = await request.form()
+    ids = [int(x) for x in form.getlist("id") if str(x).isdigit()]
+    n = augment.remove(ids)
+    _AUGMENT_CACHE["candidates"] = None
+    try:
+        runtime.reload_gallery()
+    except Exception:
+        log.exception("gallery reload after removal failed")
+    return RedirectResponse(_p("/gallery/review?msg=" + _quote(f"Removed {n}.")),
+                            status_code=303)
 
 
 @router.get("/recognition", response_class=HTMLResponse)

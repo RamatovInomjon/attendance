@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}Galereyani boyitish{% endblock %}
+{% block content %}
+<section class="page-header">
+  <p class="eyebrow mb-2">Admin</p>
+  <h1>Galereyani koridor kadrlari bilan boyitish</h1>
+  <p class="mb-0 text-muted">
+    Ro'yxatdagi suratlar studiya sharoitida olingan; koridor esa boshqacha.
+    Tanigan o'tishlardan olingan kadrni galereyaga qo'shish keyingi safar
+    tanishni osonlashtiradi. <strong>Har bir kadrni ko'rib chiqing:</strong>
+    noto'g'ri kadr o'sha odam uchun doimiy namuna bo'lib qoladi va xato
+    ortib boradi.
+  </p>
+</section>
+
+{% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}
+{% if msg %}<div class="alert alert-success">{{ msg }}</div>{% endif %}
+
+<section class="airi-card mb-4">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <div>
+      <h2 class="h5 mb-1">Nomzodlar: {{ total }}</h2>
+      <small class="text-muted">
+        Tanish chegarasi {{ "%.3f"|format(threshold) }} ·
+        faqat yuqori ball va aniq farqli o'tishlar ko'rsatiladi
+      </small>
+    </div>
+    <a class="btn btn-outline-secondary btn-sm"
+       href="{{ PREFIX }}/gallery/review?refresh=1">Qayta skanerlash</a>
+  </div>
+
+  {% if not groups %}
+    <p class="text-muted mb-0">
+      Hozircha mos nomzod yo'q. Bu odatiy holat: faqat ball yuqori, farqi
+      aniq va ko'p kadrda tasdiqlangan o'tishlar tavsiya etiladi. Bir necha
+      kun ma'lumot to'plangach yana ko'ring.
+    </p>
+  {% else %}
+  <form method="post" action="{{ PREFIX }}/gallery/augment">
+    {% for (emp_id, name), items in groups %}
+      <div class="mb-4">
+        <h3 class="h6 mb-2">{{ name }}</h3>
+        <div class="d-flex flex-wrap gap-3">
+          {% for c in items %}
+          <label class="border rounded p-2 text-center" style="width:150px;cursor:pointer">
+            <img src="{{ PREFIX }}/gallery/crop/{{ c.key }}" alt="{{ name }}"
+                 style="width:112px;height:112px;object-fit:cover" loading="lazy">
+            <div class="small mt-1">
+              ball <strong>{{ "%.3f"|format(c.score) }}</strong><br>
+              farq <strong>{{ "%.3f"|format(c.margin) }}</strong><br>
+              <span class="text-muted">{{ c.camera }} · {{ c.frames }} kadr</span><br>
+              <span class="text-muted" style="font-size:11px">{{ c.when }}</span>
+            </div>
+            <input type="checkbox" name="key" value="{{ c.key }}" class="mt-1">
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+    {% endfor %}
+    <button class="btn btn-primary" type="submit">Tanlanganlarni qo'shish</button>
+    <small class="text-muted d-block mt-2">
+      Qo'shishdan oldin tizim tekshiradi: agar tanlov ikki <em>har xil</em>
+      odamni bir-biriga chegaradan yuqori o'xshatib qo'ysa, qo'shish rad
+      etiladi va qaysi juftlik sabab bo'lgani ko'rsatiladi.
+    </small>
+  </form>
+  {% endif %}
+</section>
+
+<section class="airi-card">
+  <h2 class="h5 mb-3">Qo'shilgan koridor kadrlari: {{ existing|length }}</h2>
+  {% if not existing %}
+    <p class="text-muted mb-0">Hali hech narsa qo'shilmagan.</p>
+  {% else %}
+  <form method="post" action="{{ PREFIX }}/gallery/augment/remove">
+    <div class="d-flex flex-wrap gap-3 mb-3">
+      {% for e in existing %}
+      <label class="border rounded p-2 text-center" style="width:150px;cursor:pointer">
+        <img src="{{ PREFIX }}/gallery/crop/{{ e.key }}" alt="{{ e.name }}"
+             style="width:112px;height:112px;object-fit:cover" loading="lazy">
+        <div class="small mt-1">{{ e.name }}<br>
+          <span class="text-muted">farq {{ "%.3f"|format(e.margin) }}</span></div>
+        <input type="checkbox" name="id" value="{{ e.id }}" class="mt-1">
+      </label>
+      {% endfor %}
+    </div>
+    <button class="btn btn-outline-danger" type="submit">Tanlanganlarni o'chirish</button>
+    <small class="text-muted d-block mt-2">
+      Faqat koridordan qo'shilgan kadrlar o'chiriladi; ro'yxatdan o'tish
+      suratlariga tegilmaydi.
+    </small>
+  </form>
+  {% endif %}
+</section>
+{% endblock %}

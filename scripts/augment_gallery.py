@@ -2,6 +2,7 @@
 """Add live corridor faces to the gallery, so it stops being only ID photos.
 
     python scripts/augment_gallery.py --review          # pick candidates, no writes
+    (or use the web UI: Galereya, admin only - same rules, same refusal)
     python scripts/augment_gallery.py --measure         # what would it do to FAR?
     python scripts/augment_gallery.py --apply
     python scripts/augment_gallery.py --revert          # remove every live entry
