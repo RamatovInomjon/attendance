@@ -32,9 +32,21 @@ class Match:
 
 
 class Gallery:
-    """Immutable snapshot of the enrolment set, rebuilt on change."""
+    """Immutable snapshot of the enrolment set, rebuilt on change.
 
-    def __init__(self, vectors: np.ndarray, employee_ids: np.ndarray, names: dict[int, str]):
+    `thresholds` is a PER-IMAGE acceptance floor, and is the mechanism behind
+    corridor augmentation (app/services/augment.py).  An enrolment photograph
+    is judged against the global threshold and passes 0.0 here.  A crop lifted
+    from the corridor is judged against its own, higher floor: the similarity
+    it was measured to reach against the nearest *other* person, plus a safety
+    margin.  Below that floor the row cannot name anybody, so a live crop is
+    incapable of manufacturing the false accept a single shared threshold would
+    have allowed - while still firing at the lowest similarity that is
+    demonstrably safe for that particular face.
+    """
+
+    def __init__(self, vectors: np.ndarray, employee_ids: np.ndarray,
+                 names: dict[int, str], thresholds: np.ndarray | None = None):
         if len(vectors) == 0:
             self.M = np.zeros((0, 512), dtype=np.float32)
             self.owner = np.zeros((0,), dtype=np.int64)
@@ -56,6 +68,21 @@ class Gallery:
         else:
             self._slot = np.zeros((0,), np.int64)
         self._MT = np.ascontiguousarray(self.M.T)
+        # None when every row is judged against the global threshold, which is
+        # every gallery that has never been augmented. That keeps the matching
+        # hot path byte-for-byte what it was.
+        self._floor = None
+        if thresholds is not None and len(self.M):
+            f = np.nan_to_num(np.asarray(thresholds, dtype=np.float32),
+                              nan=0.0, posinf=0.0, neginf=0.0)
+            if f.shape != (len(self.M),):
+                raise ValueError(
+                    f"thresholds has {f.shape} entries for {len(self.M)} "
+                    f"embeddings - they are positional and must line up")
+            if np.any(f > 0):
+                self._floor = f
+        self._pen: np.ndarray | None = None
+        self._pen_for: float | None = None
 
     def __len__(self):
         return len(self.M)
@@ -87,14 +114,39 @@ class Gallery:
             return Match(int(self._people[top]), top_s, gap, int(self._people[second]))
         return Match(None, top_s, gap, int(self._people[top]))   # near miss
 
-    def _per_person(self, sims: np.ndarray) -> np.ndarray:
+    def _penalty(self, threshold: float) -> np.ndarray:
+        """How much each row's own floor exceeds the global threshold.
+
+        Clamped at zero, so a stored floor can only ever make a row HARDER to
+        match. A row whose floor somehow landed below the global threshold
+        would otherwise become a private back door into the gallery, which is
+        the exact failure this machinery exists to prevent.
+        """
+        if self._pen_for != threshold:
+            self._pen = np.maximum(self._floor - threshold, 0.0).astype(np.float32)
+            self._pen_for = threshold
+        return self._pen
+
+    def _per_person(self, sims: np.ndarray, threshold: float) -> np.ndarray:
         """(..., N images) similarities -> (..., P people) best-image-per-person.
 
         This replaced a Python loop over every enrolment row. The matmul above
         it is microseconds; the loop was ~50x that at 268 images, and it grew
         with the gallery - the one part of matching that does.
+
+        Rows carrying their own floor are shifted DOWN by the amount their
+        floor exceeds the global threshold, so that everything downstream keeps
+        comparing against one number. "row i clears its own floor" and "the
+        shifted score clears the global threshold" are the same statement, and
+        expressing it as a shift means the per-person max and the runner-up
+        margin both rank rows on one calibrated scale instead of comparing a
+        strict row's score with a lenient row's on equal terms.
         """
-        out = np.full(sims.shape[:-1] + (len(self._people),), -2.0, dtype=np.float32)
+        if self._floor is not None:
+            sims = sims - self._penalty(threshold)
+        # -4.0, not -2.0: a shifted score bottoms out at -1 - max(penalty), and
+        # the fill has to stay below anything a real row can produce.
+        out = np.full(sims.shape[:-1] + (len(self._people),), -4.0, dtype=np.float32)
         np.maximum.at(out, (Ellipsis, self._slot), sims)
         return out
 
@@ -104,7 +156,7 @@ class Gallery:
             return Match(None, 0.0, 0.0)
         q = np.asarray(embedding, dtype=np.float32).ravel()
         q = q / (np.linalg.norm(q) + 1e-12)
-        return self._decide(self._per_person(self.M @ q), threshold, margin)
+        return self._decide(self._per_person(self.M @ q, threshold), threshold, margin)
 
     def match_batch(self, embeddings: np.ndarray, threshold: float,
                     margin: float) -> list[Match]:
@@ -117,7 +169,7 @@ class Gallery:
         if len(self.M) == 0:
             return [Match(None, 0.0, 0.0) for _ in range(len(E))]
         E = E / (np.linalg.norm(E, axis=1, keepdims=True) + 1e-12)
-        per = self._per_person(E @ self._MT)           # (K, P)
+        per = self._per_person(E @ self._MT, threshold)           # (K, P)
         return [self._decide(per[i], threshold, margin) for i in range(len(E))]
 
 

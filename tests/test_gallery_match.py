@@ -130,3 +130,110 @@ def test_a_one_person_gallery_has_no_runner_up_to_beat():
     g = Gallery(c[None], np.array([1], np.int64), {1: "Only"})
     m = g.match(c, THR, MAR)
     assert m.employee_id == 1
+
+
+# --- per-row acceptance floors --------------------------------------------
+#
+# A corridor crop added to the gallery does not inherit the global threshold;
+# it carries its own, measured against how close another person already gets to
+# it. See app/services/augment.py for why. These pin the mechanism that makes
+# that a real restriction and not decoration.
+
+def test_a_gallery_with_no_floors_is_untouched():
+    """The overwhelmingly common case - nothing has been augmented - must take
+    the same path and produce the same answers it always did."""
+    rng = np.random.default_rng(21)
+    g, centres = _gallery(rng)
+    zeroed = Gallery(g.M, g.owner, g.names, np.zeros(len(g.M), np.float32))
+    assert zeroed._floor is None
+    for c in centres:
+        a, b = zeroed.match(c, THR, MAR), g.match(c, THR, MAR)
+        assert (a.employee_id, a.runner_up) == (b.employee_id, b.runner_up)
+        assert a.score == pytest.approx(b.score, abs=1e-6)
+        assert a.margin == pytest.approx(b.margin, abs=1e-6)
+
+
+def test_a_row_below_its_own_floor_names_nobody():
+    """The whole point: a query that clears the GLOBAL threshold against a
+    floored row is still refused, because that row is only trusted higher up."""
+    rng = np.random.default_rng(22)
+    a, b, drift = _unit(rng, 3)
+    # ~0.71 against a's row and ~0 against b's: comfortably over THR, with a
+    # clear margin, and under a 0.9 floor. `drift` rather than `b` because a
+    # query halfway between the two people is refused by the margin rule
+    # instead, which would prove nothing about floors.
+    q = a * 0.5 + drift * 0.5
+    q /= np.linalg.norm(q)
+
+    plain = Gallery(np.stack([a, b]), np.array([1, 2], np.int64), {1: "A", 2: "B"})
+    assert plain.match(q, THR, MAR).employee_id == 1
+
+    floored = Gallery(np.stack([a, b]), np.array([1, 2], np.int64), {1: "A", 2: "B"},
+                      np.array([0.90, 0.0], np.float32))
+    assert floored.match(q, THR, MAR).employee_id is None
+
+
+def test_a_row_above_its_own_floor_still_names_its_person():
+    """The floor must not be a wall: clearing it accepts, as an enrolment row
+    clearing the global threshold does."""
+    rng = np.random.default_rng(23)
+    a, b = _unit(rng, 2)
+    g = Gallery(np.stack([a, b]), np.array([1, 2], np.int64), {1: "A", 2: "B"},
+                np.array([0.70, 0.0], np.float32))
+    assert g.match(a, THR, MAR).employee_id == 1        # similarity 1.0
+
+
+def test_a_persons_unfloored_row_still_answers_for_them():
+    """Floors are per IMAGE, so an enrolment photo keeps working even when a
+    corridor crop of the same person is trusted only at 0.7. Augmentation adds;
+    it must never make a person harder to recognise than before."""
+    rng = np.random.default_rng(24)
+    a, b, drift = _unit(rng, 3)
+    live = a * 0.6 + drift * 0.4
+    live /= np.linalg.norm(live)
+    g = Gallery(np.stack([a, live, b]), np.array([1, 1, 2], np.int64),
+                {1: "A", 2: "B"}, np.array([0.0, 0.90, 0.0], np.float32))
+    m = g.match(a, THR, MAR)
+    assert m.employee_id == 1 and m.score == pytest.approx(1.0, abs=1e-5)
+
+
+def test_a_floor_below_the_threshold_cannot_make_a_row_easier():
+    """A stored floor may only ever tighten. Otherwise a row written with a low
+    value would be a private back door past the recognition threshold - the
+    exact failure the floors exist to prevent."""
+    rng = np.random.default_rng(25)
+    a, b = _unit(rng, 2)
+    q = a * 0.3 + b * 0.7            # under THR against a's row
+    q /= np.linalg.norm(q)
+    g = Gallery(np.stack([a, b]), np.array([1, 2], np.int64), {1: "A", 2: "B"},
+                np.array([0.01, 0.0], np.float32))
+    lax = g.match(q, THR, MAR)
+    strict = Gallery(np.stack([a, b]), np.array([1, 2], np.int64),
+                     {1: "A", 2: "B"}).match(q, THR, MAR)
+    assert lax.employee_id == strict.employee_id
+    assert lax.score == pytest.approx(strict.score, abs=1e-6)
+
+
+def test_batched_matching_applies_the_floors_too():
+    """match_batch is the path the pipeline actually uses. A floor honoured
+    only in match() would be honoured only in the tests."""
+    rng = np.random.default_rng(26)
+    a, b, drift = _unit(rng, 3)
+    q = a * 0.5 + drift * 0.5
+    q /= np.linalg.norm(q)
+    g = Gallery(np.stack([a, b]), np.array([1, 2], np.int64), {1: "A", 2: "B"},
+                np.array([0.90, 0.0], np.float32))
+    batch = g.match_batch(np.stack([a, q]), THR, MAR)
+    assert [m.employee_id for m in batch] == [1, None]
+    for i, one in enumerate((g.match(a, THR, MAR), g.match(q, THR, MAR))):
+        assert batch[i].employee_id == one.employee_id
+        assert batch[i].score == pytest.approx(one.score, abs=1e-5)
+
+
+def test_a_mismatched_floor_array_is_refused():
+    """The floors are POSITIONAL. Silently accepting the wrong length would
+    apply one row's floor to another - wrong in a way nothing would reveal."""
+    rng = np.random.default_rng(27)
+    v = _unit(rng, 4)
+    with pytest.raises(ValueError, match="positional"):
+        Gallery(v, np.array([1, 1, 2, 2], np.int64), {}, np.zeros(3, np.float32))

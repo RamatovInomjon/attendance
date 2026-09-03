@@ -601,7 +601,7 @@ def load_gallery(strict: bool = True) -> Gallery:
         rows = s.execute(
             select(FaceEmbedding.employee_id, FaceEmbedding.vector,
                    Employee.full_name, Employee.is_active,
-                   FaceEmbedding.model_name)
+                   FaceEmbedding.model_name, FaceEmbedding.threshold)
             .join(Employee, Employee.id == FaceEmbedding.employee_id)
             .where(Employee.is_active.is_(True))
         ).all()
@@ -624,4 +624,7 @@ def load_gallery(strict: bool = True) -> Gallery:
     vecs = np.stack([np.frombuffer(r[1], dtype=np.float32) for r in rows])
     owners = np.array([r[0] for r in rows], dtype=np.int64)
     names = {int(r[0]): r[2] for r in rows}
-    return Gallery(vecs, owners, names)
+    # 0.0 where a row has no floor of its own; Gallery reads that as "judge
+    # this one against the global threshold", which is every enrolment photo.
+    floors = np.array([float(r[5] or 0.0) for r in rows], dtype=np.float32)
+    return Gallery(vecs, owners, names, floors)

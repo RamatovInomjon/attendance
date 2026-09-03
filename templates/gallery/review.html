@@ -16,6 +16,23 @@
 {% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}
 {% if msg %}<div class="alert alert-success">{{ msg }}</div>{% endif %}
 
+{% if gallery and gallery.gallery_unsafe %}
+<div class="alert alert-warning">
+  <strong>Ro'yxatdagi suratlarning o'zida muammo bor.</strong>
+  Ikki <em>har xil</em> xodimning ro'yxat suratlari bir-biriga
+  {{ "%.3f"|format(gallery.before) }} darajada o'xshaydi &mdash; bu
+  {{ "%.3f"|format(gallery.threshold) }} chegarasidan yuqori:
+  <div class="small mt-1">
+    {{ gallery.pre_existing[0] }}<br>{{ gallery.pre_existing[1] }}
+  </div>
+  <div class="small mt-1">
+    Bu koridor kadrlaridan kelib chiqmagan va ularni qo'shish bilan
+    tuzalmaydi &mdash; o'sha ikki kishidan birini qayta ro'yxatdan
+    o'tkazish kerak. Shuning uchun bu yerda qo'shishga to'sqinlik qilmaydi.
+  </div>
+</div>
+{% endif %}
+
 <section class="airi-card mb-4">
   <div class="d-flex justify-content-between align-items-center mb-3">
     <div>
@@ -48,6 +65,7 @@
             <div class="small mt-1">
               ball <strong>{{ "%.3f"|format(c.score) }}</strong><br>
               farq <strong>{{ "%.3f"|format(c.margin) }}</strong><br>
+              chegara <strong>{{ "%.3f"|format(c.threshold) }}</strong><br>
               <span class="text-muted">{{ c.camera }} · {{ c.frames }} kadr</span><br>
               <span class="text-muted" style="font-size:11px">{{ c.when }}</span>
             </div>
@@ -59,9 +77,13 @@
     {% endfor %}
     <button class="btn btn-primary" type="submit">Tanlanganlarni qo'shish</button>
     <small class="text-muted d-block mt-2">
-      Qo'shishdan oldin tizim tekshiradi: agar tanlov ikki <em>har xil</em>
-      odamni bir-biriga chegaradan yuqori o'xshatib qo'ysa, qo'shish rad
-      etiladi va qaysi juftlik sabab bo'lgani ko'rsatiladi.
+      Har bir kadr <strong>o'z chegarasi</strong> bilan qo'shiladi: u boshqa
+      odamning suratlariga qanchalik o'xshasa, chegarasi shunchalik yuqori
+      bo'ladi. Chegaradan past ballda kadr hech kimni ataymaydi, shuning uchun
+      qo'shilgan kadr xato tanishni keltirib chiqara olmaydi. Umumiy chegara
+      {{ "%.3f"|format(threshold) }}; undan yuqori chegara faqat o'sha kadrga
+      tegishli. Xavfsiz chegarasi juda yuqori chiqadigan kadr (boshqa odamga
+      juda o'xshash) qo'shilmaydi va qaysi odam sabab bo'lgani aytiladi.
     </small>
   </form>
   {% endif %}
@@ -79,7 +101,10 @@
         <img src="{{ PREFIX }}/gallery/crop/{{ e.key }}" alt="{{ e.name }}"
              style="width:112px;height:112px;object-fit:cover" loading="lazy">
         <div class="small mt-1">{{ e.name }}<br>
-          <span class="text-muted">farq {{ "%.3f"|format(e.margin) }}</span></div>
+          <span class="text-muted">farq {{ "%.3f"|format(e.margin) }}</span><br>
+          <span class="{{ 'text-danger' if e.dead else 'text-muted' }}">
+            chegara {{ "%.3f"|format(e.threshold) }}
+            {%- if e.dead %} · ishlamaydi{% endif %}</span></div>
         <input type="checkbox" name="id" value="{{ e.id }}" class="mt-1">
       </label>
       {% endfor %}

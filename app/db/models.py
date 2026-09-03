@@ -108,6 +108,12 @@ class FaceEmbedding(Base):
     dim = Column(Integer, default=512)
     model_name = Column(String(128))
     quality = Column(Float, default=0.0)              # aligner face score
+    # Per-image acceptance floor. NULL for enrolment photography, which is
+    # judged against the global recognition threshold. A corridor crop added
+    # through app/services/augment.py stores its own, measured floor here so it
+    # cannot name anybody at a similarity another person is already known to
+    # reach against it. See Gallery.__init__.
+    threshold = Column(Float)
     created_at = Column(UtcDateTime(), default=utcnow)
 
     employee = relationship("Employee", back_populates="embeddings")

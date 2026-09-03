@@ -6,6 +6,7 @@
     python scripts/augment_gallery.py --measure         # what would it do to FAR?
     python scripts/augment_gallery.py --apply
     python scripts/augment_gallery.py --revert          # remove every live entry
+    python scripts/augment_gallery.py --recalibrate     # refresh existing floors
 
 THE PROBLEM THIS SOLVES
 -----------------------
@@ -32,11 +33,15 @@ So candidates must clear all of:
   * a similarity ceiling against what is already stored, so twenty frames of
     one walk do not become twenty near-identical vectors that outvote the rest
 
-And after selection, `--measure` re-runs the gallery separation with the
-candidates included and REFUSES to apply if the worst impostor pair moves above
-the recognition threshold. That check is the point: augmentation is supposed to
-raise genuine scores without raising impostor scores, and if it does the latter
-the additions are wrong.
+And then every surviving crop is given its OWN acceptance floor, just above the
+highest similarity any other person's vector reaches against it. It cannot name
+anybody below that floor, so it cannot manufacture a false accept against any
+face we have measured - and because the floor is the lowest value with that
+property, it still fires at the weakest similarity that is defensible.
+
+This script is a thin front end. The rules live in `app/services/augment.py`,
+which the web UI calls too, so the CLI and the UI cannot drift apart - the
+previous version reimplemented all of it and had already drifted.
 
 Everything added is tagged `live:` in `source_file`, so `--revert` removes
 exactly these and leaves the enrolment untouched.
@@ -44,53 +49,18 @@ exactly these and leaves the enrolment untouched.
 from __future__ import annotations
 
 import argparse
-import json
 import shutil
 import sys
 from collections import defaultdict
 from pathlib import Path
 
-import numpy as np
-
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-
-TAG = "live:"
-
-
-def candidates(debug_dir: Path, min_score, min_margin, min_frames, min_aligner):
-    """Every recognised pass that is a defensible reference for its identity."""
-    out = []
-    for meta_f in sorted(debug_dir.rglob("*.json")):
-        try:
-            m = json.loads(meta_f.read_text())
-        except Exception:
-            continue
-        aligned = meta_f.with_name(meta_f.stem + "_aligned.jpg")
-        if not aligned.is_file() or m.get("employee_id") is None:
-            continue
-        q = m.get("quality") or {}
-        why = []
-        if float(m.get("score", 0)) < min_score:
-            why.append(f"score {m.get('score', 0):.3f}")
-        if int(m.get("embedded_frames", 0)) < min_frames:
-            why.append(f"frames {m.get('embedded_frames', 0)}")
-        if float(q.get("aligner_score", 0)) < min_aligner:
-            why.append(f"aligner {q.get('aligner_score', 0):.2f}")
-        if q.get("gate") not in (None, "PASS"):
-            why.append(f"gate {q.get('gate')}")
-        out.append({"meta": m, "aligned": aligned, "rejected": why,
-                    "employee_id": int(m["employee_id"]),
-                    "name": m.get("name", ""), "score": float(m.get("score", 0)),
-                    "margin": float(m.get("margin", 0)),
-                    "camera": m.get("camera", ""), "key": meta_f.stem})
-    return out
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--debug-dir", default=None, help="default: settings.debug_dir")
     ap.add_argument("--min-score", type=float, default=None,
                     help="default: 1.5x the recognition threshold")
     ap.add_argument("--min-margin", type=float, default=0.10,
@@ -106,198 +76,109 @@ def main() -> int:
     ap.add_argument("--measure", action="store_true")
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--revert", action="store_true")
+    ap.add_argument("--recalibrate", action="store_true",
+                    help="recompute the floors of the live rows already stored")
+    ap.add_argument("--show-rejected", action="store_true")
     ap.add_argument("--out", default="data/gallery_candidates")
     args = ap.parse_args()
 
-    import cv2
-    from sqlalchemy import delete, func, select
     from app.config import settings
     from app.core.onnx_env import preload_cuda_libs
-    from app.db.models import Employee, FaceEmbedding
-    from app.db.session import session_scope
+    from app.services import augment
 
     thr = settings.threshold_for(settings.recognizer_model)
-    min_score = args.min_score if args.min_score is not None else thr * 1.5
 
-    # ---- revert -------------------------------------------------------
     if args.revert:
-        with session_scope() as s:
-            n = s.execute(select(func.count()).select_from(FaceEmbedding)
-                          .where(FaceEmbedding.source_file.like(f"{TAG}%"))).scalar()
-            if args.apply:
-                s.execute(delete(FaceEmbedding)
-                          .where(FaceEmbedding.source_file.like(f"{TAG}%")))
-                print(f"  removed {n} live embedding(s); enrolment untouched")
-            else:
-                print(f"  {n} live embedding(s) would be removed. Add --apply.")
+        existing = augment.added()
+        if not args.apply:
+            print(f"  {len(existing)} live embedding(s) would be removed. Add --apply.")
+            return 0
+        n = augment.remove([e["id"] for e in existing])
+        print(f"  removed {n} live embedding(s); enrolment untouched")
+        return 0
+
+    if args.recalibrate:
+        n = augment.recalibrate()
+        print(f"  refreshed the floor on {n} live embedding(s)")
+        for e in augment.added():
+            flag = "  NEVER FIRES" if e["dead"] else ""
+            print(f"    {e['name'][:28]:28s} floor {e['threshold']:.3f}{flag}")
         return 0
 
     preload_cuda_libs()
-    from app.core.recognizer import FaceRecognizer
-    from app.core.geometry import to_normalized_chw
+    cands = augment.scan(
+        min_score=args.min_score, min_margin=args.min_margin,
+        min_frames=args.min_frames, min_aligner=args.min_aligner,
+        max_per_person=args.max_per_person, max_similarity=args.max_similarity,
+        include_rejected=args.show_rejected)
+    offered = [c for c in cands if not c.rejected]
 
-    debug_dir = Path(args.debug_dir) if args.debug_dir else settings.debug_dir
-    if not debug_dir.is_dir():
-        raise SystemExit(f"  no captures at {debug_dir} (is debug_capture on?)")
-
-    cands = candidates(debug_dir, min_score, args.min_margin,
-                       args.min_frames, args.min_aligner)
-    kept_pool = [c for c in cands if not c["rejected"]]
-    print(f"  recognised passes on disk : {len(cands)}")
-    print(f"  clearing every gate       : {len(kept_pool)}")
-    print(f"    score >= {min_score:.3f}  margin >= {args.min_margin:.2f}  "
-          f"frames >= {args.min_frames}  aligner >= {args.min_aligner:.2f}")
-    if not kept_pool:
+    print(f"  candidates offered : {len(offered)}")
+    print(f"    score >= {(args.min_score or thr * 1.5):.3f}  "
+          f"margin >= {args.min_margin:.2f}  frames >= {args.min_frames}  "
+          f"aligner >= {args.min_aligner:.2f}")
+    if args.show_rejected:
+        for c in cands:
+            if c.rejected:
+                print(f"    - {c.name[:24]:24s} {c.key[:28]:28s} {c.rejected}")
+    if not offered:
         print("\n  Nothing qualifies. Either the thresholds are too strict for this\n"
               "  data, or margin is 0.0 throughout - captures written before the\n"
               "  margin fix carry no runner-up distance and cannot be judged.")
         return 1
 
-    rec = FaceRecognizer(settings.model_path(settings.recognizer_model),
-                         batch_size=settings.embed_batch)
-
-    # ---- embed, then thin within each identity ------------------------
     by_person = defaultdict(list)
-    for c in kept_pool:
-        by_person[c["employee_id"]].append(c)
+    for c in offered:
+        by_person[c.employee_id].append(c)
+    print()
+    for emp, group in sorted(by_person.items(), key=lambda kv: kv[1][0].name):
+        floors = ", ".join(f"{c.threshold:.3f}" for c in group)
+        print(f"    {group[0].name[:28]:28s} +{len(group)}   floors {floors}")
 
-    from app.services.enrollment import load_gallery
-    gal = load_gallery()
-
-    chosen = []
-    for emp, group in by_person.items():
-        group.sort(key=lambda c: -c["score"])
-        keep: list = []
-        for c in group:
-            if len(keep) >= args.max_per_person:
-                break
-            img = cv2.imread(str(c["aligned"]))
-            if img is None:
-                continue
-            # debug_capture upscales the recognizer's 112x112 to 224 for human
-            # viewing, so it has to come back down. Verified over 250 captures:
-            # every one still matches its own person best, worst impostor 0.171
-            # against a 0.215 threshold.
-            if img.shape[0] != 112 or img.shape[1] != 112:
-                img = cv2.resize(img, (112, 112), interpolation=cv2.INTER_AREA)
-            v = rec.embed(to_normalized_chw(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))[None])[0]
-
-            # The margin that matters is measured HERE, against the live
-            # gallery: how far this face sits from the nearest OTHER person.
-            # The stored value cannot be used - captures written before the
-            # margin fix all carry 0.0, which would reject the entire history.
-            sims = gal.M @ v
-            own = float(sims[gal.owner == emp].max()) if (gal.owner == emp).any() else -1.0
-            others = sims[gal.owner != emp]
-            best_other = float(others.max()) if others.size else -1.0
-            c["own"], c["other"] = own, best_other
-            c["computed_margin"] = own - best_other
-            if own <= best_other:
-                continue          # it resembles somebody else more; not a reference
-            if c["computed_margin"] < args.min_margin:
-                continue
-            # Twenty frames of one walk are twenty near-identical vectors; they
-            # would outvote the enrolment photos without adding information.
-            if any(float(v @ k["vec"]) > args.max_similarity for k in keep):
-                continue
-            c["vec"] = v
-            keep.append(c)
-        chosen += keep
-
-    print(f"  after per-person thinning : {len(chosen)} "
-          f"across {len(by_person)} person(s)\n")
-    for emp, group in sorted(by_person.items()):
-        n = sum(1 for c in chosen if c["employee_id"] == emp)
-        if n:
-            print(f"    {group[0]['name'][:30]:30s} +{n}")
-
-    # ---- review folder ------------------------------------------------
     if args.review:
         out = ROOT / args.out
         shutil.rmtree(out, ignore_errors=True)
-        for c in chosen:
-            d = out / f"{c['employee_id']:03d}_{c['name'].replace(' ', '_')}"
+        for c in offered:
+            d = out / f"{c.employee_id:03d}_{c.name.replace(' ', '_')}"
             d.mkdir(parents=True, exist_ok=True)
-            shutil.copy(c["aligned"],
-                        d / f"s{c['score']:.3f}_m{c['computed_margin']:.3f}_"
-                            f"{c['camera']}.jpg")
-            face = c["aligned"].with_name(c["aligned"].name.replace("_aligned", "_face"))
-            if face.is_file():
-                shutil.copy(face, d / f"s{c['score']:.3f}_native.jpg")
-        print(f"\n  wrote {len(chosen)} candidate(s) to {out}")
+            src = augment.crop_path(c.key)
+            if src is not None:
+                shutil.copy(src, d / f"s{c.score:.3f}_m{c.margin:.3f}_"
+                                     f"t{c.threshold:.3f}_{c.camera}.jpg")
+        print(f"\n  wrote {len(offered)} candidate(s) to {out}")
         print("  LOOK AT THEM. Any crop that is not the named person poisons that")
         print("  identity permanently, and the error compounds. Delete any that are")
         print("  wrong, then re-run with --measure.")
         return 0
 
-    # ---- the safety check ---------------------------------------------
-    with session_scope() as s:
-        rows = s.execute(
-            select(FaceEmbedding.employee_id, FaceEmbedding.vector)).all()
-        names = dict(s.execute(select(Employee.id, Employee.full_name)).all())
-    M = np.stack([np.frombuffer(r[1], np.float32) for r in rows])
-    M /= np.linalg.norm(M, axis=1, keepdims=True) + 1e-12
-    owner = np.array([r[0] for r in rows])
+    check = augment.check_impostors(offered)
+    print(f"\n  recognition threshold            {check.threshold:.4f}")
+    print(f"  gallery's own worst pair         {check.before:.4f}")
+    if check.gallery_unsafe and check.pre_existing:
+        print("    ^ ALREADY at or above the threshold, and NOT caused by this:")
+        print(f"      {check.pre_existing[0]}")
+        print(f"      {check.pre_existing[1]}")
+        print("      Two enrolled people this close is a live false-accept risk.")
+        print("      Only re-enrolling one of them fixes it; augmentation cannot,")
+        print("      and no longer refuses on account of it.")
+    print(f"  worst the selection can reach    {check.after:.4f}  "
+          f"(after each crop's own floor)")
+    for name, when, floor in check.unusable:
+        print(f"    REJECTED {name} ({when}): needs floor {floor:.3f}")
 
-    def worst_impostor(mat, own, labels=None):
-        """Highest similarity between vectors belonging to DIFFERENT people.
+    if not check.safe:
+        print("\n  REFUSED: the crops listed above cannot be given a floor that is")
+        print("  both safe and usable - they sit too close to another person.")
+        print("  Deselect them; the rest of the selection is unaffected.")
+        return 1
+    print("  SAFE: no crop can name anybody at a similarity another person reaches.")
 
-        Returns the value and, when `labels` is given, which pair produced it -
-        because "something is wrong" is not actionable and "these two faces,
-        this candidate" is.
-        """
-        sim = mat @ mat.T
-        np.fill_diagonal(sim, -1)
-        cross = own[:, None] != own[None, :]
-        masked = np.where(cross, sim, -1)
-        i, j = np.unravel_index(int(masked.argmax()), masked.shape)
-        val = float(masked[i, j])
-        if labels is None:
-            return val
-        return val, (labels[i], labels[j])
-
-    before = worst_impostor(M, owner)
-    M2 = np.vstack([M, np.stack([c["vec"] for c in chosen])])
-    o2 = np.concatenate([owner, np.array([c["employee_id"] for c in chosen])])
-    labels = ([f"enrolment  {names.get(int(e), e)}" for e in owner]
-              + [f"CANDIDATE  {names.get(c['employee_id'], c['employee_id'])}"
-                 f"  ({c['key']}, own {c['own']:.3f} margin {c['computed_margin']:.3f})"
-                 for c in chosen])
-    after, pair = worst_impostor(M2, o2, labels)
-
-    print(f"\n  worst impostor pair  before {before:.4f}   after {after:.4f}"
-          f"   ({after - before:+.4f})")
-    print(f"  recognition threshold      {thr:.4f}")
-    safe = after < thr
-    if safe:
-        print("  SAFE: the worst impostor stays below the threshold")
-    else:
-        print("  REFUSED: augmenting pushes two DIFFERENT people to or above the")
-        print("  threshold, which manufactures a false accept. The pair is:")
-        print(f"    {pair[0]}")
-        print(f"    {pair[1]}")
-        print("  If one of those is a CANDIDATE, look at its crop in the review")
-        print("  folder: either it is a mis-recognition being fed back, or those")
-        print("  two people genuinely look alike and neither should be added.")
-        print("  Delete it and re-run, or raise --min-margin.")
-    if not safe or args.measure or not args.apply:
-        if args.apply and not safe:
-            return 1
-        if not args.apply:
-            print("\n  Nothing written. Add --apply.")
+    if args.measure or not args.apply:
+        print("\n  Nothing written. Add --apply.")
         return 0
 
-    with session_scope() as s:
-        for c in chosen:
-            s.add(FaceEmbedding(
-                employee_id=c["employee_id"],
-                source_file=f"{TAG}{c['key']}",
-                vector=c["vec"].astype(np.float32).tobytes(),
-                dim=int(c["vec"].shape[0]),
-                model_name=settings.recognizer_model,
-                quality=float(c["computed_margin"]),
-            ))
-    print(f"\n  added {len(chosen)} live embedding(s), tagged '{TAG}'")
+    n = augment.add(offered)
+    print(f"\n  added {n} live embedding(s), tagged '{augment.TAG}', each with its floor")
     print("  Reload the gallery (POST /api/gallery/reload) or restart.")
     print("  Undo with: python scripts/augment_gallery.py --revert --apply")
     return 0

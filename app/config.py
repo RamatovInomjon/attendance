@@ -348,6 +348,32 @@ class Settings(BaseSettings):
         "adaface_ir101_finetune.onnx": 0.215,
     }
 
+    # -- augmentation: per-crop acceptance floors ----------------------------
+    # A corridor crop added to the gallery does NOT inherit the global
+    # threshold. It is measured against every other person's vectors we hold -
+    # enrolment photographs and other people's corridor crops alike - and gets
+    # its own floor just above the worst of them. Below that floor the crop
+    # cannot name anybody, so its false-accept rate against everything we have
+    # ever seen is zero BY CONSTRUCTION rather than by hoping the global
+    # threshold happens to cover it.
+    #
+    # This replaced an all-or-nothing gate that refused the whole selection
+    # whenever the gallery's worst pair reached the threshold. That pair was
+    # two ENROLMENT photographs - Narmatov/Qo'shmatov at 0.202 locally, 0.208 on
+    # the server against a 0.190 threshold - so the gate was permanently shut by
+    # a defect no selection could fix, while blaming whichever crop was chosen.
+    #
+    # The margin is the only guess here: it covers impostors we have not seen
+    # yet. Raise it to be stricter at the cost of the crop firing less often;
+    # the crop's own floor is reported in the review page either way.
+    augment_threshold_margin: float = 0.02
+    # A crop needing a floor above this is not refused for being dangerous - it
+    # is refused for being useless. Two corridor crops of the same person under
+    # the same lighting land far above this, so a crop that must clear it to be
+    # safe would essentially never fire, and would sit in the gallery looking
+    # like coverage it does not provide.
+    augment_max_threshold: float = 0.60
+
     vote_consensus: float = 0.65
     vote_min_recognitions: int = 5
 

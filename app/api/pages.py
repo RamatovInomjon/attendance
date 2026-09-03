@@ -1020,14 +1020,19 @@ def gallery_review(request: Request, refresh: str = "", msg: str = "",
     from app.services import augment
     if not _admin_only(request):
         return HTMLResponse("Admin only", status_code=403)
-    cands = _augment_candidates(refresh=bool(refresh))
+    cands = [c for c in _augment_candidates(refresh=bool(refresh))
+             if not c.rejected]
     groups: dict = {}
     for c in cands:
         groups.setdefault((c.employee_id, c.name), []).append(c)
+    # Measured with an empty selection: this reports the ENROLMENT set's own
+    # worst pair, which augmentation neither causes nor cures. It used to block
+    # every addition; now it is shown for what it is.
+    gallery = augment.check_impostors([])
     return render(
         "gallery/review.html", request=request, current_view="gallery:review",
         groups=sorted(groups.items(), key=lambda kv: kv[0][1]),
-        total=len(cands), existing=augment.added(),
+        total=len(cands), existing=augment.added(), gallery=gallery,
         threshold=settings.threshold_for(settings.recognizer_model),
         scanned_at=_AUGMENT_CACHE["scanned_at"], msg=msg, error=error)
 
@@ -1059,17 +1064,23 @@ async def gallery_augment(request: Request):
         return JSONResponse({"detail": "Admin only"}, status_code=403)
     form = await request.form()
     keys = set(form.getlist("key"))
-    chosen = [c for c in _augment_candidates() if c.key in keys and c.vec is not None]
+    chosen = [c for c in _augment_candidates()
+              if c.key in keys and c.vec is not None and not c.rejected]
     if not chosen:
         return RedirectResponse(_p("/gallery/review?error=Nothing+selected"),
                                 status_code=303)
 
     check = augment.check_impostors(chosen)
     if not check.safe:
-        why = (f"Refused: adding these would make two different people match at "
-               f"{check.after:.3f}, at or above the {check.threshold:.3f} "
-               f"threshold - a false accept. The pair: {check.pair[0]} vs "
-               f"{check.pair[1]}. Deselect the crop of whichever is wrong.")
+        # Per crop, and it names who each one collides with. The old message
+        # reported the gallery's worst pair - two enrolment photographs that no
+        # selection could change - and told the admin to deselect one of them.
+        listed = "; ".join(f"{name} ({when}) needs floor {floor:.3f}"
+                           for name, when, floor in check.unusable)
+        why = (f"Refused {len(check.unusable)} crop(s): they sit too close to "
+               f"another person to be given a floor that is both safe and "
+               f"usable (limit {settings.augment_max_threshold:.2f}). {listed}. "
+               f"Deselect them; the rest of the selection is fine.")
         return RedirectResponse(_p("/gallery/review?error=" + _quote(why)),
                                 status_code=303)
 
@@ -1079,7 +1090,11 @@ async def gallery_augment(request: Request):
         runtime.reload_gallery()
     except Exception:
         log.exception("gallery reload after augment failed")
-    msg = f"Added {n}. Worst impostor pair now {check.after:.3f}."
+    floors = ", ".join(f"{c.name.split()[0]} {c.threshold:.3f}" for c in chosen)
+    msg = (f"Added {n}, each with its own acceptance floor ({floors}). "
+           f"Below its floor a crop cannot name anybody, so the highest another "
+           f"person can reach through them is {check.after:.3f} against a "
+           f"{check.threshold:.3f} threshold.")
     return RedirectResponse(_p("/gallery/review?msg=" + _quote(msg)),
                             status_code=303)
 

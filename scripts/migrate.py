@@ -45,6 +45,11 @@ ADDITIONS = {
         ("direction", "VARCHAR(16) DEFAULT 'UNKNOWN'"),
         ("direction_reason", "VARCHAR(96) DEFAULT ''"),
     ],
+    # NULL, not a default: an enrolment photograph has no floor of its own and
+    # is judged against the global threshold. Only augmented corridor crops
+    # carry a value, so backfilling one here would silently re-threshold the
+    # whole gallery.
+    "face_embedding": [("threshold", "FLOAT")],
 }
 
 # (name, table, columns) - created if absent.
