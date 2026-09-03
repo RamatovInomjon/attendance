@@ -1,5 +1,23 @@
 # Deployment
 
+## Restarting an existing install
+
+```bash
+./scripts/restart.sh            # stop, migrate, pre-flight, start, verify
+./scripts/restart.sh --status   # what is running, changes nothing
+./scripts/restart.sh --stop
+```
+
+Prefer it over stopping and starting by hand. It finds the process by its
+working directory rather than by a command pattern (`pkill -f scripts/run.py`
+has killed an SSH session outright), proves the stop before it starts anything
+(a worker blocked on an RTSP read ignores SIGTERM, and two processes on the same
+cameras and database look healthy), clears the `__pycache__` that otherwise
+shadows a freshly deployed `.so`, and checks the CUDA provider and the
+gallery/recognizer pairing before the cameras go down rather than after.
+
+## First install, under systemd
+
 ```bash
 sudo mkdir -p /var/log/ematsy && sudo chown inomjon /var/log/ematsy
 sudo cp deploy/ematsy*.service deploy/ematsy*.timer /etc/systemd/system/
