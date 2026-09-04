@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}{{ employee.name }} · {{ day }}{% endblock %}
+{% block content %}
+<section class="page-header">
+  <p class="eyebrow mb-2">Kun bo'yicha hodisalar</p>
+  <h1 class="mb-1">{{ employee.name }}</h1>
+  <p class="mb-0 text-muted">{{ day }}{% if employee.department %} · {{ employee.department }}{% endif %}</p>
+</section>
+
+{% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}
+{% if msg %}<div class="alert alert-success">{{ msg }}</div>{% endif %}
+
+{% if summary %}
+<section class="airi-card mb-4">
+  <div class="d-flex flex-wrap gap-4">
+    <div><div class="text-muted small">Kelgan</div><strong class="fs-5">{{ summary.check_in or "—" }}</strong></div>
+    <div><div class="text-muted small">Ketgan</div><strong class="fs-5">{{ summary.check_out or "—" }}</strong></div>
+    <div><div class="text-muted small">Ish vaqti</div><strong class="fs-5">{{ summary.worked }} soat</strong></div>
+    <div><div class="text-muted small">Holat</div><strong class="fs-5">{{ summary.status }}</strong></div>
+  </div>
+  <p class="text-muted small mb-0 mt-2">
+    Bu qatorlar hodisalardan <em>hisoblab chiqariladi</em>. Noto'g'ri hodisa
+    bekor qilinsa, kun qaytadan hisoblanadi &mdash; keyingi ko'rilish kerak
+    bo'lsa kelish yoki ketish vaqtiga aylanadi.
+  </p>
+</section>
+{% endif %}
+
+<section class="airi-card">
+  <h2 class="h5 mb-3">Hodisalar: {{ events|length }}</h2>
+  {% if not events %}
+    <p class="text-muted mb-0">Bu kunda hodisa yo'q.</p>
+  {% else %}
+  <div class="vstack gap-3">
+    {% for e in events %}
+    <article class="border rounded p-3 {% if e.voided %}opacity-50{% endif %}">
+      <div class="d-flex flex-wrap gap-3 align-items-start">
+        {% if e.stem %}
+        <button class="border-0 bg-transparent p-0" type="button" data-airi-evidence
+                data-evidence-src="{{ PREFIX }}/attendance/event/{{ e.id }}/evidence/frame"
+                data-evidence-title="{{ employee.name }} · {{ e.time }}"
+                data-evidence-subtitle="{{ e.camera }} · ball {{ '%.3f'|format(e.score) }}">
+          <img src="{{ PREFIX }}/attendance/event/{{ e.id }}/evidence/face"
+               alt="Tanilgan yuz" loading="lazy"
+               style="width:96px;height:96px;object-fit:cover;border-radius:8px">
+        </button>
+        {% endif %}
+        {% if e.snapshot %}
+        <img src="{{ e.snapshot }}" alt="Gavda" loading="lazy"
+             style="width:72px;height:96px;object-fit:cover;border-radius:8px">
+        {% endif %}
+        <div class="flex-grow-1 min-w-0">
+          <div class="d-flex flex-wrap gap-2 align-items-center">
+            <strong class="fs-5">{{ e.time }}</strong>
+            <span class="status-chip {% if e.transition == 'CHECK_IN' %}status-chip--success{% elif e.transition == 'CHECK_OUT' %}status-chip--warning{% else %}{% endif %}">{{ e.transition or e.role }}</span>
+            <span class="text-muted small">{{ e.camera }} · {{ e.direction }}</span>
+          </div>
+          <div class="small text-muted mt-1">
+            ball <strong>{{ "%.3f"|format(e.score) }}</strong> ·
+            farq <strong>{{ "%.3f"|format(e.margin) }}</strong>
+            {% if e.votes %} · {{ e.votes }}{% endif %}
+            {% if not e.stem %} · <span class="fst-italic">yuz kadri saqlanmagan</span>{% endif %}
+          </div>
+          {% if e.voided %}
+          <div class="text-danger small mt-1">
+            Bekor qilingan{% if e.voided_by %} · {{ e.voided_by }}{% endif %}{% if e.void_reason %} · {{ e.void_reason }}{% endif %}
+          </div>
+          {% endif %}
+        </div>
+        {% if is_admin %}
+        <form method="post" class="ms-auto"
+              action="{{ PREFIX }}/attendance/event/{{ e.id }}/{{ 'unvoid' if e.voided else 'void' }}"
+              {% if not e.voided %}onsubmit="return confirm('Bu {{ employee.name }} emasmi? Kun qaytadan hisoblanadi.')"{% endif %}>
+          <input type="hidden" name="next" value="{{ PREFIX }}/attendance/day/{{ employee.id }}/{{ day }}">
+          {% if not e.voided %}<input type="hidden" name="reason" value="admin: boshqa odam"><input type="hidden" name="reason_hint" value="">{% endif %}
+          <button class="btn btn-sm {{ 'btn-outline-secondary' if e.voided else 'btn-outline-danger' }}" type="submit">
+            {{ "Qaytarish" if e.voided else "Bu u emas" }}
+          </button>
+        </form>
+        {% endif %}
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% if is_admin %}
+  <p class="text-muted small mb-0 mt-3">
+    Bekor qilingan hodisa <strong>o'chirilmaydi</strong> &mdash; kim va nima
+    uchun bekor qilgani bilan qoladi, chunki xato ham yozuvning bir qismi va
+    chegaralarni to'g'rilash uchun kerak. Agar o'sha kadr galereyaga
+    qo'shilgan bo'lsa, u ham olib tashlanadi.
+  </p>
+  {% endif %}
+</section>
+{% endblock %}

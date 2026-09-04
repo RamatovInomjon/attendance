@@ -37,7 +37,11 @@ from datetime import datetime, timezone
 from sqlalchemy import delete, select
 
 from app.config import settings
-from app.db.models import Employee, FaceEmbedding, RecognitionEvent, UnknownSighting
+from pathlib import Path
+
+from app.db.models import (
+    Camera, Employee, FaceEmbedding, RecognitionEvent, UnknownSighting,
+)
 from app.services.attendance import AttendanceService
 from app.services.augment import TAG
 
@@ -46,21 +50,47 @@ log = logging.getLogger(__name__)
 RESOLVED_KINDS = ("employee", "visitor", "unsure")
 
 
-def _capture_key(snapshot: str | None) -> str:
-    """The debug-capture stem behind an event's snapshot, if there is one.
+def capture_stem(ts, score: float, camera: str) -> str:
+    """The debug-capture stem for one pass, found on disk.
 
-    Snapshots are written as `snapshots/<stem>.jpg` and the debug capture for
-    the same pass is `data/debug/<Person>/<stem>_aligned.jpg`. The stem is what
-    ties an event to the crop that produced it, and therefore to any gallery
-    row added from that crop.
+    An event's `snapshot` column CANNOT be used for this. It names a body crop
+    (`snapshots/body_31_2_1974_1788437454.jpg` - employee, camera, track,
+    epoch), while a debug capture is named for what a human reads:
+    `20260903_130030_0.253_Exit_001`, in LOCAL time with the score to three
+    places. The two schemes share nothing, so deriving one from the other
+    silently produced a key that matched no gallery row - which meant voiding a
+    recognition quietly failed to remove the crop that caused it, the one thing
+    voiding is most needed for.
+
+    So it is rebuilt from the event's own fields and confirmed against the
+    directory. Returns "" when no capture survives - `debug_capture` may be off,
+    or retention may have swept it.
     """
-    if not snapshot:
+    import glob
+    if not ts:
         return ""
-    name = snapshot.rsplit("/", 1)[-1]
-    for suffix in ("_best.jpg", "_quality.jpg", ".jpg", ".png"):
-        if name.endswith(suffix):
-            return name[: -len(suffix)]
-    return name
+    local = ts.astimezone(settings.tz)
+    prefix = f"{local:%Y%m%d_%H%M%S}_{float(score or 0):.3f}_{camera or ''}_"
+    hits = sorted(glob.glob(str(settings.debug_dir / "*" / f"{prefix}*.json")))
+    return Path(hits[0]).stem if hits else ""
+
+
+def evidence(stem: str) -> dict:
+    """The images behind one pass, by debug stem. Containment-checked."""
+    out: dict = {}
+    root = settings.debug_dir.resolve()
+    if not stem or not root.is_dir():
+        return out
+    for kind, suffix in (("face", "_face.jpg"), ("aligned", "_aligned.jpg"),
+                         ("frame", "_frame.jpg")):
+        for person in root.iterdir():
+            if not person.is_dir():
+                continue
+            p = (person / f"{stem}{suffix}").resolve()
+            if p.is_file() and p.is_relative_to(root):
+                out[kind] = p
+                break
+    return out
 
 
 def void_event(event_id: int, *, by: str, reason: str = "") -> dict:
@@ -102,8 +132,10 @@ def void_event(event_id: int, *, by: str, reason: str = "") -> dict:
 
         replayed = AttendanceService().rebuild(s, employee_id, bdate)
 
+        cam = s.execute(select(Camera.name)
+                        .where(Camera.id == e.camera_id)).scalar() or ""
         removed = 0
-        key = _capture_key(e.snapshot)
+        key = capture_stem(e.ts, e.score, cam)
         if key:
             removed = int(s.execute(delete(FaceEmbedding).where(
                 FaceEmbedding.employee_id == employee_id,

@@ -146,30 +146,6 @@ def test_the_voided_event_is_kept_and_marked():
         assert e.score == 0.5, "the evidence itself is never rewritten"
 
 
-def test_voiding_removes_the_gallery_row_that_came_from_the_same_capture():
-    """The point of the whole feature. A wrong recognition that was promoted
-    into the gallery makes the same error easier every day; fixing the
-    attendance row and leaving the cause in place fixes nothing."""
-    emp = _emp()
-    key = "20260826_090000_0.512_Entrance_001"
-    _pass(emp, CAM_IN, CameraRole.IN, _at(9, 0), ENTER, snapshot=f"snapshots/{key}.jpg")
-    v = np.random.default_rng(0).standard_normal(512).astype(np.float32)
-    v /= np.linalg.norm(v)
-    with session_scope() as s:
-        s.add(FaceEmbedding(employee_id=emp, source_file=f"live:{key}",
-                            vector=v.tobytes(), dim=512, model_name="m",
-                            threshold=0.35))
-        s.add(FaceEmbedding(employee_id=emp, source_file="image_01.png",
-                            vector=v.tobytes(), dim=512, model_name="m"))
-
-    out = corrections.void_event(_events(emp)[0][0], by="admin")
-    assert out["gallery_rows_removed"] == 1
-    with session_scope() as s:
-        left = s.execute(select(FaceEmbedding.source_file)
-                         .where(FaceEmbedding.employee_id == emp)).scalars().all()
-    assert left == ["image_01.png"], "the enrolment photo must be untouched"
-
-
 def test_a_duplicate_view_stays_a_duplicate_view_on_replay():
     """The losing half of a cross-camera pair recorded evidence and moved no
     state. Replaying it as a transition would invent exactly the second
@@ -444,3 +420,108 @@ def test_an_admin_can_void_through_the_route():
     assert r.status_code == 303
     with session_scope() as s:
         assert s.get(RecognitionEvent, eid).voided_by == "inomjon"
+
+
+# --- finding the capture behind an event -----------------------------------
+
+def test_the_capture_behind_an_event_is_found_by_time_and_score():
+    """The bug that made voiding quietly useless.
+
+    An event's `snapshot` names a BODY crop - `body_31_2_1974_1788437454.jpg`,
+    keyed by employee/camera/track/epoch - while the debug capture is named for
+    a human: `20260903_130030_0.253_Exit_001`, LOCAL time, score to three
+    places. Deriving one from the other produced a key matching no gallery row,
+    so voiding a wrong recognition failed to remove the crop that caused it -
+    the single most important thing voiding does.
+    """
+    import json
+    from app.config import settings
+
+    ts = datetime(2026, 9, 3, 8, 0, 30, tzinfo=timezone.utc)
+    local = ts.astimezone(settings.tz)
+    stem = f"{local:%Y%m%d_%H%M%S}_0.253_Exit_001"
+    folder = settings.debug_dir / "Void Test Person"
+    folder.mkdir(parents=True, exist_ok=True)
+    try:
+        (folder / f"{stem}.json").write_text(json.dumps({"score": 0.253}))
+        (folder / f"{stem}_face.jpg").write_bytes(b"\xff\xd8\xff")
+        assert corrections.capture_stem(ts, 0.253, "Exit") == stem
+        assert "face" in corrections.evidence(stem)
+        # A pass whose capture has been swept, or was never written, is not an
+        # error - debug_capture can be off. It just has no evidence to show.
+        assert corrections.capture_stem(ts, 0.999, "Exit") == ""
+        assert corrections.evidence("") == {}
+    finally:
+        for f in folder.glob(f"{stem}*"):
+            f.unlink()
+        folder.rmdir()
+
+
+def test_voiding_removes_the_crop_the_event_actually_produced():
+    """End to end on the real naming, not on a hand-written key."""
+    import json
+    from app.config import settings
+
+    emp = _emp("Void Crop Person")
+    ts = _at(9, 0)
+    _pass(emp, CAM_IN, CameraRole.IN, ts, ENTER, score=0.512)
+    local = ts.astimezone(settings.tz)
+    stem = f"{local:%Y%m%d_%H%M%S}_0.512_Entrance_001"
+    folder = settings.debug_dir / "Void Crop Person"
+    folder.mkdir(parents=True, exist_ok=True)
+    v = np.random.default_rng(2).standard_normal(512).astype(np.float32)
+    v /= np.linalg.norm(v)
+    try:
+        (folder / f"{stem}.json").write_text(json.dumps({"score": 0.512}))
+        with session_scope() as s:
+            # The camera has to exist for the name to resolve.
+            from app.db.models import Camera
+            if s.get(Camera, CAM_IN) is None:
+                s.add(Camera(id=CAM_IN, name="Entrance", role=CameraRole.IN,
+                             rtsp_url="rtsp://x", enabled=False))
+            s.add(FaceEmbedding(employee_id=emp, source_file=f"live:{stem}",
+                                vector=v.tobytes(), dim=512, model_name="m",
+                                threshold=0.35))
+            s.add(FaceEmbedding(employee_id=emp, source_file="image_01.png",
+                                vector=v.tobytes(), dim=512, model_name="m"))
+        out = corrections.void_event(_events(emp)[0][0], by="admin", reason="wrong")
+        assert out["capture"] == stem
+        assert out["gallery_rows_removed"] == 1
+        with session_scope() as s:
+            left = s.execute(select(FaceEmbedding.source_file)
+                             .where(FaceEmbedding.employee_id == emp)).scalars().all()
+        assert left == ["image_01.png"], "the enrolment photo must be untouched"
+    finally:
+        for f in folder.glob(f"{stem}*"):
+            f.unlink()
+        if folder.is_dir():
+            folder.rmdir()
+
+
+def test_the_day_view_and_its_evidence_are_admin_gated():
+    emp = _emp()
+    _pass(emp, CAM_IN, CameraRole.IN, _at(9, 0), ENTER)
+    day = business_date(_at(9, 0))
+    eid = _events(emp)[0][0]
+    for path in (f"/attendance/day/{emp}/{day}",
+                 f"/attendance/event/{eid}/evidence/face"):
+        assert client.get(path).status_code in (303, 401, 403)
+    # The day view itself is readable by an operator - seeing the record is not
+    # the same as rewriting it - but the void control and the face crops are not.
+    r = client.get(f"/attendance/day/{emp}/{day}", headers=_as(admin=False))
+    assert r.status_code == 200
+    assert "Bu u emas" not in r.text
+    assert client.get(f"/attendance/event/{eid}/evidence/face",
+                      headers=_as(admin=False)).status_code == 403
+    r = client.get(f"/attendance/day/{emp}/{day}", headers=_as(admin=True))
+    assert r.status_code == 200 and "Bu u emas" in r.text
+
+
+def test_the_evidence_route_rejects_an_unknown_kind():
+    emp = _emp()
+    _pass(emp, CAM_IN, CameraRole.IN, _at(9, 0), ENTER)
+    eid = _events(emp)[0][0]
+    assert client.get(f"/attendance/event/{eid}/evidence/../../etc/passwd",
+                      headers=_as(admin=True)).status_code in (400, 404)
+    assert client.get(f"/attendance/event/{eid}/evidence/passwd",
+                      headers=_as(admin=True)).status_code == 400

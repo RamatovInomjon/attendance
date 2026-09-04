@@ -769,6 +769,95 @@ def attendance_unknown(request: Request, show: str = "open", msg: str = "",
                   is_admin=bool(me), show=show, msg=msg, error=error)
 
 
+@router.get("/attendance/day/{employee_id}/{day}", response_class=HTMLResponse)
+def attendance_day(request: Request, employee_id: int, day: str, msg: str = "",
+                   error: str = ""):
+    """Every event behind one person's day, with the face that decided each.
+
+    The dashboard feed shows the last twelve recognitions, which is no use for
+    a wrong check-out found the next morning. This is the view that makes a
+    correction possible: the whole day, in order, each event beside the crop
+    the recognizer actually saw, and - for an admin - a button to void it.
+
+    The BODY crop stored on the event is not enough to judge by. It shows who
+    walked past; it does not show what was matched. A false accept is only
+    visible when the face is on screen next to the name it was given.
+    """
+    from app.services import corrections
+    bdate = _parse_attendance_date(day, "day")
+    if bdate is None:
+        raise HTTPException(400, "bad date")
+    me = _admin_only(request)
+    with session_scope() as s:
+        emp = s.get(Employee, employee_id)
+        if emp is None:
+            raise HTTPException(404, "Employee not found")
+        daily = s.execute(select(DailyAttendance).where(
+            DailyAttendance.employee_id == employee_id,
+            DailyAttendance.business_date == bdate)).scalar_one_or_none()
+        rows = s.execute(
+            select(RecognitionEvent, Camera.name)
+            .outerjoin(Camera, Camera.id == RecognitionEvent.camera_id)
+            .where(RecognitionEvent.employee_id == employee_id,
+                   RecognitionEvent.business_date == bdate)
+            .order_by(RecognitionEvent.ts)).all()
+        events = []
+        for e, cam in rows:
+            stem = corrections.capture_stem(e.ts, e.score, cam or "")
+            events.append({
+                "id": e.id, "time": e.ts.astimezone(settings.tz).strftime("%H:%M:%S"),
+                "camera": cam or "—", "role": e.role.value if hasattr(e.role, "value") else str(e.role),
+                "transition": e.transition or "", "direction": e.direction or "",
+                "score": e.score or 0.0, "margin": e.margin or 0.0,
+                "votes": e.votes or "", "voided": e.voided_at is not None,
+                "void_reason": e.void_reason or "", "voided_by": e.voided_by or "",
+                "snapshot": media_path(e.snapshot) if e.snapshot else None,
+                "stem": stem,
+            })
+        vm = {"id": emp.id, "name": emp.full_name, "department": emp.department or ""}
+        summary = None
+        if daily is not None:
+            summary = {
+                "check_in": daily.check_in_time.astimezone(settings.tz).strftime("%H:%M:%S")
+                if daily.check_in_time else None,
+                "check_out": daily.check_out_time.astimezone(settings.tz).strftime("%H:%M:%S")
+                if daily.check_out_time else None,
+                "worked": round((daily.worked_seconds or 0) / 3600.0, 2),
+                "status": daily.status, "presence": daily.presence.value
+                if hasattr(daily.presence, "value") else str(daily.presence),
+            }
+    return render("attendance/day.html", request=request, current_view="attendance:list",
+                  employee=vm, day=bdate, events=events, summary=summary,
+                  is_admin=bool(me), msg=msg, error=error)
+
+
+@router.get("/attendance/event/{event_id}/evidence/{kind}")
+def event_evidence(request: Request, event_id: int, kind: str):
+    """The face or the full frame behind one recognition. Admin-gated.
+
+    `data/debug` holds face images of identified people and is deliberately
+    outside the public media mount, so this is gated and the resolved path is
+    containment-checked - the same treatment /gallery/crop gets.
+    """
+    from app.services import corrections
+    if not _admin_only(request):
+        return JSONResponse({"detail": "Admin only"}, status_code=403)
+    if kind not in ("face", "aligned", "frame"):
+        return JSONResponse({"detail": "bad kind"}, status_code=400)
+    with session_scope() as s:
+        row = s.execute(
+            select(RecognitionEvent.ts, RecognitionEvent.score, Camera.name)
+            .outerjoin(Camera, Camera.id == RecognitionEvent.camera_id)
+            .where(RecognitionEvent.id == event_id)).first()
+    if not row:
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    got = corrections.evidence(corrections.capture_stem(row[0], row[1], row[2] or ""))
+    if kind not in got:
+        return JSONResponse({"detail": "no capture kept for this event"},
+                            status_code=404)
+    return FileResponse(str(got[kind]), media_type="image/jpeg")
+
+
 # ----------------------------------------------------------- corrections ---
 # An admin saying "that is not that person", and an admin saying who an unknown
 # face actually was. Both fix the record AND leave a label behind - see
