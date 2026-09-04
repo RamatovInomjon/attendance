@@ -237,3 +237,34 @@ def test_a_mismatched_floor_array_is_refused():
     v = _unit(rng, 4)
     with pytest.raises(ValueError, match="positional"):
         Gallery(v, np.array([1, 1, 2, 2], np.int64), {}, np.zeros(3, np.float32))
+
+
+def test_the_deployed_live_floor_is_what_actually_gates_a_corridor_crop():
+    """Pins the number in force, end to end.
+
+    Measured on gpu6: without a floor, corridor crops gave a name to 21.7% of
+    the faces the pipeline had judged as nobody, against 2-3% for enrolment
+    photographs. At `augment_live_floor` that falls to 1.9% - a corridor crop
+    becomes safer than the studio photo beside it. This asserts the mechanism
+    delivers that: a query that clears the global threshold against a corridor
+    row, but not the live floor, names nobody.
+    """
+    from app.config import settings
+    rng = np.random.default_rng(28)
+    a, b, drift = _unit(rng, 3)
+    thr = settings.threshold_for(settings.recognizer_model)
+    floor = max(thr, settings.augment_live_floor)
+
+    # Sits between the two: an enrolment row would accept it, a corridor row
+    # must not. If the policy ever collapses onto the threshold this fails.
+    assert floor > thr + 0.05, "the live floor must be meaningfully above the threshold"
+    target = (thr + floor) / 2
+    q = a * target + drift * float(np.sqrt(1 - target ** 2))
+    q /= np.linalg.norm(q)
+
+    enrol = Gallery(np.stack([a, b]), np.array([1, 2], np.int64), {1: "A", 2: "B"})
+    assert enrol.match(q, thr, MAR).employee_id == 1
+
+    corridor = Gallery(np.stack([a, b]), np.array([1, 2], np.int64), {1: "A", 2: "B"},
+                       np.array([floor, 0.0], np.float32))
+    assert corridor.match(q, thr, MAR).employee_id is None

@@ -163,9 +163,9 @@ def test_a_candidate_that_looks_like_someone_else_is_refused():
     somebody ELSE be named as the person it is labelled with.
 
     It is no longer refused for moving a gallery-wide statistic. It is refused
-    because the only floor that would make it safe - above its 0.99 similarity
-    to Person B - is one it could never reach, so the crop is useless as well
-    as dangerous, and the message names B rather than an unrelated pair.
+    because B already reaches it at 0.99, far above the floor a corridor crop
+    answers to - so it is a lookalike, not a reference - and the message names
+    B rather than an unrelated pair of enrolment photographs.
     """
     rng = np.random.default_rng(7)
     a, b = _unit(rng), _unit(rng)
@@ -176,7 +176,7 @@ def test_a_candidate_that_looks_like_someone_else_is_refused():
         assert not chk.safe
         assert [u[0] for u in chk.unusable] == ["Person A"]
         assert bad.impostor_name == "Person B"
-        assert bad.threshold > 0.9
+        assert bad.impostor > 0.9
 
         good = _cand(made[0], a * 0.98 + _unit(rng) * 0.02, "Person A")
         chk = augment.check_impostors([good])
@@ -220,109 +220,158 @@ def test_a_pre_existing_enrolment_pair_does_not_block_an_addition():
         _wipe(made)
 
 
-def test_the_floor_sits_just_above_the_worst_impostor():
-    """Lowest FRR consistent with FAR 0: the floor is the smallest value that
-    keeps every measured impostor out, and not one point higher."""
+def _probes(vectors, nearest=None):
+    """The corridor-probe tuple `calibrate` takes, without touching the DB."""
+    P = np.stack([np.asarray(v, np.float32) for v in vectors])
+    P /= np.linalg.norm(P, axis=1, keepdims=True) + 1e-12
+    n = np.array(nearest if nearest is not None else [-1] * len(P), np.int64)
+    return P, n
+
+
+def test_every_corridor_crop_gets_the_same_flat_floor():
+    """The floor is a policy, not a per-crop measurement.
+
+    A per-row floor from each crop's own worst impostor measured WORSE on both
+    axes than one flat number - a maximum over a few hundred probes is a noisy
+    extreme-value estimate. See the table in app/config.py.
+    """
     from app.config import settings
     rng = np.random.default_rng(3)
     a, b = _unit(rng), _unit(rng)
     made = _people([("Person A", a), ("Person B", b)])
     try:
-        # Deliberately blended so the similarity to B is a known, middling value.
-        v = a * 0.8 + b * 0.2
-        cand = _cand(made[0], v, "Person A")
-        augment.calibrate([cand], np.stack([a, b]),
-                          np.array(made), {made[0]: "Person A", made[1]: "Person B"})
-        assert cand.impostor_name == "Person B"
-        assert cand.threshold == pytest.approx(
-            cand.impostor + settings.augment_threshold_margin)
-        assert cand.threshold > cand.impostor, "the impostor must not get through"
+        near = _cand(made[0], a * 0.8 + b * 0.2, "Person A")
+        far = _cand(made[0], a, "Person A"); far.key = "kfar"
+        augment.calibrate([near, far], np.stack([a, b]), np.array(made),
+                          {made[0]: "Person A", made[1]: "Person B"},
+                          probes=_probes([_unit(rng)]))
+        want = max(settings.threshold_for(settings.recognizer_model),
+                   settings.augment_live_floor)
+        assert near.threshold == pytest.approx(want)
+        assert far.threshold == pytest.approx(want)
+        assert near.impostor > far.impostor, "the measurement still differs"
     finally:
         _wipe(made)
 
 
 def test_a_floor_never_drops_below_the_global_threshold():
-    """A crop with no lookalike anywhere still answers to the global threshold.
-    Being unlike everybody is not a licence to match at 0.05."""
+    """If the operating threshold is raised above the live floor, the floor
+    follows it up. A corridor crop must never be the easiest row to match."""
     from app.config import settings
     rng = np.random.default_rng(5)
     a, b = _unit(rng), _unit(rng)
     made = _people([("Person A", a), ("Person B", b)])
     try:
         cand = _cand(made[0], a, "Person A")
-        augment.calibrate([cand], np.stack([a, b]), np.array(made), {})
+        augment.calibrate([cand], np.stack([a, b]), np.array(made), {},
+                          probes=_probes([_unit(rng)]))
         assert cand.threshold >= settings.threshold_for(settings.recognizer_model)
+        assert cand.threshold >= settings.augment_live_floor
     finally:
         _wipe(made)
 
 
-def test_one_crop_raises_another_crop_s_floor():
-    """Crops calibrate against EACH OTHER, not only against the studio photos.
+def test_a_crop_a_real_corridor_face_already_reaches_is_refused():
+    """The measurement's job is now REFUSAL, and the probe set is what makes it
+    work. A crop that an anonymous corridor face reaches above the floor is a
+    lookalike: keeping it would let that face be given this person's name."""
+    rng = np.random.default_rng(31)
+    a, b = _unit(rng), _unit(rng)
+    made = _people([("Person A", a), ("Person B", b)])
+    try:
+        crop = a * 0.7 + _unit(rng) * 0.3
+        stranger = crop * 0.9 + _unit(rng) * 0.1      # ~0.99 against the crop
+        c = _cand(made[0], crop, "Person A")
+        augment.calibrate([c], np.stack([a, b]), np.array(made), {},
+                          probes=_probes([stranger]))
+        assert c.rejected, "a face reaching it above the floor must refuse it"
+        assert "corridor face" in c.impostor_name
+        assert "reaches this crop" in c.rejected
+    finally:
+        _wipe(made)
 
-    Two corridor faces of different people are the most realistic impostor pair
-    available - the whole premise of the feature is that a corridor face and a
-    studio face of the same person are 0.2 apart - so a floor measured against
-    enrolment alone would be far too low.
-    """
+
+def test_a_probe_the_pipeline_already_attributed_to_this_person_is_ignored():
+    """The probe set is faces the system named NOBODY - which includes enrolled
+    people it simply missed. Counting those as impostors would refuse a crop
+    for resembling its own subject, which is the exact case it exists to fix."""
+    rng = np.random.default_rng(37)
+    a, b = _unit(rng), _unit(rng)
+    made = _people([("Person A", a), ("Person B", b)])
+    try:
+        crop = a * 0.7 + _unit(rng) * 0.3
+        himself = crop * 0.9 + _unit(rng) * 0.1
+        blamed = _cand(made[0], crop, "Person A")
+        augment.calibrate([blamed], np.stack([a, b]), np.array(made), {},
+                          probes=_probes([himself], nearest=[-1]))
+        assert blamed.rejected, "an unattributed probe must still count"
+
+        spared = _cand(made[0], crop, "Person A")
+        augment.calibrate([spared], np.stack([a, b]), np.array(made), {},
+                          probes=_probes([himself], nearest=[made[0]]))
+        assert not spared.rejected, "a probe the system read as THIS person must not"
+    finally:
+        _wipe(made)
+
+
+def test_a_sibling_candidate_too_close_is_refused_not_floored():
+    """Two crops of different people that resemble each other are lookalikes.
+    The old code gave them each a private higher floor, which hid the problem
+    inside a number; now one of them is refused and the collision is named."""
     rng = np.random.default_rng(13)
     a, b = _unit(rng), _unit(rng)
     made = _people([("Person A", a), ("Person B", b)])
     try:
-        shared = _unit(rng)          # both crops drift toward the same point
-        ca = _cand(made[0], a * 0.5 + shared * 0.5, "Person A")
-        cb = _cand(made[1], b * 0.5 + shared * 0.5, "Person B")
-        M, owner = np.stack([a, b]), np.array(made)
-
-        alone = _cand(made[0], a * 0.5 + shared * 0.5, "Person A")
-        augment.calibrate([alone], M, owner, {})
-        augment.calibrate([ca, cb], M, owner, {})
-
-        assert ca.threshold > alone.threshold
+        shared = _unit(rng)
+        ca = _cand(made[0], a * 0.15 + shared * 0.85, "Person A")
+        cb = _cand(made[1], b * 0.15 + shared * 0.85, "Person B")
+        cb.key = "kB"
+        augment.calibrate([ca, cb], np.stack([a, b]), np.array(made), {},
+                          probes=_probes([_unit(rng)]))
+        assert ca.rejected and cb.rejected
         assert ca.impostor_name == "Person B"
     finally:
         _wipe(made)
 
 
-def test_adding_stores_the_floor_and_a_later_crop_refreshes_it():
-    """A floor is a claim about the rest of the gallery, so it expires when the
-    gallery changes. Adding a second crop must raise the first one's floor -
-    otherwise the row added yesterday has an impostor it was never measured
-    against, and the guarantee quietly stops being true."""
-    from sqlalchemy import select
+def test_recalibrate_puts_every_stored_crop_on_the_current_floor():
+    """The floor moves when `recognition_threshold_override` does, and stored
+    rows keep whatever number was written when they were added. A row left on
+    an old, lower floor is a row that stopped being protected."""
+    from sqlalchemy import select, update
+    from app.config import settings
     from app.db.models import FaceEmbedding
     from app.db.session import session_scope
     rng = np.random.default_rng(17)
     a, b = _unit(rng), _unit(rng)
     made = _people([("Person A", a), ("Person B", b)])
     try:
-        shared = _unit(rng)
-        ca = _cand(made[0], a * 0.5 + shared * 0.5, "Person A")
-        augment.calibrate([ca], np.stack([a, b]), np.array(made), {})
+        ca = _cand(made[0], a * 0.8 + _unit(rng) * 0.2, "Person A")
+        augment.calibrate([ca], np.stack([a, b]), np.array(made), {},
+                          probes=_probes([_unit(rng)]))
         augment.add([ca])
 
-        def floor_of(emp):
+        def floor_of():
             with session_scope() as s:
-                return s.execute(
-                    select(FaceEmbedding.threshold).where(
-                        FaceEmbedding.employee_id == emp,
-                        FaceEmbedding.source_file.like(f"{augment.TAG}%"))
-                ).scalar()
+                return s.execute(select(FaceEmbedding.threshold).where(
+                    FaceEmbedding.employee_id == made[0],
+                    FaceEmbedding.source_file.like(f"{augment.TAG}%"))).scalar()
 
-        first = floor_of(made[0])
-        assert first is not None and first > 0
+        want = max(settings.threshold_for(settings.recognizer_model),
+                   settings.augment_live_floor)
+        assert floor_of() == pytest.approx(want)
 
-        cb = _cand(made[1], b * 0.5 + shared * 0.5, "Person B")
-        cb.key = "kB"
-        augment.check_impostors([cb])        # calibrates against the stored crop
-        augment.add([cb])
-
-        assert floor_of(made[0]) > first, "the earlier crop must be re-measured"
-
-        augment.remove([e["id"] for e in augment.added()
-                        if e["employee_id"] == made[1]])
-        assert floor_of(made[0]) == pytest.approx(first), \
-            "removing the impostor must hand the range back"
+        # Simulate a row written under an older, lower policy.
+        with session_scope() as s:
+            s.execute(update(FaceEmbedding)
+                      .where(FaceEmbedding.source_file.like(f"{augment.TAG}%"))
+                      .values(threshold=0.19))
+        assert floor_of() == pytest.approx(0.19)
+        assert augment.recalibrate() >= 1
+        assert floor_of() == pytest.approx(want), \
+            "recalibrate must lift a stale floor back to the policy"
     finally:
+        augment.remove([e["id"] for e in augment.added()])
         _wipe(made)
 
 

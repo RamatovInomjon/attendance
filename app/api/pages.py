@@ -1034,6 +1034,8 @@ def gallery_review(request: Request, refresh: str = "", msg: str = "",
         groups=sorted(groups.items(), key=lambda kv: kv[0][1]),
         total=len(cands), existing=augment.added(), gallery=gallery,
         threshold=settings.threshold_for(settings.recognizer_model),
+        live_floor=max(settings.threshold_for(settings.recognizer_model),
+                       settings.augment_live_floor),
         scanned_at=_AUGMENT_CACHE["scanned_at"], msg=msg, error=error)
 
 
@@ -1072,15 +1074,15 @@ async def gallery_augment(request: Request):
 
     check = augment.check_impostors(chosen)
     if not check.safe:
-        # Per crop, and it names who each one collides with. The old message
+        # Per crop, and it names what each one collides with. The old message
         # reported the gallery's worst pair - two enrolment photographs that no
         # selection could change - and told the admin to deselect one of them.
-        listed = "; ".join(f"{name} ({when}) needs floor {floor:.3f}"
-                           for name, when, floor in check.unusable)
-        why = (f"Refused {len(check.unusable)} crop(s): they sit too close to "
-               f"another person to be given a floor that is both safe and "
-               f"usable (limit {settings.augment_max_threshold:.2f}). {listed}. "
-               f"Deselect them; the rest of the selection is fine.")
+        listed = "; ".join(f"{name} ({when}) is already reached at {sim:.3f}"
+                           for name, when, sim in check.unusable)
+        why = (f"Refused {len(check.unusable)} crop(s): another face already "
+               f"reaches them at or above the {check.threshold:.3f} floor a "
+               f"corridor crop answers to, so they are lookalikes rather than "
+               f"references. {listed}. Deselect them; the rest is fine.")
         return RedirectResponse(_p("/gallery/review?error=" + _quote(why)),
                                 status_code=303)
 
@@ -1090,11 +1092,10 @@ async def gallery_augment(request: Request):
         runtime.reload_gallery()
     except Exception:
         log.exception("gallery reload after augment failed")
-    floors = ", ".join(f"{c.name.split()[0]} {c.threshold:.3f}" for c in chosen)
-    msg = (f"Added {n}, each with its own acceptance floor ({floors}). "
-           f"Below its floor a crop cannot name anybody, so the highest another "
-           f"person can reach through them is {check.after:.3f} against a "
-           f"{check.threshold:.3f} threshold.")
+    floor = max(check.threshold, settings.augment_live_floor)
+    msg = (f"Added {n}, each answering to a {floor:.3f} floor rather than the "
+           f"{check.threshold:.3f} threshold an enrolment photo gets. The "
+           f"highest any other face reaches through them is {check.after:.3f}.")
     return RedirectResponse(_p("/gallery/review?msg=" + _quote(msg)),
                             status_code=303)
 

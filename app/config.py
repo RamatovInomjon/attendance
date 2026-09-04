@@ -363,9 +363,38 @@ class Settings(BaseSettings):
     # the server against a 0.190 threshold - so the gate was permanently shut by
     # a defect no selection could fix, while blaming whichever crop was chosen.
     #
-    # The margin is the only guess here: it covers impostors we have not seen
-    # yet. Raise it to be stricter at the cost of the crop firing less often;
-    # the crop's own floor is reported in the review page either way.
+    # THE FLOOR EVERY CORRIDOR CROP GETS. Measured on gpu6, 04-09-2026, against
+    # 866 real corridor faces the system had judged as nobody - the 472 from
+    # 02-09 predate the crops entirely, so they are genuinely out of sample:
+    #
+    #   floor   genuine live matches kept   unknown faces given a name
+    #   0.22            100.0 %                    21.71 %   <- no floor
+    #   0.30             95.1 %                     3.54 %
+    #   0.35             89.3 %                     1.94 %   <- this
+    #   0.40             82.2 %                     1.14 %
+    #   0.50             59.6 %                     0.34 %
+    #
+    #   the same probes reaching an ENROLMENT photograph:  2.0 - 3.3 %
+    #
+    # 0.35 is the point where a corridor crop becomes SAFER than the studio
+    # photograph beside it, while keeping 89% of the recognition it was added
+    # for. That is the criterion, and it is the one to re-measure: a crop must
+    # never be the weakest row in the gallery.
+    #
+    # This replaced a per-row floor calibrated from each crop's own worst
+    # impostor. That measured the wrong population - the stored gallery, which
+    # is studio photography - so every floor came out at the global threshold
+    # and all 48 deployed crops were inert. Calibrating per row against real
+    # corridor faces instead was still worse than one flat number on BOTH axes
+    # (85.3% kept / 5.03% named): a row's maximum over a few hundred probes is
+    # a noisy extreme-value estimate, and it over-floors some rows while
+    # missing the lookalike who simply did not walk past that day.
+    #
+    # Re-measure with bench/far_live_rows.py. It is a policy, not a constant.
+    augment_live_floor: float = 0.35
+    # Still used, but only to REFUSE a crop: one whose worst corridor impostor
+    # plus this margin exceeds the floor above is a known lookalike and is not
+    # offered at all, rather than being given a bespoke floor of its own.
     augment_threshold_margin: float = 0.02
     # A crop needing a floor above this is not refused for being dangerous - it
     # is refused for being useless. Two corridor crops of the same person under

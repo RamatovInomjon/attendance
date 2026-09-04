@@ -101,8 +101,10 @@ def main() -> int:
         n = augment.recalibrate()
         print(f"  refreshed the floor on {n} live embedding(s)")
         for e in augment.added():
-            flag = "  NEVER FIRES" if e["dead"] else ""
-            print(f"    {e['name'][:28]:28s} floor {e['threshold']:.3f}{flag}")
+            flag = "  LOOKALIKE - review it" if e["reached"] else ""
+            print(f"    {e['name'][:28]:28s} floor {e['threshold']:.3f}"
+                  f"  reached at {e['reached']:.3f}{flag}" if e["reached"]
+                  else f"    {e['name'][:28]:28s} floor {e['threshold']:.3f}")
         return 0
 
     preload_cuda_libs()
@@ -132,8 +134,9 @@ def main() -> int:
         by_person[c.employee_id].append(c)
     print()
     for emp, group in sorted(by_person.items(), key=lambda kv: kv[1][0].name):
-        floors = ", ".join(f"{c.threshold:.3f}" for c in group)
-        print(f"    {group[0].name[:28]:28s} +{len(group)}   floors {floors}")
+        worst = max(c.impostor for c in group)
+        print(f"    {group[0].name[:28]:28s} +{len(group)}   "
+              f"floor {group[0].threshold:.3f}   worst other face {worst:.3f}")
 
     if args.review:
         out = ROOT / args.out
@@ -163,15 +166,15 @@ def main() -> int:
         print("      and no longer refuses on account of it.")
     print(f"  worst the selection can reach    {check.after:.4f}  "
           f"(after each crop's own floor)")
-    for name, when, floor in check.unusable:
-        print(f"    REJECTED {name} ({when}): needs floor {floor:.3f}")
+    for name, when, sim in check.unusable:
+        print(f"    REJECTED {name} ({when}): already reached at {sim:.3f}")
 
     if not check.safe:
-        print("\n  REFUSED: the crops listed above cannot be given a floor that is")
-        print("  both safe and usable - they sit too close to another person.")
-        print("  Deselect them; the rest of the selection is unaffected.")
+        print("\n  REFUSED: another face already reaches the crops listed above at")
+        print("  or above the floor a corridor crop answers to. They are")
+        print("  lookalikes, not references. Deselect them; the rest is fine.")
         return 1
-    print("  SAFE: no crop can name anybody at a similarity another person reaches.")
+    print("  SAFE: no crop can name anybody at a similarity another face reaches.")
 
     if args.measure or not args.apply:
         print("\n  Nothing written. Add --apply.")

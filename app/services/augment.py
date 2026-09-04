@@ -150,34 +150,90 @@ def _floor(impostor: float, thr: float) -> float:
     return max(thr, float(impostor) + settings.augment_threshold_margin)
 
 
+def corridor_probes(days: int = 14, dim: int | None = None):
+    """Real corridor faces, for measuring what a crop can actually admit.
+
+    `unknown_sighting.vector` is the face embedding of somebody the system named
+    nobody. Hundreds accumulate every day at no cost, and they are the only
+    population that resembles a live query: studio photographs do not, which is
+    the entire premise of augmentation and was exactly the flaw in the first
+    version of this check. Measured on gpu6, an enrolment photograph reaches a
+    corridor crop at most 0.17, while a real corridor face reaches one at 0.31 -
+    so calibrating against the gallery understated the danger by nearly double.
+
+    Returns `(P, nearest)`: unit vectors, and the employee each was NEAREST to
+    when it was rejected, or -1. The caller uses `nearest` to drop probes that
+    are probably the crop's own person seen again - see `calibrate`.
+    """
+    from datetime import date, timedelta
+
+    from sqlalchemy import select
+    from app.db.models import UnknownSighting
+    from app.db.session import session_scope
+
+    empty = (np.zeros((0, dim or 512), np.float32), np.zeros((0,), np.int64))
+    cutoff = date.today() - timedelta(days=max(1, days))
+    with session_scope() as s:
+        rows = s.execute(
+            select(UnknownSighting.vector, UnknownSighting.nearest_employee_id)
+            .where(UnknownSighting.vector.is_not(None),
+                   UnknownSighting.business_date >= cutoff)).all()
+    # A gallery rebuilt on another recognizer leaves older vectors of a
+    # different width behind. Mixing them would not error - numpy would refuse
+    # the stack, or worse, a same-width vector from another model would compare
+    # as though it meant something. Keep only what matches the gallery.
+    want = dim
+    kept = [r for r in rows if r[0] is not None
+            and (want is None or len(r[0]) == want * 4)]
+    if not kept:
+        return empty
+    P = np.stack([np.frombuffer(r[0], np.float32) for r in kept])
+    P /= np.linalg.norm(P, axis=1, keepdims=True) + 1e-12
+    near = np.array([r[1] if r[1] is not None else -1 for r in kept], np.int64)
+    return P, near
+
+
 def calibrate(cands: list[Candidate], M: np.ndarray, owner: np.ndarray,
-              names: dict[int, str] | None = None) -> None:
-    """Give every candidate its own acceptance floor, in place.
+              names: dict[int, str] | None = None, probes=None) -> None:
+    """Set every candidate's acceptance floor, and refuse the lookalikes.
 
-    The impostor set is deliberately BOTH populations: the enrolment gallery
-    `M`, and the other candidates. Studio photographs alone would understate it
-    badly - the whole premise of this feature is that a corridor face and a
-    studio face of the same person score 0.2 apart, so another person's
-    corridor crop is by far the more informative probe, and it is the one a
-    live query most resembles.
+    THE FLOOR IS FLAT: `max(global_threshold, augment_live_floor)`. Every
+    corridor crop answers to the same, higher bar, because that is what the
+    measurement supports - see the table in app/config.py. A per-row floor from
+    each crop's own worst impostor sounds better and measured worse on both
+    axes: a maximum over a few hundred probes is a noisy extreme-value
+    estimate, so it over-floors some rows while missing the lookalike who
+    happened not to walk past on the day it was computed.
 
-    A candidate that would need a floor above `augment_max_threshold` is
-    rejected here. Not because it is dangerous - the floor makes it safe - but
-    because it could never fire, and a row that never fires is worse than no
-    row: it looks like coverage that does not exist.
+    What the per-row measurement is still for is REFUSAL. A crop that a real
+    corridor face already reaches above the floor is a known lookalike; it is
+    dropped and the collision is named, rather than being quietly given a floor
+    of its own that hides the problem inside a number.
+
+    The impostor set is three populations, worst wins:
+
+      * the enrolment gallery `M` - weak, but free and occasionally decisive
+      * the other candidates on offer
+      * REAL CORRIDOR FACES from `corridor_probes()`, which dominate
+
+    Probes whose `nearest_employee_id` is the candidate's own employee are
+    dropped. Those are overwhelmingly the same person walking past again and
+    being missed - precisely the case this feature exists to fix - and counting
+    them as impostors would refuse a crop for resembling its own subject.
     """
     live = [c for c in cands if c.vec is not None and not c.rejected]
     if not live:
         return
     thr = settings.threshold_for(settings.recognizer_model)
+    floor = max(thr, float(settings.augment_live_floor))
     names = names or {}
 
     V = np.stack([np.asarray(c.vec, dtype=np.float32) for c in live])
     V /= np.linalg.norm(V, axis=1, keepdims=True) + 1e-12
     emp = np.array([c.employee_id for c in live], dtype=np.int64)
 
-    # -2.0 is below any cosine, so a person with no impostor anywhere - the
-    # only-employee case - falls through to the global threshold.
+    # -2.0 is below any cosine, so a candidate with no impostor in a given
+    # population - the only-employee case, or no probes yet - falls through it.
     if len(M):
         G = np.where(np.asarray(owner)[None, :] != emp[:, None], V @ M.T, -2.0)
         g_at = G.argmax(axis=1)
@@ -190,18 +246,29 @@ def calibrate(cands: list[Candidate], M: np.ndarray, owner: np.ndarray,
     l_at = L.argmax(axis=1)
     l_best = L[np.arange(len(live)), l_at]
 
+    if probes is None:
+        probes = corridor_probes(dim=int(V.shape[1]))
+    P, near = probes
+    if len(P):
+        S = np.where(np.asarray(near)[None, :] == emp[:, None], -2.0, V @ np.asarray(P).T)
+        p_best = S.max(axis=1)
+    else:
+        p_best = np.full(len(live), -2.0, np.float32)
+
     for i, c in enumerate(live):
-        if float(g_best[i]) >= float(l_best[i]):
-            c.impostor = float(g_best[i])
-            c.impostor_name = names.get(int(owner[int(g_at[i])]), "") if len(M) else ""
-        else:
-            c.impostor = float(l_best[i])
-            c.impostor_name = live[int(l_at[i])].name
-        c.threshold = _floor(c.impostor, thr)
-        if c.threshold > settings.augment_max_threshold:
+        c.threshold = floor
+        options = [
+            (float(g_best[i]), names.get(int(owner[int(g_at[i])]), "") if len(M) else ""),
+            (float(l_best[i]), live[int(l_at[i])].name),
+            (float(p_best[i]), "an unidentified corridor face"),
+        ]
+        c.impostor, c.impostor_name = max(options, key=lambda o: o[0])
+        if _floor(c.impostor, thr) > floor:
             who = f" ({c.impostor_name})" if c.impostor_name else ""
-            c.rejected = (f"would need floor {c.threshold:.3f} to stay clear of "
-                          f"another person{who} - too close to be usable")
+            c.rejected = (
+                f"another face already reaches this crop at {c.impostor:.3f}"
+                f"{who}, at or above its {floor:.3f} floor - a lookalike, not a "
+                f"reference")
 
 
 def scan(min_score: float | None = None, min_margin: float = 0.10,
@@ -362,10 +429,11 @@ def check_impostors(chosen: list[Candidate]) -> ImpostorCheck:
     is a genuine false-accept risk and it is surfaced - but no selection here
     causes it and none can cure it, so it does not refuse anything.
 
-    `after` is the worst similarity between a chosen crop and a DIFFERENT
-    person, measured after that crop's floor is applied. Since the floor is set
-    just above exactly that similarity, this is below the threshold whenever
-    calibration succeeded, and the check is really asking whether it did.
+    `after` is the worst similarity between a chosen crop and any other face -
+    an enrolled person, another candidate, or a real corridor face - measured
+    after the live floor is applied. A crop that a face already reaches above
+    that floor is refused outright as a lookalike, so this reports how much
+    headroom the accepted ones actually have.
     """
     thr = settings.threshold_for(settings.recognizer_model)
     M, owner, _ids, _tags, names = _gallery_rows()
@@ -380,18 +448,21 @@ def check_impostors(chosen: list[Candidate]) -> ImpostorCheck:
     # minutes old and may predate another admin's additions.
     calibrate(chosen, M, owner, names)
 
-    unusable = [(c.name, c.when, c.threshold) for c in chosen if c.rejected]
+    # (who, when, the similarity another face already reaches it at) - the
+    # measurement, not the floor, because the floor is now the same for all of
+    # them and says nothing about why this one was refused.
+    unusable = [(c.name, c.when, c.impostor) for c in chosen if c.rejected]
     usable = [c for c in chosen if not c.rejected]
     after, pair = -1.0, None
     for c in usable:
-        # What the crop can actually reach against another person once its own
-        # floor is in force: the floor is expressed downstream as a shift, so
-        # an impostor at `c.impostor` presents as `impostor - (floor - thr)`.
+        # What another face can actually reach through this crop once its floor
+        # is in force: the floor is expressed downstream as a shift, so a face
+        # at `c.impostor` presents as `impostor - (floor - thr)`.
         effective = c.impostor - (c.threshold - thr)
         if effective > after:
             after = effective
             pair = (f"NEW · {c.name} ({c.when}, {c.camera})",
-                    f"{c.impostor_name or 'another person'} at "
+                    f"{c.impostor_name or 'another face'} at "
                     f"{c.impostor:.3f}, floored to {c.threshold:.3f}")
     return ImpostorCheck(before, after, thr, pair, pre, unusable)
 
@@ -420,48 +491,80 @@ def add(chosen: list[Candidate]) -> int:
 
 
 def recalibrate() -> int:
-    """Recompute every live row's floor against the gallery as it now stands.
+    """Put every stored live row on the current floor, and flag the lookalikes.
 
-    Run after any change to the gallery. A floor is a statement about the rest
-    of the gallery, so it stops being true the moment the gallery changes:
-    adding crop B lowers nothing, but it means row A - calibrated before B
-    existed - has an impostor it was never measured against. Removing a row can
-    only lower floors, which is free accuracy, and this is what collects it.
+    Run after any change to the gallery, after a threshold change, and nightly.
+    The floor itself is flat, so this is cheap - but two things do move under
+    it. `recognition_threshold_override` can rise above `augment_live_floor`,
+    in which case the floor must follow it up; and the corridor probe set grows
+    every day, so a crop that looked clean in September can be shown to be a
+    lookalike in October by a face that had simply not walked past yet.
 
-    Returns the number of rows whose floor moved.
+    A row that fails the check is NOT deleted here - deciding that is an
+    admin's job, and silently removing a gallery entry during a routine sweep
+    is how a person stops being recognised with nothing to explain it. It is
+    logged and reported by `added()`, so the review page can offer it.
+
+    Returns the number of rows whose floor was written.
     """
     from sqlalchemy import update
     from app.db.models import FaceEmbedding
     from app.db.session import session_scope
 
     thr = settings.threshold_for(settings.recognizer_model)
+    floor = max(thr, float(settings.augment_live_floor))
     M, owner, ids, tags, names = _gallery_rows()
     live = [i for i, t in enumerate(tags) if t.startswith(TAG)]
-    if not live or len(M) < 2:
+    if not live:
         return 0
 
     idx = np.array(live, dtype=np.int64)
-    # Same owner masked out, which also masks each row against itself.
-    S = np.where(owner[None, :] != owner[idx][:, None], M[idx] @ M.T, -2.0)
-    at = S.argmax(axis=1)
-    imp = S[np.arange(len(idx)), at]
+    P, near = corridor_probes(dim=int(M.shape[1]))
+    if len(P):
+        S = np.where(np.asarray(near)[None, :] == owner[idx][:, None], -2.0,
+                     M[idx] @ np.asarray(P).T)
+        imp = S.max(axis=1)
+    else:
+        imp = np.full(len(idx), -2.0, np.float32)
 
-    moved = 0
     with session_scope() as s:
         for k, i in enumerate(live):
-            floor = _floor(float(imp[k]), thr)
             s.execute(update(FaceEmbedding)
                       .where(FaceEmbedding.id == ids[i])
                       .values(threshold=floor))
-            moved += 1
-            if floor > settings.augment_max_threshold:
+            if _floor(float(imp[k]), thr) > floor:
                 log.warning(
-                    "gallery: live row %d (%s) now needs floor %.3f to stay "
-                    "clear of %s - it is safe but will effectively never "
-                    "fire; consider removing it",
-                    ids[i], names.get(int(owner[i]), owner[i]), floor,
-                    names.get(int(owner[int(at[k])]), "another person"))
-    return moved
+                    "gallery: live row %d (%s) is reached by a real corridor "
+                    "face at %.3f, at or above its %.3f floor - a lookalike. "
+                    "Review it at /gallery/review; it is not removed here.",
+                    ids[i], names.get(int(owner[i]), owner[i]), float(imp[k]), floor)
+    log.info("gallery: %d live row(s) set to floor %.3f (%d corridor probes)",
+             len(live), floor, len(P))
+    return len(live)
+
+
+def lookalikes() -> dict[int, float]:
+    """Stored live rows a real corridor face already reaches above their floor.
+
+    Same measurement `recalibrate` logs, returned so the review page can show
+    which additions have since been contradicted by traffic. Keyed by
+    `face_embedding.id`, valued by the similarity that reaches it.
+    """
+    thr = settings.threshold_for(settings.recognizer_model)
+    floor = max(thr, float(settings.augment_live_floor))
+    M, owner, ids, tags, _names = _gallery_rows()
+    live = [i for i, t in enumerate(tags) if t.startswith(TAG)]
+    if not live:
+        return {}
+    idx = np.array(live, dtype=np.int64)
+    P, near = corridor_probes(dim=int(M.shape[1]))
+    if not len(P):
+        return {}
+    S = np.where(np.asarray(near)[None, :] == owner[idx][:, None], -2.0,
+                 M[idx] @ np.asarray(P).T)
+    imp = S.max(axis=1)
+    return {ids[i]: float(imp[k]) for k, i in enumerate(live)
+            if _floor(float(imp[k]), thr) > floor}
 
 
 def added() -> list[dict]:
@@ -477,9 +580,13 @@ def added() -> list[dict]:
             .join(Employee, Employee.id == FaceEmbedding.employee_id)
             .where(FaceEmbedding.source_file.like(f"{TAG}%"))
             .order_by(FaceEmbedding.id.desc())).all()
+    bad = lookalikes()
     return [{"id": r[0], "employee_id": r[1], "key": r[2][len(TAG):],
              "margin": r[3] or 0.0, "name": r[4], "threshold": r[5] or 0.0,
-             "dead": (r[5] or 0.0) > settings.augment_max_threshold}
+             "dead": (r[5] or 0.0) > settings.augment_max_threshold,
+             # Set once real traffic has contradicted this crop: some other
+             # face now reaches it above its floor. Shown so it can be removed.
+             "reached": bad.get(r[0], 0.0)}
             for r in rows]
 
 

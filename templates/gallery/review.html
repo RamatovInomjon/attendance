@@ -66,6 +66,7 @@
               ball <strong>{{ "%.3f"|format(c.score) }}</strong><br>
               farq <strong>{{ "%.3f"|format(c.margin) }}</strong><br>
               chegara <strong>{{ "%.3f"|format(c.threshold) }}</strong><br>
+              <span class="text-muted">boshqa yuz {{ "%.3f"|format(c.impostor) }}</span><br>
               <span class="text-muted">{{ c.camera }} · {{ c.frames }} kadr</span><br>
               <span class="text-muted" style="font-size:11px">{{ c.when }}</span>
             </div>
@@ -77,13 +78,15 @@
     {% endfor %}
     <button class="btn btn-primary" type="submit">Tanlanganlarni qo'shish</button>
     <small class="text-muted d-block mt-2">
-      Har bir kadr <strong>o'z chegarasi</strong> bilan qo'shiladi: u boshqa
-      odamning suratlariga qanchalik o'xshasa, chegarasi shunchalik yuqori
-      bo'ladi. Chegaradan past ballda kadr hech kimni ataymaydi, shuning uchun
-      qo'shilgan kadr xato tanishni keltirib chiqara olmaydi. Umumiy chegara
-      {{ "%.3f"|format(threshold) }}; undan yuqori chegara faqat o'sha kadrga
-      tegishli. Xavfsiz chegarasi juda yuqori chiqadigan kadr (boshqa odamga
-      juda o'xshash) qo'shilmaydi va qaysi odam sabab bo'lgani aytiladi.
+      Koridor kadri ro'yxat suratidan <strong>yuqori chegara</strong> bilan
+      ishlaydi: {{ "%.3f"|format(live_floor) }}, umumiy
+      {{ "%.3f"|format(threshold) }} o'rniga. Sababi o'lchangan: chegarasiz
+      koridor kadrlari noma'lum yuzlarning 21.7% iga ism berardi, ro'yxat
+      suratlari esa atigi 2-3% iga. {{ "%.3f"|format(live_floor) }} da bu
+      1.9% ga tushadi &mdash; ya'ni kadr ro'yxat suratidan xavfsizroq bo'ladi,
+      va tanishning 89% i saqlanadi. "boshqa yuz" ustuni &mdash; shu kadrga
+      eng yaqin kelgan begona yuz; agar u chegaradan yuqori bo'lsa, kadr
+      o'xshash deb rad etiladi.
     </small>
   </form>
   {% endif %}
@@ -102,9 +105,10 @@
              style="width:112px;height:112px;object-fit:cover" loading="lazy">
         <div class="small mt-1">{{ e.name }}<br>
           <span class="text-muted">farq {{ "%.3f"|format(e.margin) }}</span><br>
-          <span class="{{ 'text-danger' if e.dead else 'text-muted' }}">
+          <span class="{{ 'text-danger' if e.reached else 'text-muted' }}">
             chegara {{ "%.3f"|format(e.threshold) }}
-            {%- if e.dead %} · ishlamaydi{% endif %}</span></div>
+            {%- if e.reached %} · boshqa yuz {{ "%.3f"|format(e.reached) }} ·
+            o'xshash, o'chirish tavsiya etiladi{% endif %}</span></div>
         <input type="checkbox" name="id" value="{{ e.id }}" class="mt-1">
       </label>
       {% endfor %}
