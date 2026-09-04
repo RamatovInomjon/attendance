@@ -632,3 +632,21 @@ def test_an_already_voided_pass_is_not_touched_again():
                         already_voided=True)
     assert not v.refused
     assert recheck.Report(verdicts=[v]).refused == []
+
+
+def test_a_day_whose_only_sighting_was_voided_does_not_still_read_present():
+    """Found by applying the recheck to production.
+
+    The status recompute lives inside `_apply`, which is only reached when an
+    event moves state. Void the single event of a day and nothing replays, so
+    the row kept the "PRESENT" its reset gave it - a normal attended day with
+    no times on it, which is worse than either flag. Ziyodullaeva Xumora's
+    03-09 row read exactly that after her only check-in was voided.
+    """
+    emp = _emp("Only Sighting")
+    _pass(emp, CAM_IN, CameraRole.IN, _at(9, 0), ENTER)
+    assert _daily(emp).status == "PRESENT"
+    corrections.void_event(_events(emp)[0][0], by="admin")
+    d = _daily(emp)
+    assert d.check_in_time is None and d.check_out_time is None
+    assert d.status == "NO_CHECKIN", "a day with nothing left is not a day attended"

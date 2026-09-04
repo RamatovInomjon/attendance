@@ -308,6 +308,15 @@ class AttendanceService:
                 eff = e.role
             e.transition = self._apply(row, eff, e.ts, e.snapshot)
 
+        # The status recompute lives inside `_apply`, which is only reached when
+        # an event moves state. A day whose ONLY sighting was voided replays
+        # nothing, so the row kept the "PRESENT" the reset gave it - reading as
+        # a normal attended day with no times on it, which is the one answer
+        # that is worse than either flag. Observed on 03-09: Ziyodullaeva
+        # Xumora's single check-in was voided and her row still said PRESENT.
+        if row.status != "NO_CHECKOUT":
+            row.status = "PRESENT" if row.check_in_time is not None else "NO_CHECKIN"
+
         # A finished day with nobody having checked out is flagged, never closed
         # with an invented time - the same rule the end-of-day sweep applies,
         # and it has to be re-applied here because the reset above cleared it.
