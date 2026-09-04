@@ -23,13 +23,13 @@
     Ro'yxat suratlarining o'zida muammo bor
   </h2>
   <p class="text-muted mb-3">
-    Quyidagi juftliklar &mdash; ikki <strong>har xil</strong> xodimning
-    ro'yxat suratlari &mdash; bir-biriga {{ "%.3f"|format(gallery.threshold) }}
-    chegarasidan yuqori o'xshaydi. Bu koridor kadrlaridan kelib chiqmagan:
-    koridor kadri o'z chegarasi bilan ishlaydi, ro'yxat surati esa umumiy
-    chegarada. Ya'ni bu ikki kishi bugun bir-biri deb yozilishi mumkin.
-    Suratlarni ko'ring: agar biri sifatsiz, qiya yoki boshqa odamniki bo'lsa,
-    o'sha bittasini o'chiring.
+    Quyidagi juftliklarda ikki <strong>har xil</strong> xodimning yuzlari
+    bir-biriga o'sha yozuv <em>o'z chegarasidan</em> yuqori o'xshaydi &mdash;
+    ya'ni bu ikki kishi bugun bir-biri deb yozilishi mumkin. Ro'yxat surati
+    umumiy chegarada ({{ "%.3f"|format(gallery.threshold) }}), koridor kadri
+    esa o'zining yuqori chegarasida ishlaydi, shuning uchun har bir yozuv
+    o'zining o'lchoviga qarab baholanadi. Suratlarni ko'ring: agar biri
+    sifatsiz, qiya yoki boshqa odamniki bo'lsa, o'sha bittasini o'chiring.
   </p>
   <form method="post" action="{{ PREFIX }}/gallery/enrolment/remove"
         onsubmit="return confirm('Belgilangan ro\'yxat suratlari galereyadan o\'chiriladi. Davom etilsinmi?')">
@@ -38,6 +38,8 @@
       <div class="mb-2">
         o'xshashlik <strong class="text-danger">{{ "%.3f"|format(pair.similarity) }}</strong>
         &nbsp;·&nbsp; chegara {{ "%.3f"|format(pair.threshold) }}
+        &nbsp;·&nbsp; <span class="text-muted">o'z chegarasi hisobga olinganda
+        {{ "%.3f"|format(pair.effective) }}</span>
       </div>
       <div class="d-flex flex-wrap gap-4 align-items-start">
         {% for side in [pair.a, pair.b] %}
@@ -48,7 +50,10 @@
                onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'text-muted small border rounded d-flex align-items-center justify-content-center',style:'width:180px;height:180px',textContent:'Surat fayli yo\'q'}))">
           <div class="small mt-2">
             <strong>{{ side.name }}</strong><br>
-            <span class="text-muted">{{ side.file }}</span>
+            <span class="badge {{ 'bg-info-subtle text-info-emphasis' if side.live else 'bg-secondary-subtle text-secondary-emphasis' }}">
+              {{ "koridor kadri" if side.live else "ro'yxat surati" }}</span>
+            <span class="text-muted d-block" style="font-size:11px">
+              {{ side.file }} · chegara {{ "%.3f"|format(side.floor) }}</span>
           </div>
           <div class="form-check d-inline-flex align-items-center gap-1 mt-1">
             <input class="form-check-input mt-0" type="checkbox" name="id" value="{{ side.id }}">

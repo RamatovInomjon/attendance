@@ -112,6 +112,10 @@ class ImpostorCheck:
     pair: tuple[str, str] | None = None            # responsible for `after`
     pre_existing: tuple[str, str] | None = None    # responsible for `before`
     unusable: list = field(default_factory=list)   # (name, when, needed floor)
+    # `before` on the scale the MATCHER uses: each row's similarity less its own
+    # floor. A corridor crop at 0.226 that only fires at 0.35 is not a risk, and
+    # judging it by raw similarity reported a false accept that cannot happen.
+    before_effective: float = -1.0
 
     @property
     def safe(self) -> bool:
@@ -125,7 +129,7 @@ class ImpostorCheck:
         this much is a real false-accept risk, but it is one the enrolment
         photography created and only re-enrolment can fix.
         """
-        return self.before >= self.threshold
+        return self.before_effective >= self.threshold
 
 
 def crop_path(key: str) -> Path | None:
@@ -393,29 +397,64 @@ def _gallery_rows():
 
     with session_scope() as s:
         rows = s.execute(select(FaceEmbedding.id, FaceEmbedding.employee_id,
-                                FaceEmbedding.vector,
-                                FaceEmbedding.source_file)).all()
+                                FaceEmbedding.vector, FaceEmbedding.source_file,
+                                FaceEmbedding.threshold)).all()
         names = dict(s.execute(select(Employee.id, Employee.full_name)).all())
     if not rows:
         return (np.zeros((0, 512), np.float32), np.zeros((0,), np.int64),
-                [], [], names)
+                [], [], names, np.zeros((0,), np.float32))
     M = np.stack([np.frombuffer(r[2], np.float32) for r in rows])
     M /= np.linalg.norm(M, axis=1, keepdims=True) + 1e-12
     owner = np.array([r[1] for r in rows], dtype=np.int64)
     ids = [int(r[0]) for r in rows]
     tags = [str(r[3] or "") for r in rows]
-    return M, owner, ids, tags, names
+    thr = settings.threshold_for(settings.recognizer_model)
+    # The floor each row actually answers to. An enrolment photograph has none
+    # and is judged at the global threshold; a corridor crop carries its own.
+    floors = np.array([max(thr, float(r[4])) if r[4] else thr for r in rows],
+                      dtype=np.float32)
+    return M, owner, ids, tags, names, floors
 
 
-def _worst_pair(M, owner, labels):
-    """The closest two rows belonging to DIFFERENT people."""
+def _source_label(tag: str, name) -> str:
+    """What a row IS, not what it is assumed to be.
+
+    This used to label every row "enrolment · <name>", including corridor
+    crops. The worst pair on gpu6 was then reported as two enrolment
+    photographs of Mahmudjon Azimov and Oybek O'ljaboyev at 0.226 - when it was
+    in fact two CORRIDOR CROPS, which answer to a 0.35 floor and cannot name
+    anybody at 0.226. The warning was wrong about what it was showing and wrong
+    that there was anything to fix, and it sent somebody looking through
+    enrolment photographs for a problem that was not in them.
+    """
+    return f"{'koridor kadri' if str(tag).startswith(TAG) else 'enrolment'} · {name}"
+
+
+def _worst_pair(M, owner, labels, floors=None):
+    """The closest two rows belonging to DIFFERENT people, AS THEY ARE JUDGED.
+
+    Similarity alone is the wrong measure once rows answer to different floors.
+    A corridor crop at 0.226 from another person's face is harmless if it only
+    fires at 0.35; an enrolment photograph at 0.226 is a false accept at a 0.220
+    threshold. So the comparison is made on the scale the matcher actually uses
+    - each row's similarity less its own floor - and the raw similarity is
+    reported alongside, because that is the number a human recognises.
+    """
     if len(M) < 2:
-        return -1.0, None
+        return -1.0, -1.0, None
     sim = M @ M.T
     np.fill_diagonal(sim, -1)
     masked = np.where(owner[:, None] != owner[None, :], sim, -1)
-    i, j = np.unravel_index(int(masked.argmax()), masked.shape)
-    return float(masked[i, j]), (labels[i], labels[j])
+    if floors is None:
+        i, j = np.unravel_index(int(masked.argmax()), masked.shape)
+        return float(masked[i, j]), float(masked[i, j]), (labels[i], labels[j])
+    # Row i names its own person, so it is row i's floor that must be cleared.
+    # Expressed as a shift, exactly as Gallery._per_person applies it, so
+    # "effective >= threshold" here means the same thing it means live.
+    thr = settings.threshold_for(settings.recognizer_model)
+    risk = masked - np.asarray(floors, np.float32)[:, None] + thr
+    i, j = np.unravel_index(int(risk.argmax()), risk.shape)
+    return float(masked[i, j]), float(risk[i, j]), (labels[i], labels[j])
 
 
 def worst_pairs(limit: int = 5) -> list[dict]:
@@ -435,36 +474,37 @@ def worst_pairs(limit: int = 5) -> list[dict]:
     two photographs, this similarity" is.
     """
     thr = settings.threshold_for(settings.recognizer_model)
-    M, owner, ids, tags, names = _gallery_rows()
+    M, owner, ids, tags, names, floors = _gallery_rows()
     if len(M) < 2:
         return []
-    live = np.array([t.startswith(TAG) for t in tags])
     sim = M @ M.T
     np.fill_diagonal(sim, -1.0)
-    # Cross-identity only, and enrolment only. A live crop's own floor already
-    # governs it; mixing the two here would report a pair that cannot happen.
-    cross = (owner[:, None] != owner[None, :]) & ~live[:, None] & ~live[None, :]
-    masked = np.where(cross, sim, -1.0)
+    masked = np.where(owner[:, None] != owner[None, :], sim, -1.0)
+    # Judged the way the matcher judges: row i names its own person only once
+    # row i's own floor is cleared. A corridor crop reaching another face at
+    # 0.226 is harmless while it answers to 0.35, and reporting it as a problem
+    # sends somebody hunting through photographs that are not the cause.
+    risk = masked - np.asarray(floors, np.float32)[:, None] + thr
 
     out: list[dict] = []
     seen: set[tuple[int, int]] = set()
-    flat = np.argsort(masked, axis=None)[::-1]
-    for k in flat:
-        i, j = np.unravel_index(int(k), masked.shape)
-        v = float(masked[i, j])
-        if v < thr or len(out) >= limit:
+    for k in np.argsort(risk, axis=None)[::-1]:
+        i, j = np.unravel_index(int(k), risk.shape)
+        if float(risk[i, j]) < thr or len(out) >= limit:
             break
         key = (min(i, j), max(i, j))
         if key in seen:
             continue
         seen.add(key)
-        out.append({
-            "similarity": v, "threshold": thr,
-            "a": {"id": ids[i], "employee_id": int(owner[i]),
-                  "name": names.get(int(owner[i]), str(owner[i])), "file": tags[i]},
-            "b": {"id": ids[j], "employee_id": int(owner[j]),
-                  "name": names.get(int(owner[j]), str(owner[j])), "file": tags[j]},
-        })
+
+        def side(x):
+            return {"id": ids[x], "employee_id": int(owner[x]),
+                    "name": names.get(int(owner[x]), str(owner[x])),
+                    "file": tags[x], "live": bool(tags[x].startswith(TAG)),
+                    "floor": float(floors[x])}
+        out.append({"similarity": float(masked[i, j]),
+                    "effective": float(risk[i, j]), "threshold": thr,
+                    "a": side(i), "b": side(j)})
     return out
 
 
@@ -565,12 +605,13 @@ def check_impostors(chosen: list[Candidate]) -> ImpostorCheck:
     headroom the accepted ones actually have.
     """
     thr = settings.threshold_for(settings.recognizer_model)
-    M, owner, _ids, _tags, names = _gallery_rows()
-    labels = [f"enrolment · {names.get(int(e), e)}" for e in owner]
-    before, pre = _worst_pair(M, owner, labels)
+    M, owner, _ids, tags, names, floors = _gallery_rows()
+    labels = [_source_label(t, names.get(int(e), e))
+              for t, e in zip(tags, owner)]
+    before, before_eff, pre = _worst_pair(M, owner, labels, floors)
 
     if not chosen:
-        return ImpostorCheck(before, -1.0, thr, None, pre)
+        return ImpostorCheck(before, -1.0, thr, None, pre, [], before_eff)
 
     # Re-calibrate the selection against the gallery as it stands right now.
     # The floors carried on the candidates came from the scan, which may be
@@ -593,7 +634,7 @@ def check_impostors(chosen: list[Candidate]) -> ImpostorCheck:
             pair = (f"NEW · {c.name} ({c.when}, {c.camera})",
                     f"{c.impostor_name or 'another face'} at "
                     f"{c.impostor:.3f}, floored to {c.threshold:.3f}")
-    return ImpostorCheck(before, after, thr, pair, pre, unusable)
+    return ImpostorCheck(before, after, thr, pair, pre, unusable, before_eff)
 
 
 def add(chosen: list[Candidate]) -> int:
@@ -642,7 +683,7 @@ def recalibrate() -> int:
 
     thr = settings.threshold_for(settings.recognizer_model)
     floor = max(thr, float(settings.augment_live_floor))
-    M, owner, ids, tags, names = _gallery_rows()
+    M, owner, ids, tags, names, floors = _gallery_rows()
     live = [i for i, t in enumerate(tags) if t.startswith(TAG)]
     if not live:
         return 0
@@ -681,7 +722,7 @@ def lookalikes() -> dict[int, float]:
     """
     thr = settings.threshold_for(settings.recognizer_model)
     floor = max(thr, float(settings.augment_live_floor))
-    M, owner, ids, tags, _names = _gallery_rows()
+    M, owner, ids, tags, _names, _floors = _gallery_rows()
     live = [i for i, t in enumerate(tags) if t.startswith(TAG)]
     if not live:
         return {}

@@ -280,45 +280,70 @@ def test_resolving_validates_its_input():
 
 # --- the enrolment set's own worst pairs -----------------------------------
 
-def test_worst_pairs_reports_only_what_an_admin_can_act_on():
-    """Cross-identity, enrolment-only, at or above the threshold.
+def test_worst_pairs_judges_a_row_by_the_floor_it_actually_answers_to():
+    """The bug this replaced, reproduced.
 
-    Same-person pairs are meaningless, a corridor crop is governed by its own
-    floor rather than the threshold, and a pair below the threshold cannot
-    produce a false accept - listing any of them buries the one that matters.
+    The warning used to rank pairs by raw similarity and label every row
+    "enrolment". On gpu6 it therefore reported two ENROLMENT photographs of
+    Mahmudjon Azimov and Oybek O'ljaboyev at 0.226 against a 0.220 threshold -
+    when both were CORRIDOR CROPS answering to a 0.35 floor, and neither could
+    name anybody at 0.226. Wrong about what it was showing, and wrong that
+    there was anything to fix.
+
+    So: a crop under its own floor must not appear, a crop over it must, and
+    each side must say which kind it is.
     """
     from app.config import settings
     from app.services import augment
     rng = np.random.default_rng(101)
     thr = settings.threshold_for(settings.recognizer_model)
+    floor = max(thr, settings.augment_live_floor)
 
-    a = rng.standard_normal(512).astype(np.float32); a /= np.linalg.norm(a)
-    noise = rng.standard_normal(512).astype(np.float32); noise /= np.linalg.norm(noise)
-    twin = a * 0.9 + noise * 0.1; twin /= np.linalg.norm(twin)      # ~0.99
-    far = rng.standard_normal(512).astype(np.float32); far /= np.linalg.norm(far)
+    def blend(base, other, target):
+        v = base * target + other * float(np.sqrt(max(0.0, 1 - target ** 2)))
+        return (v / np.linalg.norm(v)).astype(np.float32)
+
+    def unit():
+        v = rng.standard_normal(512).astype(np.float32)
+        return v / np.linalg.norm(v)
+
+    a, far = unit(), unit()
+    # Three DIFFERENT directions away from `a`, so each blend is close to `a`
+    # and not to the others - otherwise the fixture accidentally makes two rows
+    # near-identical and the test measures that instead of the floor.
+    twin = blend(a, unit(), (thr + floor) / 2)    # over the threshold, UNDER the floor
+    quiet = blend(a, unit(), (thr + floor) / 2)   # same, as a corridor crop
+    hot = blend(a, unit(), min(0.95, floor + 0.4))  # over the floor as well
 
     made = []
     with session_scope() as s:
-        for nm, v, src in (("Pair One", a, "image_01.png"),
-                           ("Pair Two", twin, "image_01.png"),
-                           ("Unrelated", far, "image_01.png")):
+        for nm, v in (("Pair One", a), ("Pair Two", twin), ("Unrelated", far)):
             e = Employee(full_name=nm, is_active=True); s.add(e); s.flush()
-            s.add(FaceEmbedding(employee_id=e.id, source_file=src,
+            s.add(FaceEmbedding(employee_id=e.id, source_file="image_01.png",
                                 vector=v.tobytes(), dim=512, model_name="m"))
             made.append(e.id)
-        # A corridor crop identical to another person's photo must NOT appear:
-        # it answers to augment_live_floor, not to the threshold.
-        s.add(FaceEmbedding(employee_id=made[2], source_file="live:xyz",
-                            vector=twin.tobytes(), dim=512, model_name="m",
-                            threshold=0.35))
+        # Covered by its floor: must NOT be reported.
+        s.add(FaceEmbedding(employee_id=made[2], source_file="live:quiet",
+                            vector=quiet.tobytes(), dim=512, model_name="m",
+                            threshold=floor))
+        # Not covered: must be.
+        s.add(FaceEmbedding(employee_id=made[2], source_file="live:loud",
+                            vector=hot.tobytes(), dim=512, model_name="m",
+                            threshold=floor))
 
-    pairs = augment.worst_pairs()
+    pairs = augment.worst_pairs(limit=20)
+    files = {p["a"]["file"] for p in pairs} | {p["b"]["file"] for p in pairs}
+    assert "live:quiet" not in files, "a crop under its own floor cannot false-accept"
+    assert "live:loud" in files, "a crop over its own floor still can"
     names = {frozenset((p["a"]["name"], p["b"]["name"])) for p in pairs}
-    assert frozenset(("Pair One", "Pair Two")) in names
-    assert all(p["similarity"] >= thr for p in pairs)
-    assert all(not p["a"]["file"].startswith("live:")
-               and not p["b"]["file"].startswith("live:") for p in pairs)
-    assert all(p["a"]["employee_id"] != p["b"]["employee_id"] for p in pairs)
+    assert frozenset(("Pair One", "Pair Two")) in names, \
+        "two enrolment photos over the threshold are the real case"
+    for p in pairs:
+        assert p["similarity"] >= thr and p["effective"] >= thr
+        assert p["a"]["employee_id"] != p["b"]["employee_id"]
+        for side in (p["a"], p["b"]):
+            assert side["live"] == side["file"].startswith("live:"), \
+                "each side must say what it actually is"
 
 
 def test_removing_an_enrolment_photo_refuses_to_un_enrol_anybody():

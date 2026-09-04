@@ -81,7 +81,7 @@ def main() -> int:
 
     thr = settings.threshold_for(settings.recognizer_model)
     floor = max(thr, float(settings.augment_live_floor))
-    M, owner, ids, tags, names = _gallery_rows()
+    M, owner, ids, tags, names, _floors = _gallery_rows()
     live = np.array([t.startswith(TAG) for t in tags])
     if not len(M):
         print("  the gallery is empty"); return 1
