@@ -525,3 +525,110 @@ def test_the_evidence_route_rejects_an_unknown_kind():
                       headers=_as(admin=True)).status_code in (400, 404)
     assert client.get(f"/attendance/event/{eid}/evidence/passwd",
                       headers=_as(admin=True)).status_code == 400
+
+
+# --- re-deciding history against the current gallery -----------------------
+
+def _capture(name, ts, score, camera, vec):
+    """Write a debug capture the way the pipeline does, so recheck can find it."""
+    import json
+    from app.config import settings
+    import cv2
+    local = ts.astimezone(settings.tz)
+    stem = f"{local:%Y%m%d_%H%M%S}_{score:.3f}_{camera}_001"
+    folder = settings.debug_dir / name.replace(" ", "_")
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"{stem}.json").write_text(json.dumps(
+        {"employee_id": 0, "name": name, "score": score, "camera": camera}))
+    # A 112x112 image whose embedding we cannot control - recheck re-embeds it,
+    # so the test asserts on the PLUMBING (event matched, void applied, day
+    # rebuilt), never on a similarity the recognizer happens to produce.
+    cv2.imwrite(str(folder / f"{stem}_aligned.jpg"),
+                (np.abs(vec[:112 * 112 * 3]).reshape(112, 112, 3) * 255).astype(np.uint8))
+    return stem, folder
+
+
+def test_recheck_matches_a_capture_to_the_event_it_produced():
+    """The join this whole feature rests on: a capture is named in LOCAL time
+    with the score to three places, an event stores UTC and a float. Getting
+    that wrong means either correcting nothing or correcting the wrong row."""
+    from app.services import recheck
+    emp = _emp("Recheck Join")
+    ts = _at(9, 0)
+    _pass(emp, CAM_IN, CameraRole.IN, ts, ENTER, score=0.318)
+    with session_scope() as s:
+        from app.db.models import Camera
+        if s.get(Camera, CAM_IN) is None:
+            s.add(Camera(id=CAM_IN, name="Entrance", role=CameraRole.IN,
+                         rtsp_url="rtsp://x", enabled=False))
+    index = recheck._event_index(None)
+    from app.config import settings
+    local = ts.astimezone(settings.tz)
+    key = f"{local:%Y%m%d_%H%M%S}_0.318_Entrance"
+    assert key in index, "the capture naming and the event must agree"
+    assert index[key][3] == emp
+
+
+def test_recheck_never_invents_a_recognition():
+    """It can only ever remove a name. A pass the current gallery would accept
+    but the old one did not never happened - nobody observed it - and writing
+    attendance for it is fabrication however good the arithmetic."""
+    import inspect
+    from app.services import recheck
+    src = inspect.getsource(recheck)
+    assert "def apply" in src
+    body = src[src.index("def apply"):]
+    assert "void_event" in body
+    for forbidden in ("AttendanceService().record", ".record(", "RecognitionEvent("):
+        assert forbidden not in body, f"apply() must not create events ({forbidden})"
+
+
+def test_recheck_leaves_a_pass_it_cannot_judge_alone():
+    """`debug_capture` may be off and retention sweeps the folder. A decision
+    that cannot be re-derived must not be overturned - it is counted and
+    reported, never voided."""
+    from app.services import recheck
+    emp = _emp("No Capture Person")
+    _pass(emp, CAM_IN, CameraRole.IN, _at(9, 0), ENTER, score=0.771)
+    # A gallery must exist or run() bails out entirely - see the guard there.
+    v = np.random.default_rng(9).standard_normal(512).astype(np.float32)
+    v /= np.linalg.norm(v)
+    with session_scope() as s:
+        s.add(FaceEmbedding(employee_id=emp, source_file="image_01.png",
+                            vector=v.tobytes(), dim=512, model_name="m"))
+    rep = recheck.run()
+    ids = {v.event_id for v in rep.verdicts}
+    assert _events(emp)[0][0] not in ids, "no capture on disk, so no verdict"
+    assert rep.unjudged >= 1
+    with session_scope() as s:
+        assert s.get(RecognitionEvent, _events(emp)[0][0]).voided_at is None
+
+
+def test_applying_a_report_voids_and_rebuilds():
+    """End to end: a refused verdict becomes a voided event and a rebuilt day,
+    through exactly the same path the admin button takes."""
+    from app.services import recheck
+    emp = _emp("Recheck Apply")
+    _pass(emp, CAM_IN, CameraRole.IN, _at(9, 0), ENTER)
+    _pass(emp, CAM_IN, CameraRole.IN, _at(9, 30), ENTER)
+    first = _events(emp)[0][0]
+    rep = recheck.Report(verdicts=[recheck.Verdict(
+        stem="x", event_id=first, employee_id=emp, name="Recheck Apply",
+        camera="Entrance", business_date=business_date(_at(9, 0)),
+        transition="CHECK_IN", score_then=0.30, score_now=0.16,
+        enrolment_best=0.10, still_named=False)])
+    out = recheck.apply(rep, by="tester")
+    assert out["voided"] == 1 and out["days"] == 1
+    with session_scope() as s:
+        assert s.get(RecognitionEvent, first).voided_by == "tester"
+    assert _daily(emp).check_in_time == _at(9, 30), "the day must be rebuilt"
+
+
+def test_an_already_voided_pass_is_not_touched_again():
+    from app.services import recheck
+    v = recheck.Verdict(stem="x", event_id=1, employee_id=1, name="x", camera="c",
+                        business_date=None, transition="CHECK_IN", score_then=0.3,
+                        score_now=0.1, enrolment_best=0.1, still_named=False,
+                        already_voided=True)
+    assert not v.refused
+    assert recheck.Report(verdicts=[v]).refused == []
