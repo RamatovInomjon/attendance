@@ -87,7 +87,10 @@ def _sheet(items, path, cols=8, cell=132, pad=22):
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out", default="data/floor_impact")
+    # Inside data/debug, beside the captures it is made from, so the sheet and
+    # the faces on it live together. The underscore keeps it out of the way of
+    # the per-person folders that `augment.scan` and `crop_path` walk.
+    ap.add_argument("--out", default="data/debug/_floor_impact")
     ap.add_argument("--limit", type=int, default=0)
     args = ap.parse_args()
 
