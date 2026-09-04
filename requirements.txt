@@ -15,6 +15,13 @@
 fastapi==0.141.1
 starlette==0.50.0
 uvicorn==0.52.4
+# NOT optional despite pip treating it as such: plain `uvicorn` has no
+# WebSocket transport, so `ws="auto"` resolves to none and every /ws/...
+# handshake is served as an ordinary GET - which the auth middleware answers
+# with a 303 to /login. The live camera panels then show "Mavjud emas" forever
+# with nothing logged. Pure Python, no dependencies of its own, so it is safe
+# to install with --no-deps on the GPU host.
+websockets==16.1.1
 jinja2==3.1.5
 MarkupSafe==3.0.2
 python-multipart==0.0.32       # multipart form uploads on the enrolment page

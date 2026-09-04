@@ -105,6 +105,24 @@ async def _eod_sweep_loop():
             log.exception("end-of-day sweep failed")
 
 
+def websocket_transport() -> str | None:
+    """The library uvicorn will use for WebSockets, or None if it has none.
+
+    `pip install uvicorn` does NOT pull in `websockets`; only
+    `uvicorn[standard]` does. Without it uvicorn's `ws="auto"` resolves to
+    "none" and a handshake is handled as an ordinary GET - which the auth
+    middleware answers with a 303 to the login page. Nothing errors: the
+    server is healthy, the page loads, and every camera panel just sits on
+    "Mavjud emas" forever. That is what /faceid did in production, and it
+    stayed hidden for weeks because a missing optional dependency is silent.
+    """
+    import importlib.util
+    for name in ("websockets", "wsproto"):
+        if importlib.util.find_spec(name) is not None:
+            return name
+    return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Before anything is served: make sure the console is reachable. On a fresh
@@ -115,6 +133,13 @@ async def lifespan(app: FastAPI):
             log.warning("created the default admin account - change its password at /users")
     except Exception:
         log.exception("could not ensure a default admin account")
+    if websocket_transport() is None:
+        log.warning(
+            "no WebSocket transport installed (neither `websockets` nor "
+            "`wsproto`), so /ws/... cannot be served: uvicorn will answer the "
+            "handshake as plain HTTP and the live camera panels will fall "
+            "back to MJPEG at /video/<id>. Fix with: pip install --no-deps "
+            "websockets")
     runtime.start()
     sweep = (asyncio.create_task(_eod_sweep_loop())
              if settings.eod_sweep_enabled else None)

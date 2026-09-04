@@ -1694,7 +1694,8 @@ body.app-shell {
     background: #050914;
 }
 
-.live-camera-frame canvas {
+.live-camera-frame canvas,
+.live-camera-frame__mjpeg {
     z-index: 1;
     width: 100%;
     height: auto;

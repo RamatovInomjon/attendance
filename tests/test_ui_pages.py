@@ -1709,3 +1709,111 @@ def test_no_javascript_hardcodes_insecure_websockets():
                 assert "ws://" not in line, (
                     f"{js.name} hardcodes ws://; derive it from "
                     f"window.location.protocol: {line.strip()}")
+
+
+def test_live_stream_falls_back_to_mjpeg_when_the_socket_never_delivers_a_frame():
+    """The live page showed "Mavjud emas" on aiscan.airi.uz because uvicorn was
+    installed without `websockets`, so every handshake was served as ordinary
+    HTTP and answered with a login redirect. A socket that closes before a
+    single frame is not a flaky link - it is a deployment where that transport
+    cannot work - so the page moves to the MJPEG endpoint, which is plain HTTP
+    and needs neither the library nor an Upgrade-aware proxy.
+    """
+    root = Path(__file__).resolve().parents[1]
+    contract = r"""
+const assert = require('assert');
+global.window = {
+    location: { protocol: 'https:', host: 'aiscan.airi.uz' },
+    setTimeout: () => 1, clearTimeout: () => {},
+};
+// A document is needed only so `airiPrefix()` finds the deployment prefix -
+// this suite drives the manager directly, not the DOMContentLoaded path.
+global.document = {
+    querySelector: (s) => (s === '[data-url-prefix]'
+        ? { dataset: { urlPrefix: '/faceid' } } : null),
+    addEventListener() {},
+};
+
+class FakeSocket {
+    static instances = [];
+    constructor(url) { this.url = url; this.handlers = {}; FakeSocket.instances.push(this); }
+    addEventListener(t, h) { (this.handlers[t] = this.handlers[t] || []).push(h); }
+    emit(t, e) { (this.handlers[t] || []).forEach((h) => h(e)); }
+    close() {}
+}
+class FakeImage {
+    static instances = [];
+    constructor() { this.handlers = {}; FakeImage.instances.push(this); }
+    addEventListener(t, h) { (this.handlers[t] = this.handlers[t] || []).push(h); }
+    emit(t) { (this.handlers[t] || []).forEach((h) => h()); }
+    remove() { this.removed = true; }
+    set src(v) { this._src = v; }
+    get src() { return this._src; }
+}
+global.WebSocket = FakeSocket;
+global.Image = FakeImage;
+
+const { CameraStreamManager } = require('./static/js/camera_stream.js');
+const placeholder = { hidden: false,
+    setAttribute() { this.hidden = true; }, removeAttribute() { this.hidden = false; } };
+const status = { dataset: {}, textContent: '', classList: { toggle() {} } };
+const canvas = {
+    dataset: { streamEndpoint: '7' }, attrs: {},
+    getAttribute(k) { return k === 'aria-label' ? 'Kirish kamerasi' : null; },
+    setAttribute(k) { this.attrs[k] = true; },
+    removeAttribute(k) { delete this.attrs[k]; },
+    after(node) { this.sibling = node; },
+    getContext() { return { drawImage() {} }; },
+};
+const card = {
+    dataset: { cameraId: '7', streamState: 'unavailable' },
+    querySelector(sel) {
+        return { '[data-stream-canvas]': canvas,
+                 '.live-camera-card__header [data-stream-state]': status,
+                 '[data-stream-placeholder]': placeholder }[sel] || null;
+    },
+};
+
+const manager = new CameraStreamManager();
+manager.connect(card);
+assert.equal(FakeSocket.instances[0].url,
+    'wss://aiscan.airi.uz/faceid/ws/camera/7/', 'socket is tried first');
+
+FakeSocket.instances[0].emit('close');
+const img = FakeImage.instances[0];
+assert.ok(img, 'a frameless close must fall back rather than only retry');
+assert.equal(img.src, '/faceid/video/7', 'MJPEG carries the deployment prefix');
+assert.ok(canvas.attrs.hidden, 'the canvas is hidden while the img is showing');
+assert.equal(canvas.sibling, img);
+
+img.emit('load');
+assert.equal(card.dataset.streamState, 'online');
+assert.equal(placeholder.hidden, true);
+
+// A camera that is not running 404s here exactly as the socket closed 4004.
+img.emit('error');
+assert.equal(card.dataset.streamState, 'offline');
+assert.equal(placeholder.hidden, false);
+
+// Teardown must end the multipart request, or its JPEG encode runs for the
+// life of the page - one more every time the operator hits reconnect.
+manager.disconnect('7');
+assert.equal(img.src, '');
+assert.ok(img.removed);
+assert.ok(!canvas.attrs.hidden, 'the canvas comes back for the next attempt');
+
+// A socket that DID deliver frames is a flaky link, not a dead transport:
+// that one keeps reconnecting instead of downgrading.
+FakeImage.instances.length = 0;
+manager.connect(card);
+const live = FakeSocket.instances[FakeSocket.instances.length - 1];
+live.emit('message', { data: JSON.stringify({ type: 'frame', data: 'jpeg', stale: false }) });
+live.emit('close');
+// decodeFrame builds an Image per frame, so count only MJPEG ones.
+assert.equal(FakeImage.instances.filter((i) => String(i.src).includes('/video/')).length, 0,
+    'a stream that has shown frames must not downgrade on one drop');
+"""
+    result = subprocess.run(
+        ["node", "-e", contract], cwd=root, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr

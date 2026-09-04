@@ -174,6 +174,18 @@ print(f"  gallery     {len(g)} embeddings / {g.n_people} people")
 floored = 0 if getattr(g, "_floor", None) is None else int((g._floor > 0).sum())
 print(f"  floors      {floored} corridor crop(s) with their own threshold")
 print(f"  threshold   {settings.threshold_for(settings.recognizer_model):.3f}")
+
+# Not fatal - the live page falls back to MJPEG - but it must be VISIBLE.
+# `pip install uvicorn` leaves this out; only `uvicorn[standard]` pulls it in,
+# and without it every /ws/... handshake is served as ordinary HTTP and
+# answered with a login redirect. The camera panels then sit on "Mavjud emas"
+# with nothing in the log to say why, which is how it went unnoticed here.
+from app.api.main import websocket_transport
+ws = websocket_transport()
+print(f"  websockets  {ws or 'MISSING - live view will use MJPEG'}")
+if ws is None:
+    print("  to restore the socket transport: pip install --no-deps websockets",
+          file=sys.stderr)
 PYCHK
 
 # --- start ----------------------------------------------------------------

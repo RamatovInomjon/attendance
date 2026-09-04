@@ -25,6 +25,10 @@ function airiSocketUrl(path) {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     return `${protocol}//${window.location.host}${airiPrefix()}${path}`;
 }
+
+function airiHttpUrl(path) {
+    return `${airiPrefix()}${path}`;
+}
 (function initialiseLiveConsole() {
     'use strict';
 
@@ -220,12 +224,12 @@ function airiSocketUrl(path) {
             const wsUrl = airiSocketUrl(`/ws/camera/${streamEndpoint}/`);
             const stream = {
                 card, canvas, streamEndpoint, socket: null, reconnectTimer: null,
-                closed: false, frameSequence: 0,
+                closed: false, frameSequence: 0, framesSeen: 0, image: null,
             };
             this.streams.set(cameraId, stream);
 
             const connectSocket = () => {
-                if (stream.closed) return;
+                if (stream.closed || stream.image) return;
                 const socket = new WebSocket(wsUrl);
                 stream.socket = socket;
 
@@ -236,6 +240,20 @@ function airiSocketUrl(path) {
                 socket.addEventListener('error', () => this.updateState(stream, 'unavailable', 'Mavjud emas'));
                 socket.addEventListener('close', () => {
                     if (stream.closed) return;
+                    // Closed before a single frame arrived. That is not a
+                    // flaky connection - it is a deployment where the socket
+                    // cannot work at all: uvicorn without `websockets`
+                    // installed serves the handshake as ordinary HTTP (which
+                    // the login middleware then answers with a 303), and a
+                    // reverse proxy that does not forward Upgrade behaves the
+                    // same way. Reconnecting forever just repaints "Mavjud
+                    // emas" every three seconds, which is exactly what the
+                    // live page did on aiscan.airi.uz. MJPEG needs neither
+                    // the library nor the proxy's cooperation.
+                    if (stream.framesSeen === 0) {
+                        this.useMjpeg(stream);
+                        return;
+                    }
                     this.updateState(stream, 'unavailable', 'Mavjud emas');
                     if (stream.reconnectTimer === null) {
                         stream.reconnectTimer = window.setTimeout(() => {
@@ -250,10 +268,35 @@ function airiSocketUrl(path) {
             connectSocket();
         }
 
+        /** Fall back to the MJPEG endpoint, which is plain HTTP. */
+        useMjpeg(stream) {
+            if (stream.image || stream.closed) return;
+            const image = new Image();
+            stream.image = image;
+            image.className = 'live-camera-frame__mjpeg';
+            image.alt = stream.canvas.getAttribute('aria-label') || '';
+            image.addEventListener('load', () => {
+                stream.card.querySelector('[data-stream-placeholder]')?.setAttribute('hidden', '');
+                const lastFrame = stream.card.querySelector('[data-camera-metric="last-frame"]');
+                if (lastFrame) lastFrame.textContent = new Date().toLocaleTimeString();
+                this.updateState(stream, 'online', 'Onlayn');
+            });
+            // A camera that is not running 404s here exactly as the socket
+            // closed 4004, so say so rather than showing a broken image.
+            image.addEventListener('error', () => {
+                stream.card.querySelector('[data-stream-placeholder]')?.removeAttribute('hidden');
+                this.updateState(stream, 'offline', 'Mavjud emas');
+            });
+            stream.canvas.setAttribute('hidden', '');
+            stream.canvas.after(image);
+            image.src = airiHttpUrl(`/video/${stream.streamEndpoint}`);
+        }
+
         decodeFrame(stream, rawData) {
             try {
                 const data = JSON.parse(rawData);
                 if (data.type !== 'frame' || !data.data) return;
+                stream.framesSeen += 1;
                 const frameSequence = ++stream.frameSequence;
                 if (data.stale === true) {
                     this.updateState(stream, 'unavailable', 'Oqim eskirgan');
@@ -304,6 +347,17 @@ function airiSocketUrl(path) {
             stream.closed = true;
             if (stream.reconnectTimer !== null) window.clearTimeout(stream.reconnectTimer);
             stream.socket?.close();
+            if (stream.image) {
+                // An MJPEG response never ends on its own: the server's
+                // generator loops until the client goes away. Dropping the
+                // element without clearing src leaves that request - and its
+                // JPEG encode, ten times a second - running for the life of
+                // the page, one more each time the operator hits reconnect.
+                stream.image.src = '';
+                stream.image.remove();
+                stream.image = null;
+                stream.canvas.removeAttribute('hidden');
+            }
             this.streams.delete(cameraId);
         }
 
