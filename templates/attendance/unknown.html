@@ -43,7 +43,7 @@
                 data-evidence-src="{{ snapshot or '' }}" data-evidence-title="Noma'lum #{{ attempt.id }}"
                 data-evidence-subtitle="{{ 'Kamera #' ~ attempt.camera_id if attempt.camera_id else 'Kamera aniqlanmagan' }}">
                 {% if snapshot %}
-                <img src="{{ snapshot|media_url }}" alt="Noma'lum #{{ attempt.id }} uchun eng yaxshi kadr">
+                <img src="{{ snapshot }}" alt="Noma'lum #{{ attempt.id }} uchun eng yaxshi kadr">
                 {% else %}
                 <span class="unknown-review__image-empty"><i class="bi bi-person-x" aria-hidden="true"></i> Tasvir mavjud emas</span>
                 {% endif %}

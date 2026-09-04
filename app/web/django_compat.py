@@ -147,7 +147,18 @@ def media_path(value) -> str:
     media URL in the app is built here for that reason.
     """
     p = app_prefix()
-    v = str(value).lstrip("/")
+    v = str(value)
+    # IDEMPOTENT. A value that has already been through here - or through
+    # `media_url`, which delegates to it - must not be prefixed a second time.
+    # Under a sub-path deployment that produced
+    # `/faceid/media/faceid/media/snapshots/x.jpg`, which 404s, while the same
+    # template rendered correctly on a root deployment because the prefix is
+    # empty and the double application is invisible. That is exactly how it
+    # reached production: /attendance/unknown showed broken thumbnails whose
+    # click-through modal, using the raw value, worked fine.
+    if p and v.startswith(f"{p}/"):
+        return v
+    v = v.lstrip("/")
     if v.startswith("media/"):
         return f"{p}/{v}"
     return f"{p}/media/{v}"
