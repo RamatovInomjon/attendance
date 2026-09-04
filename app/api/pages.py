@@ -233,7 +233,7 @@ def _camera_health(cameras: list[Camera]) -> list[dict]:
 
 # ---------------------------------------------------------------- dashboard --
 @router.get("/", response_class=HTMLResponse)
-def dashboard(request: Request):
+def dashboard(request: Request, msg: str = "", error: str = ""):
     day = today()
     with session_scope() as s:
         total = s.execute(select(func.count(Employee.id))
@@ -253,6 +253,7 @@ def dashboard(request: Request):
         absent_today=max(0, total - present), late_arrivals=late,
         present_ratio=round(present / total * 100) if total else 0,
         today_attendance=records, recent_events=events,
+        is_admin=bool(_admin_only(request)), msg=msg, error=error,
         camera_health=camera_health, weekly_chart_data=weekly_chart_data,
         monthly_chart_data=monthly_chart_data,
         today=day,
@@ -733,18 +734,119 @@ def attendance_history(request: Request):
 
 
 @router.get("/attendance/unknown", response_class=HTMLResponse)
-def attendance_unknown(request: Request):
+def attendance_unknown(request: Request, show: str = "open", msg: str = "",
+                       error: str = ""):
+    """The review queue, and - for an admin - the place labels come from.
+
+    `show=open` hides what has already been decided, because a queue that never
+    shrinks stops being reviewed. `show=all` brings the decisions back so they
+    can be corrected.
+    """
+    me = _admin_only(request)
     with session_scope() as s:
-        rows = s.execute(select(UnknownSighting)
-                         .order_by(UnknownSighting.last_seen.desc()).limit(100)).scalars().all()
+        q = select(UnknownSighting).order_by(UnknownSighting.last_seen.desc())
+        if show != "all":
+            q = q.where(UnknownSighting.resolved_kind.is_(None))
+        rows = s.execute(q.limit(100)).scalars().all()
+        names = dict(s.execute(
+            select(Employee.id, Employee.full_name)
+            .where(Employee.is_active.is_(True))
+            .order_by(Employee.full_name)).all())
         attempts = [{
             "id": u.id, "camera_id": u.camera_id, "attempt_count": u.frames,
             "first_seen": u.first_seen.astimezone(settings.tz),
             "last_seen": u.last_seen.astimezone(settings.tz),
+            "best_score": u.best_score or 0.0,
+            "resolved_kind": u.resolved_kind,
+            "resolved_name": names.get(u.resolved_employee_id or -1, ""),
+            "resolved_by": u.resolved_by or "",
+            "has_vector": u.vector is not None,
             "latest_record": {"snapshot": {"url": media_path(u.snapshot) if u.snapshot else None}},
         } for u in rows]
     return render("attendance/unknown.html", request=request, current_view="attendance:unknown",
-                  unknown_attempts=attempts, page_obj=Page(attempts), is_paginated=False)
+                  unknown_attempts=attempts, page_obj=Page(attempts), is_paginated=False,
+                  employees=sorted(names.items(), key=lambda kv: kv[1]),
+                  is_admin=bool(me), show=show, msg=msg, error=error)
+
+
+# ----------------------------------------------------------- corrections ---
+# An admin saying "that is not that person", and an admin saying who an unknown
+# face actually was. Both fix the record AND leave a label behind - see
+# app/services/corrections.py for why the labels are the more valuable half.
+
+def _back(request: Request, form, default: str) -> str:
+    """Where to return to after a correction.
+
+    The target is caller input, so only a same-site absolute path is accepted.
+    Anything else - a scheme, a protocol-relative "//host" - falls back to the
+    default rather than becoming an open redirect out of an authenticated page.
+    """
+    want = str(form.get("next") or "").strip()
+    if want.startswith("/") and not want.startswith("//") and "\\" not in want:
+        return want
+    return _p(default)
+
+
+@router.post("/attendance/event/{event_id}/void")
+async def event_void(request: Request, event_id: int):
+    from app.services import corrections
+    me = _admin_only(request)
+    if not me:
+        return JSONResponse({"detail": "Admin only"}, status_code=403)
+    form = await request.form()
+    out = corrections.void_event(event_id, by=str(me.get("u") or ""),
+                                 reason=str(form.get("reason") or ""))
+    if out.get("ok"):
+        extra = (f" {out['gallery_rows_removed']} galereya kadri o'chirildi."
+                 if out.get("gallery_rows_removed") else "")
+        note = (f"{out['name']} uchun {out['business_date']} kuni qayta "
+                f"hisoblandi ({out['replayed']} hodisa).{extra}")
+        target = f"{_back(request, form, '/')}?msg={_quote(note)}"
+    else:
+        target = f"{_back(request, form, '/')}?error={_quote(out.get('error', ''))}"
+    return RedirectResponse(target, status_code=303)
+
+
+@router.post("/attendance/event/{event_id}/unvoid")
+async def event_unvoid(request: Request, event_id: int):
+    from app.services import corrections
+    me = _admin_only(request)
+    if not me:
+        return JSONResponse({"detail": "Admin only"}, status_code=403)
+    form = await request.form()
+    out = corrections.unvoid_event(event_id, by=str(me.get("u") or ""))
+    key = "msg" if out.get("ok") else "error"
+    val = "Qaytarildi." if out.get("ok") else out.get("error", "")
+    return RedirectResponse(f"{_back(request, form, '/')}?{key}={_quote(val)}",
+                            status_code=303)
+
+
+@router.post("/attendance/unknown/{sighting_id}/resolve")
+async def unknown_resolve(request: Request, sighting_id: int):
+    from app.services import corrections
+    me = _admin_only(request)
+    if not me:
+        return JSONResponse({"detail": "Admin only"}, status_code=403)
+    form = await request.form()
+    emp = str(form.get("employee_id") or "").strip()
+    out = corrections.resolve_sighting(
+        sighting_id, kind=str(form.get("kind") or ""),
+        employee_id=int(emp) if emp.isdigit() else None,
+        by=str(me.get("u") or ""))
+    back = _back(request, form, "/attendance/unknown")
+    if not out.get("ok"):
+        return RedirectResponse(f"{back}?error={_quote(out.get('error', ''))}",
+                                status_code=303)
+    if out.get("offerable"):
+        note = (f"{out['name']} deb belgilandi. Yuzni galereyaga qo'shish uchun "
+                f"Galereya sahifasiga o'ting - u yerda bir xil chegara va bir "
+                f"xil tekshiruvdan o'tadi.")
+    elif out["kind"] == "visitor":
+        note = ("Xodim emas deb belgilandi. Bu chegaralarni to'g'ri sozlash "
+                "uchun eng qimmatli ma'lumot.")
+    else:
+        note = "Belgilandi."
+    return RedirectResponse(f"{back}?msg={_quote(note)}", status_code=303)
 
 
 # ------------------------------------------------------------------ cameras --
@@ -1036,6 +1138,9 @@ def gallery_review(request: Request, refresh: str = "", msg: str = "",
         threshold=settings.threshold_for(settings.recognizer_model),
         live_floor=max(settings.threshold_for(settings.recognizer_model),
                        settings.augment_live_floor),
+        # The enrolment set's own worst pairs, with both photographs, so an
+        # admin can look at what the warning is actually about and act on it.
+        worst_pairs=augment.worst_pairs(),
         scanned_at=_AUGMENT_CACHE["scanned_at"], msg=msg, error=error)
 
 
@@ -1056,6 +1161,52 @@ def gallery_crop(request: Request, key: str):
     if p is None:
         return JSONResponse({"detail": "not found"}, status_code=404)
     return FileResponse(str(p), media_type="image/jpeg")
+
+
+@router.get("/gallery/enrolment/{embedding_id}")
+def gallery_enrolment(request: Request, embedding_id: int):
+    """Serve one enrolment photograph. Admin-gated and containment-checked, for
+    the same reasons as /gallery/crop - `face_id_users` holds photographs of
+    identified people and the id is caller input."""
+    from app.services import augment
+    if not _admin_only(request):
+        return JSONResponse({"detail": "Admin only"}, status_code=403)
+    p = augment.enrolment_image(embedding_id)
+    if p is None:
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    return FileResponse(str(p))
+
+
+@router.post("/gallery/enrolment/remove")
+async def gallery_enrolment_remove(request: Request):
+    """Delete enrolment embeddings an admin has judged to be the problem.
+
+    Deliberately separate from the corridor-crop removal, which cannot touch an
+    enrolment row at all. This can, so it says plainly what it did and did not
+    do - including that the photograph on disk survives and `scripts/enroll.py`
+    will bring the row back.
+    """
+    from app.services import augment
+    if not _admin_only(request):
+        return JSONResponse({"detail": "Admin only"}, status_code=403)
+    form = await request.form()
+    ids = [int(x) for x in form.getlist("id") if str(x).isdigit()]
+    out = augment.remove_enrolment(ids)
+    _AUGMENT_CACHE["candidates"] = None
+    try:
+        runtime.reload_gallery()
+    except Exception:
+        log.exception("gallery reload after enrolment removal failed")
+    parts = []
+    if out["removed"]:
+        parts.append(f"{out['removed']} ta ro'yxat surati galereyadan o'chirildi. "
+                     f"Fayl diskda qoladi - scripts/enroll.py qayta ishga "
+                     f"tushirilsa, qaytadan qo'shiladi.")
+    parts += out["refused"]
+    key = "msg" if out["removed"] else "error"
+    return RedirectResponse(
+        _p(f"/gallery/review?{key}=" + _quote(" ".join(parts) or "Hech narsa tanlanmadi")),
+        status_code=303)
 
 
 @router.post("/gallery/augment")

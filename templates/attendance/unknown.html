@@ -5,7 +5,20 @@
     <p class="eyebrow mb-2">Ko'rib chiqish navbati</p>
     <h1>Noma'lum kuzatuvlar</h1>
     <p class="mb-0 text-muted">Tizim mos kelmagan treklarni bir dalil kartasida jamlaydi.</p>
+    {% if is_admin %}
+    <p class="mb-0 mt-2 text-muted small">
+      Har bir kartani belgilash mumkin. <strong>&laquo;Xodim emas&raquo;</strong> &mdash;
+      eng qimmatlisi: tizimdagi barcha chegaralar hozirgacha &laquo;hech kimga
+      mos kelmadi&raquo; degan taxminga tayangan, bu esa &laquo;xodim emas&raquo;
+      degani emas &mdash; ba'zilari shunchaki tanilmay qolgan xodimlar. Aniq
+      belgilangan begona yuz esa chegarani rostdan o'lchash imkonini beradi.
+      Belgilash davomatga hech narsa yozmaydi.
+    </p>
+    {% endif %}
 </section>
+
+{% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}
+{% if msg %}<div class="alert alert-success">{{ msg }}</div>{% endif %}
 
 <section class="airi-card unknown-review" aria-labelledby="unknownReviewHeading">
     <div class="unknown-review__toolbar">
@@ -13,7 +26,12 @@
             <h2 id="unknownReviewHeading" class="h5 mb-1">Tanib olinmagan yuzlar</h2>
             <p class="text-muted mb-0">Har bir karta saqlangan eng yaxshi kadrni ko'rsatadi.</p>
         </div>
-        <span class="status-chip status-chip--warning">{{ unknown_attempts|length }} ta trek</span>
+        <div class="d-flex gap-2 align-items-center">
+            <span class="status-chip status-chip--warning">{{ unknown_attempts|length }} ta trek</span>
+            <a class="btn btn-outline-secondary btn-sm"
+               href="{{ PREFIX }}/attendance/unknown?show={{ 'open' if show == 'all' else 'all' }}">
+               {{ "Faqat ko'rilmaganlar" if show == 'all' else "Belgilanganlarni ham" }}</a>
+        </div>
     </div>
 
     {% if unknown_attempts %}
@@ -45,6 +63,44 @@
                 <button class="btn btn-outline-primary btn-sm" type="button" data-airi-evidence
                     data-evidence-src="{{ snapshot or '' }}" data-evidence-title="Noma'lum #{{ attempt.id }}"
                     data-evidence-subtitle="Umumiy dalil ko'rinishi">Dalilni ko'rish</button>
+
+                {% if attempt.resolved_kind %}
+                <div class="mt-2 small">
+                    <span class="status-chip {{ 'status-chip--success' if attempt.resolved_kind == 'employee' else 'status-chip--warning' }}">
+                        {% if attempt.resolved_kind == 'employee' %}{{ attempt.resolved_name }}
+                        {%- elif attempt.resolved_kind == 'visitor' %}Xodim emas
+                        {%- else %}Aniq emas{% endif %}
+                    </span>
+                    {% if attempt.resolved_by %}<span class="text-muted">· {{ attempt.resolved_by }}</span>{% endif %}
+                </div>
+                {% endif %}
+
+                {% if is_admin %}
+                <form method="post" class="mt-2 vstack gap-1"
+                      action="{{ PREFIX }}/attendance/unknown/{{ attempt.id }}/resolve">
+                    <input type="hidden" name="next" value="{{ PREFIX }}/attendance/unknown?show={{ show }}">
+                    <div class="d-flex gap-1">
+                        <select class="form-select form-select-sm js-employee-picker"
+                                name="employee_id" aria-label="Xodimni tanlang"
+                                data-selected="{{ attempt.resolved_employee_id or '' }}">
+                            <option value="">Kim bu?</option>
+                        </select>
+                        <button class="btn btn-primary btn-sm" type="submit" name="kind" value="employee">Saqlash</button>
+                    </div>
+                    <div class="d-flex gap-1">
+                        <button class="btn btn-outline-danger btn-sm flex-grow-1" type="submit"
+                                name="kind" value="visitor">Xodim emas</button>
+                        <button class="btn btn-outline-secondary btn-sm" type="submit"
+                                name="kind" value="unsure">Aniq emas</button>
+                    </div>
+                    {% if not attempt.has_vector %}
+                    <span class="text-muted" style="font-size:11px">
+                        Bu kuzatuvda yuz vektori saqlanmagan &mdash; belgilash mumkin,
+                        lekin chegarani o'lchashda ishlatilmaydi.
+                    </span>
+                    {% endif %}
+                </form>
+                {% endif %}
             </div>
         </article>
         {% endfor %}
@@ -57,4 +113,22 @@
     </div>
     {% endif %}
 </section>
+{% if is_admin %}
+{# The roster is rendered ONCE and cloned into every card's picker. Inlining it
+   per card put 55 options x 100 cards on the page - 846 KB of duplicated
+   markup for a list that is identical every time. #}
+<template id="employeeOptions">
+    {% for eid, ename in employees %}<option value="{{ eid }}">{{ ename }}</option>{% endfor %}
+</template>
+<script>
+    document.addEventListener("DOMContentLoaded", function () {
+        var tpl = document.getElementById("employeeOptions");
+        if (!tpl) return;
+        document.querySelectorAll(".js-employee-picker").forEach(function (sel) {
+            sel.appendChild(tpl.content.cloneNode(true));
+            if (sel.dataset.selected) sel.value = sel.dataset.selected;
+        });
+    });
+</script>
+{% endif %}
 {% endblock %}

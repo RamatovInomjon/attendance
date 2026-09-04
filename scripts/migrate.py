@@ -44,6 +44,13 @@ ADDITIONS = {
     "recognition_event": [
         ("direction", "VARCHAR(16) DEFAULT 'UNKNOWN'"),
         ("direction_reason", "VARCHAR(96) DEFAULT ''"),
+        # Admin corrections. NULL means "standing", which is every existing row.
+        ("voided_at", "DATETIME"), ("voided_by", "VARCHAR(64)"),
+        ("void_reason", "VARCHAR(160)"),
+    ],
+    "unknown_sighting": [
+        ("resolved_employee_id", "INTEGER"), ("resolved_kind", "VARCHAR(16)"),
+        ("resolved_by", "VARCHAR(64)"), ("resolved_at", "DATETIME"),
     ],
     # NULL, not a default: an enrolment photograph has no floor of its own and
     # is judged against the global threshold. Only augmented corridor crops

@@ -53,8 +53,23 @@
                     {% else %}
                     <span class="dashboard-evidence d-flex align-items-center justify-content-center text-muted small" aria-label="Dalil mavjud emas"><i class="bi bi-image" aria-hidden="true"></i></span>
                     {% endif %}
-                    <div class="flex-grow-1 min-w-0"><strong class="d-block text-truncate">{{ event.employee_name }}</strong><span class="text-muted small">{{ event.camera|default("Kamera noma'lum") }}</span></div>
-                    <div class="text-end"><span class="status-chip {% if event.action_type == 'IN' %}status-chip--success{% else %}status-chip--warning{% endif %}">{{ event.action_type }}</span><span class="d-block text-muted small mt-1">{{ event.timestamp|date("H:i") }} · {{ event.confidence|floatformat(3) }}</span></div>
+                    <div class="flex-grow-1 min-w-0">
+                        <strong class="d-block text-truncate {% if event.voided %}text-decoration-line-through text-muted{% endif %}">{{ event.employee_name }}</strong>
+                        <span class="text-muted small">{{ event.camera|default("Kamera noma'lum") }}</span>
+                        {% if event.voided %}<span class="d-block text-danger small">Bekor qilingan{% if event.void_reason %} · {{ event.void_reason }}{% endif %}</span>{% endif %}
+                        {% if is_admin %}
+                        <form method="post" class="d-inline"
+                              action="{{ PREFIX }}/attendance/event/{{ event.id }}/{{ 'unvoid' if event.voided else 'void' }}"
+                              {% if not event.voided %}onsubmit="return confirm('{{ event.employee_name }} emasmi? Shu kun qaytadan hisoblanadi.')"{% endif %}>
+                            <input type="hidden" name="next" value="{{ PREFIX }}/">
+                            {% if not event.voided %}<input type="hidden" name="reason" value="admin: bu u emas">{% endif %}
+                            <button class="btn btn-link btn-sm p-0 text-decoration-none {{ 'text-secondary' if event.voided else 'text-danger' }}" type="submit">
+                                {{ "Qaytarish" if event.voided else "Bu u emas" }}
+                            </button>
+                        </form>
+                        {% endif %}
+                    </div>
+                    <div class="text-end"><span class="status-chip {% if event.voided %}status-chip--danger{% elif event.action_type == 'IN' %}status-chip--success{% else %}status-chip--warning{% endif %}">{{ event.action_type }}</span><span class="d-block text-muted small mt-1">{{ event.timestamp|date("H:i") }} · {{ event.confidence|floatformat(3) }}</span></div>
                 </article>
                 {% else %}
                 <p class="text-muted text-center py-4 mb-0">Hozircha tanishlar yo'q</p>

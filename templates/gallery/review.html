@@ -16,21 +16,59 @@
 {% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}
 {% if msg %}<div class="alert alert-success">{{ msg }}</div>{% endif %}
 
-{% if gallery and gallery.gallery_unsafe %}
-<div class="alert alert-warning">
-  <strong>Ro'yxatdagi suratlarning o'zida muammo bor.</strong>
-  Ikki <em>har xil</em> xodimning ro'yxat suratlari bir-biriga
-  {{ "%.3f"|format(gallery.before) }} darajada o'xshaydi &mdash; bu
-  {{ "%.3f"|format(gallery.threshold) }} chegarasidan yuqori:
-  <div class="small mt-1">
-    {{ gallery.pre_existing[0] }}<br>{{ gallery.pre_existing[1] }}
-  </div>
-  <div class="small mt-1">
-    Bu koridor kadrlaridan kelib chiqmagan va ularni qo'shish bilan
-    tuzalmaydi &mdash; o'sha ikki kishidan birini qayta ro'yxatdan
-    o'tkazish kerak. Shuning uchun bu yerda qo'shishga to'sqinlik qilmaydi.
-  </div>
-</div>
+{% if worst_pairs %}
+<section class="airi-card mb-4 border-warning">
+  <h2 class="h5 mb-1 text-warning-emphasis">
+    <i class="bi bi-exclamation-triangle" aria-hidden="true"></i>
+    Ro'yxat suratlarining o'zida muammo bor
+  </h2>
+  <p class="text-muted mb-3">
+    Quyidagi juftliklar &mdash; ikki <strong>har xil</strong> xodimning
+    ro'yxat suratlari &mdash; bir-biriga {{ "%.3f"|format(gallery.threshold) }}
+    chegarasidan yuqori o'xshaydi. Bu koridor kadrlaridan kelib chiqmagan:
+    koridor kadri o'z chegarasi bilan ishlaydi, ro'yxat surati esa umumiy
+    chegarada. Ya'ni bu ikki kishi bugun bir-biri deb yozilishi mumkin.
+    Suratlarni ko'ring: agar biri sifatsiz, qiya yoki boshqa odamniki bo'lsa,
+    o'sha bittasini o'chiring.
+  </p>
+  <form method="post" action="{{ PREFIX }}/gallery/enrolment/remove"
+        onsubmit="return confirm('Belgilangan ro\'yxat suratlari galereyadan o\'chiriladi. Davom etilsinmi?')">
+    {% for pair in worst_pairs %}
+    <div class="border rounded p-3 mb-3">
+      <div class="mb-2">
+        o'xshashlik <strong class="text-danger">{{ "%.3f"|format(pair.similarity) }}</strong>
+        &nbsp;·&nbsp; chegara {{ "%.3f"|format(pair.threshold) }}
+      </div>
+      <div class="d-flex flex-wrap gap-4 align-items-start">
+        {% for side in [pair.a, pair.b] %}
+        <label class="text-center" style="width:190px;cursor:pointer">
+          <img src="{{ PREFIX }}/gallery/enrolment/{{ side.id }}"
+               alt="{{ side.name }}" loading="lazy"
+               style="width:180px;height:180px;object-fit:cover;border-radius:8px"
+               onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'text-muted small border rounded d-flex align-items-center justify-content-center',style:'width:180px;height:180px',textContent:'Surat fayli yo\'q'}))">
+          <div class="small mt-2">
+            <strong>{{ side.name }}</strong><br>
+            <span class="text-muted">{{ side.file }}</span>
+          </div>
+          <div class="form-check d-inline-flex align-items-center gap-1 mt-1">
+            <input class="form-check-input mt-0" type="checkbox" name="id" value="{{ side.id }}">
+            <span class="small">shu suratni o'chirish</span>
+          </div>
+        </label>
+        {% endfor %}
+      </div>
+    </div>
+    {% endfor %}
+    <button class="btn btn-outline-danger" type="submit">Belgilanganlarni o'chirish</button>
+    <small class="text-muted d-block mt-2">
+      Faqat galereyadagi yozuv o'chiriladi; fayl <code>face_id_users/</code> da
+      qoladi va <code>scripts/enroll.py</code> qayta ishga tushirilsa yana
+      qo'shiladi. Odamning oxirgi surati o'chirilmaydi &mdash; aks holda u
+      hech qachon tanilmay qolardi va buning sababi hech qayerda ko'rinmasdi.
+      Eng yaxshi yechim &mdash; o'sha xodimni qayta suratga olish.
+    </small>
+  </form>
+</section>
 {% endif %}
 
 <section class="airi-card mb-4">

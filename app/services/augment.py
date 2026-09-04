@@ -418,6 +418,135 @@ def _worst_pair(M, owner, labels):
     return float(masked[i, j]), (labels[i], labels[j])
 
 
+def worst_pairs(limit: int = 5) -> list[dict]:
+    """The closest pairs of enrolment photographs belonging to DIFFERENT people.
+
+    Shown so they can be looked at. Two studio photographs that resemble each
+    other above the recognition threshold are a live false-accept risk, and it
+    is the one class of problem augmentation cannot help with: the crops answer
+    to their own floor, but the enrolment set is judged at the global threshold
+    and always has been. On gpu6 this pair reaches 0.226 against a 0.220
+    threshold.
+
+    Only pairs at or above the threshold are worth a person's attention, so
+    that is the cut. Everything needed to render and act on them comes back
+    with each row - both sides, their embedding ids, and the file each came
+    from - because "your gallery has a problem" is not actionable and "these
+    two photographs, this similarity" is.
+    """
+    thr = settings.threshold_for(settings.recognizer_model)
+    M, owner, ids, tags, names = _gallery_rows()
+    if len(M) < 2:
+        return []
+    live = np.array([t.startswith(TAG) for t in tags])
+    sim = M @ M.T
+    np.fill_diagonal(sim, -1.0)
+    # Cross-identity only, and enrolment only. A live crop's own floor already
+    # governs it; mixing the two here would report a pair that cannot happen.
+    cross = (owner[:, None] != owner[None, :]) & ~live[:, None] & ~live[None, :]
+    masked = np.where(cross, sim, -1.0)
+
+    out: list[dict] = []
+    seen: set[tuple[int, int]] = set()
+    flat = np.argsort(masked, axis=None)[::-1]
+    for k in flat:
+        i, j = np.unravel_index(int(k), masked.shape)
+        v = float(masked[i, j])
+        if v < thr or len(out) >= limit:
+            break
+        key = (min(i, j), max(i, j))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            "similarity": v, "threshold": thr,
+            "a": {"id": ids[i], "employee_id": int(owner[i]),
+                  "name": names.get(int(owner[i]), str(owner[i])), "file": tags[i]},
+            "b": {"id": ids[j], "employee_id": int(owner[j]),
+                  "name": names.get(int(owner[j]), str(owner[j])), "file": tags[j]},
+        })
+    return out
+
+
+def enrolment_image(embedding_id: int) -> Path | None:
+    """The photograph one enrolment embedding was built from.
+
+    Resolved and CONTAINMENT-CHECKED against `gallery_dir`, for the same reason
+    `crop_path` is: the id arrives from a web request. A browser-captured
+    enrolment has no file on disk and returns None.
+    """
+    from sqlalchemy import select
+    from app.db.models import Employee, FaceEmbedding
+    from app.db.session import session_scope
+
+    with session_scope() as s:
+        row = s.execute(
+            select(FaceEmbedding.source_file, Employee.folder)
+            .join(Employee, Employee.id == FaceEmbedding.employee_id)
+            .where(FaceEmbedding.id == int(embedding_id))).first()
+    if not row or not row[0] or not row[1]:
+        return None
+    root = settings.gallery_dir.resolve()
+    p = (root / row[1] / row[0]).resolve()
+    return p if p.is_file() and p.is_relative_to(root) else None
+
+
+def remove_enrolment(ids: list[int]) -> dict:
+    """Delete enrolment embeddings, refusing to un-enrol anybody by accident.
+
+    Separate from `remove()`, which is deliberately unable to touch anything
+    but a `live:` row. This one can, so it carries the guard that one does not
+    need: a person whose last embedding is deleted stops being recognisable
+    with nothing in the UI to say why. That is refused.
+
+    The photograph on disk is NOT deleted. `scripts/enroll.py` rebuilds the
+    whole gallery from `face_id_users/`, so a row removed here comes back on
+    the next enrolment run - which is the right default, because this is a
+    judgement about one embedding and re-enrolment is a decision about the
+    source data. The caller is told, so it can say so.
+    """
+    from sqlalchemy import delete, func, select
+    from app.db.models import Employee, FaceEmbedding
+    from app.db.session import session_scope
+
+    ids = [int(i) for i in ids]
+    if not ids:
+        return {"removed": 0, "refused": []}
+    with session_scope() as s:
+        rows = s.execute(
+            select(FaceEmbedding.id, FaceEmbedding.employee_id,
+                   FaceEmbedding.source_file, Employee.full_name)
+            .join(Employee, Employee.id == FaceEmbedding.employee_id)
+            .where(FaceEmbedding.id.in_(ids))).all()
+        # ENROLMENT rows only. Counting a person's corridor crops here would
+        # let their last studio photograph be deleted because they happen to
+        # have two crops - leaving them matchable only through a 0.35 floor,
+        # which is a quieter version of exactly the failure this refuses.
+        counts = dict(s.execute(
+            select(FaceEmbedding.employee_id, func.count())
+            .where(FaceEmbedding.employee_id.in_([r[1] for r in rows]),
+                   FaceEmbedding.source_file.not_like(f"{TAG}%"))
+            .group_by(FaceEmbedding.employee_id)).all())
+
+        ok, refused = [], []
+        for eid, emp, src, name in rows:
+            if str(src or "").startswith(TAG):
+                refused.append(f"{name}: use the corridor-crop control for that one")
+                continue
+            left = counts.get(emp, 0) - sum(1 for x in ok if x[1] == emp) - 1
+            if left < 1:
+                refused.append(f"{name}: this is their last photograph - "
+                               f"removing it would un-enrol them silently")
+                continue
+            ok.append((eid, emp))
+        if ok:
+            s.execute(delete(FaceEmbedding)
+                      .where(FaceEmbedding.id.in_([x[0] for x in ok])))
+    log.info("gallery: removed %d enrolment embedding(s), refused %d",
+             len(ok), len(refused))
+    return {"removed": len(ok), "refused": refused}
+
+
 def check_impostors(chosen: list[Candidate]) -> ImpostorCheck:
     """What the selection would actually do to false accepts.
 

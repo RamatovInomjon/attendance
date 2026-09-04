@@ -168,6 +168,15 @@ class RecognitionEvent(Base):
     transition = Column(String(32), default="")   # "" | CHECK_IN | CHECK_OUT | RE_SIGHTING
     direction = Column(String(16), default="UNKNOWN")     # ENTER | EXIT | UNKNOWN
     direction_reason = Column(String(96), default="")     # why, for auditing
+    # An admin said this is not that person. VOIDED, NOT DELETED: the table is
+    # the record, and a row that is gone can neither be audited nor learned
+    # from. A voided event takes no part in the attendance state - the day is
+    # rebuilt from the survivors - and becomes a labelled impostor for the name
+    # it wrongly carried, which is the calibration set the thresholds have
+    # never had. See app/services/corrections.py.
+    voided_at = Column(UtcDateTime(), nullable=True)
+    voided_by = Column(String(64), nullable=True)
+    void_reason = Column(String(160), nullable=True)
 
     __table_args__ = (
         Index("ix_event_emp_date", "employee_id", "business_date"),
@@ -234,6 +243,16 @@ class UnknownSighting(Base):
     nearest_employee_id = Column(Integer, nullable=True)
     vector = Column(LargeBinary, nullable=True)
     snapshot = Column(String(255), nullable=True)
+    # What an admin decided this face actually was. `resolved_kind` carries the
+    # weight: "visitor" - a confirmed non-employee - is the single most useful
+    # label this system can produce, because impostor probes are what every
+    # threshold here has been guessed without. "employee" names them and offers
+    # the stored vector to the gallery; neither writes attendance.
+    resolved_employee_id = Column(Integer, ForeignKey("employee.id", ondelete="SET NULL"),
+                                  nullable=True)
+    resolved_kind = Column(String(16), nullable=True)   # employee | visitor | unsure
+    resolved_by = Column(String(64), nullable=True)
+    resolved_at = Column(UtcDateTime(), nullable=True)
 
 
 class ReidPass(Base):

@@ -167,6 +167,31 @@ class AttendanceService:
             eff = role          # fallback for cameras with no geometry configured
 
         daily = self._daily(s, employee_id, bdate)
+        transition = self._apply(daily, eff, ts, snapshot)
+        daily.event_count = (daily.event_count or 0) + 1
+
+        s.add(RecognitionEvent(
+            employee_id=employee_id, camera_id=camera_id, role=role, ts=ts,
+            business_date=bdate, score=score, margin=margin, track_id=track_id,
+            face_px=face_px, votes=votes, snapshot=snapshot, accepted=True,
+            transition=transition, direction=direction,
+            direction_reason=direction_reason[:96],
+        ))
+        return Decision(transition, daily.id)
+
+    def _apply(self, daily, eff: CameraRole | None, ts: datetime,
+               snapshot: str | None) -> str:
+        """Move one daily row's presence state for one sighting.
+
+        Separated from `record` so the SAME state machine can be replayed over
+        the surviving events when an admin voids one - see `rebuild`. Derived
+        state cannot be patched by hand: `worked_seconds` accumulates and
+        `presence` is a latch, so subtracting one event's effect is guesswork
+        that goes wrong the moment two events interleave. Replaying the real
+        rules is the only version that stays correct as the rules change.
+
+        Returns the transition; the caller owns `event_count` and the row.
+        """
         transition = "RE_SIGHTING" if eff is not None else "NO_DIRECTION"
 
         if eff in (CameraRole.IN, CameraRole.BOTH) and daily.presence == PresenceStatus.OUTSIDE:
@@ -204,8 +229,6 @@ class AttendanceService:
                 daily.check_out_snapshot = snapshot
             transition = "CHECK_OUT"
 
-        daily.event_count = (daily.event_count or 0) + 1
-
         # First sighting of the day on the OUT camera: the person is leaving a
         # building we never saw them enter -- they came in through an uncovered
         # door, or the IN camera missed them.  Flag it for review rather than
@@ -224,15 +247,83 @@ class AttendanceService:
         # legitimately overwrite it.
         if daily.status != "NO_CHECKOUT":
             daily.status = "PRESENT" if daily.check_in_time is not None else "NO_CHECKIN"
+        return transition
 
-        s.add(RecognitionEvent(
-            employee_id=employee_id, camera_id=camera_id, role=role, ts=ts,
-            business_date=bdate, score=score, margin=margin, track_id=track_id,
-            face_px=face_px, votes=votes, snapshot=snapshot, accepted=True,
-            transition=transition, direction=direction,
-            direction_reason=direction_reason[:96],
-        ))
-        return Decision(transition, daily.id)
+    def rebuild(self, s, employee_id: int, bdate: date) -> int:
+        """Recompute one person's day from the events that still stand.
+
+        Called after an admin voids a recognition. The daily row is DERIVED
+        state - `worked_seconds` accumulates, `presence` is a latch, and
+        `check_in_time` keeps the earliest - so it cannot be corrected by
+        subtracting the voided event's effect. Nor can the stored transitions
+        simply be replayed: a transition is a function of the state at the time,
+        so voiding the event that produced CHECK_IN means the next event's
+        RE_SIGHTING must BECOME the check-in. Both are recomputed here, and the
+        events' `transition` column is rewritten to match, so the log and the
+        summary never disagree.
+
+        Only `transition` is rewritten. Nothing else on an event is touched: the
+        score, the snapshot and the time are what the camera saw, and no
+        correction makes them untrue.
+
+        Returns the number of events replayed.
+        """
+        from app.core.direction import config_from_camera
+        from app.db.models import Camera
+
+        row = self._daily(s, employee_id, bdate)
+        row.presence = PresenceStatus.OUTSIDE
+        row.entered_at = None
+        row.check_in_time = row.check_out_time = None
+        row.check_in_snapshot = row.check_out_snapshot = None
+        row.worked_seconds = 0
+        row.event_count = 0
+        row.status = "PRESENT"
+
+        # Whether a camera can fall back to its ROLE when direction is unknown
+        # is a property of its geometry, exactly as it is on the capture thread
+        # (worker.py passes `direction_cfg.configured`). Read it from the same
+        # place rather than storing a second copy on every event.
+        geom = {c.id: config_from_camera(c).configured
+                for c in s.execute(select(Camera)).scalars().all()}
+
+        events = s.execute(
+            select(RecognitionEvent)
+            .where(RecognitionEvent.employee_id == employee_id,
+                   RecognitionEvent.business_date == bdate,
+                   RecognitionEvent.voided_at.is_(None))
+            .order_by(RecognitionEvent.ts, RecognitionEvent.id)
+        ).scalars().all()
+
+        for e in events:
+            row.event_count = (row.event_count or 0) + 1
+            if e.transition == "DUPLICATE_VIEW":
+                # The losing half of a cross-camera pair. It was recorded as
+                # evidence and deliberately moved no state; replaying it as a
+                # transition would invent the second check-in the arbiter
+                # exists to prevent.
+                continue
+            eff = self._effective_role(e.role, e.direction or "")
+            if eff is None and not geom.get(e.camera_id, True):
+                eff = e.role
+            e.transition = self._apply(row, eff, e.ts, e.snapshot)
+
+        # A finished day with nobody having checked out is flagged, never closed
+        # with an invented time - the same rule the end-of-day sweep applies,
+        # and it has to be re-applied here because the reset above cleared it.
+        if row.presence == PresenceStatus.INSIDE and bdate < business_date(
+                datetime.now(settings.tz)):
+            self._close_row(row)
+        return len(events)
+
+    @staticmethod
+    def _close_row(r) -> None:
+        """Flag one unfinished day. Shared by the sweep and by `rebuild`."""
+        if settings.open_interval_policy == "close_at_eod":
+            r.presence = PresenceStatus.OUTSIDE
+            r.entered_at = None
+        if r.status != "NO_CHECKIN":
+            r.status = "NO_CHECKOUT"
 
     def close_open_intervals(self, s, bdate: date, *, catch_up: bool = True) -> int:
         """End-of-day sweep.
@@ -258,9 +349,5 @@ class AttendanceService:
         )
         rows = s.execute(q).scalars().all()
         for r in rows:
-            if settings.open_interval_policy == "close_at_eod":
-                r.presence = PresenceStatus.OUTSIDE
-                r.entered_at = None
-            if r.status != "NO_CHECKIN":
-                r.status = "NO_CHECKOUT"
+            self._close_row(r)
         return len(rows)

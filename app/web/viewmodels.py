@@ -109,6 +109,12 @@ class EventVM:
     confidence: float
     camera: str
     transition: str
+    # An admin said this is not that person. The row stays visible, struck
+    # through, because hiding a correction makes the log agree with itself by
+    # forgetting - and an operator who cannot see that a fix landed will apply
+    # it again.
+    voided: bool = False
+    void_reason: str = ""
 
     @classmethod
     def of(cls, e, name, dept, cam):
@@ -130,6 +136,8 @@ class EventVM:
             timestamp=_local(e.ts),
             snapshot=media_path(e.snapshot) if e.snapshot else None,
             confidence=e.score or 0.0, camera=cam or "", transition=transition,
+            voided=getattr(e, "voided_at", None) is not None,
+            void_reason=getattr(e, "void_reason", "") or "",
         )
 
 
