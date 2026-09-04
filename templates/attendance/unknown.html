@@ -5,7 +5,7 @@
     <p class="eyebrow mb-2">Ko'rib chiqish navbati</p>
     <h1>Noma'lum kuzatuvlar</h1>
     <p class="mb-0 text-muted">Tizim mos kelmagan treklarni bir dalil kartasida jamlaydi.</p>
-    {% if is_admin %}
+    {% if can_correct %}
     <p class="mb-0 mt-2 text-muted small">
       Har bir kartani belgilash mumkin. <strong>&laquo;Xodim emas&raquo;</strong> &mdash;
       eng qimmatlisi: tizimdagi barcha chegaralar hozirgacha &laquo;hech kimga
@@ -75,7 +75,7 @@
                 </div>
                 {% endif %}
 
-                {% if is_admin %}
+                {% if can_correct %}
                 <form method="post" class="mt-2 vstack gap-1"
                       action="{{ PREFIX }}/attendance/unknown/{{ attempt.id }}/resolve">
                     <input type="hidden" name="next" value="{{ PREFIX }}/attendance/unknown?show={{ show }}">
@@ -113,7 +113,7 @@
     </div>
     {% endif %}
 </section>
-{% if is_admin %}
+{% if can_correct %}
 {# The roster is rendered ONCE and cloned into every card's picker. Inlining it
    per card put 55 options x 100 cards on the page - 846 KB of duplicated
    markup for a list that is identical every time. #}

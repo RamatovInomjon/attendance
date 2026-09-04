@@ -34,13 +34,17 @@
     <div class="row g-3">
         <div class="col-6 col-lg-3"><a class="airi-card d-flex flex-column gap-2 h-100 p-3 text-decoration-none" href="{{ url('attendance:list') }}"><i class="bi bi-calendar2-check fs-4" aria-hidden="true"></i><strong>Davomat</strong><span class="text-muted small">Bugungi qaydlar</span></a></div>
         <div class="col-6 col-lg-3"><a class="airi-card d-flex flex-column gap-2 h-100 p-3 text-decoration-none" href="{{ url('employees:list') }}"><i class="bi bi-people fs-4" aria-hidden="true"></i><strong>Xodimlar</strong><span class="text-muted small">Faol ro'yxat</span></a></div>
+        {% if can_admin %}
         <div class="col-6 col-lg-3"><a class="airi-card d-flex flex-column gap-2 h-100 p-3 text-decoration-none" href="{{ url('recognition:live') }}"><i class="bi bi-broadcast-pin fs-4" aria-hidden="true"></i><strong>Jonli kuzatuv</strong><span class="text-muted small">Kamera oqimlari</span></a></div>
+        {% else %}
+        <div class="col-6 col-lg-3"><a class="airi-card d-flex flex-column gap-2 h-100 p-3 text-decoration-none" href="{{ url('attendance:unknown') }}"><i class="bi bi-person-x fs-4" aria-hidden="true"></i><strong>Noma'lumlar</strong><span class="text-muted small">Ko'rib chiqish navbati</span></a></div>
+        {% endif %}
         <div class="col-6 col-lg-3"><a class="airi-card d-flex flex-column gap-2 h-100 p-3 text-decoration-none" href="{{ url('attendance:export') }}?day={{ today }}"><i class="bi bi-file-earmark-arrow-down fs-4" aria-hidden="true"></i><strong>Hisobot</strong><span class="text-muted small">CSV eksport</span></a></div>
     </div>
 </section>
 
 <div class="row g-4 mb-4">
-    <section class="col-12 col-xl-7" aria-labelledby="recentEventsHeading">
+    <section class="col-12 {% if can_admin %}col-xl-7{% endif %}" aria-labelledby="recentEventsHeading">
         <div class="airi-card h-100 p-3">
             <div class="d-flex justify-content-between align-items-center mb-3"><h2 class="h4 mb-0" id="recentEventsHeading">So'nggi tanishlar</h2><span class="text-muted small">Oxirgi 12 ta</span></div>
             <div class="vstack gap-3">
@@ -57,12 +61,12 @@
                         <strong class="d-block text-truncate {% if event.voided %}text-decoration-line-through text-muted{% endif %}">{{ event.employee_name }}</strong>
                         <span class="text-muted small">{{ event.camera|default("Kamera noma'lum") }}</span>
                         {% if event.voided %}<span class="d-block text-danger small">Bekor qilingan{% if event.void_reason %} · {{ event.void_reason }}{% endif %}</span>{% endif %}
-                        {% if is_admin %}
+                        {% if can_correct %}
                         <form method="post" class="d-inline"
                               action="{{ PREFIX }}/attendance/event/{{ event.id }}/{{ 'unvoid' if event.voided else 'void' }}"
                               {% if not event.voided %}onsubmit="return confirm('{{ event.employee_name }} emasmi? Shu kun qaytadan hisoblanadi.')"{% endif %}>
                             <input type="hidden" name="next" value="{{ PREFIX }}/">
-                            {% if not event.voided %}<input type="hidden" name="reason" value="admin: bu u emas">{% endif %}
+                            {% if not event.voided %}<input type="hidden" name="reason" value="bu u emas">{% endif %}
                             <button class="btn btn-link btn-sm p-0 text-decoration-none {{ 'text-secondary' if event.voided else 'text-danger' }}" type="submit">
                                 {{ "Qaytarish" if event.voided else "Bu u emas" }}
                             </button>
@@ -77,6 +81,7 @@
             </div>
         </div>
     </section>
+    {% if can_admin %}
     <section class="col-12 col-xl-5" aria-labelledby="systemHealthHeading">
         <div class="airi-card h-100 p-3">
             <h2 class="h4 mb-3" id="systemHealthHeading">Tizim holati</h2>
@@ -89,6 +94,7 @@
             </div>
         </div>
     </section>
+    {% endif %}
 </div>
 
 <section class="airi-card p-3 mb-4" aria-labelledby="todayTableHeading">

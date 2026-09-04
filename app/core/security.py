@@ -104,9 +104,13 @@ def _unb64(txt: str) -> bytes:
     return base64.urlsafe_b64decode(txt + "=" * (-len(txt) % 4))
 
 
-def sign_session(*, user_id: int, username: str, is_admin: bool) -> str:
+def sign_session(*, user_id: int, username: str, is_admin: bool,
+                 role: str | None = None) -> str:
+    """Mint the cookie. `role` is what authorisation reads; `adm` is kept
+    because it is what the templates and older cookies already speak."""
     payload = {"uid": int(user_id), "u": username,
-               "adm": bool(is_admin), "iat": int(time.time())}
+               "adm": bool(is_admin), "r": role or ("admin" if is_admin else "viewer"),
+               "iat": int(time.time())}
     body = _b64(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
     sig = hmac.new(_secret(), body.encode("ascii"), hashlib.sha256).digest()
     return f"{body}.{_b64(sig)}"
@@ -129,6 +133,12 @@ def read_session(token: str | None) -> dict | None:
         return None
     if time.time() - float(payload.get("iat", 0)) > MAX_AGE_S:
         return None
+    # A cookie minted before roles existed carries only `adm`. Deriving the
+    # role here rather than at each call site means nobody has to remember
+    # that an absent "r" is not the same as "no permissions" - which, for the
+    # twelve hours those cookies stay valid, would log every operator out of
+    # their own corrections.
+    payload.setdefault("r", "admin" if payload.get("adm") else "viewer")
     return payload
 
 

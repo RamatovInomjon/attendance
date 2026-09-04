@@ -30,7 +30,9 @@
         </a>
 
         <div class="app-nav__controls">
+            {% if current_user and current_user.r == 'admin' %}
             <a class="app-nav__health" href="{{ url('recognition:live') }}"><i class="bi bi-activity" aria-hidden="true"></i><span>Pipeline holati</span></a>
+            {% endif %}
             <button id="themeToggle" class="btn app-nav__theme-toggle" type="button" aria-pressed="false" aria-label="Yorug' mavzu">
                 <i class="bi bi-sun" aria-hidden="true"></i><span id="themeToggleLabel">Yorug' mavzu</span>
             </button>
@@ -45,11 +47,13 @@
                 <li class="nav-item"><a class="nav-link {% if current_view == 'dashboard:home' %}active{% endif %}" href="{{ url('dashboard:home') }}"><i class="bi bi-grid-1x2" aria-hidden="true"></i><span>Boshqaruv</span></a></li>
                 <li class="nav-item"><a class="nav-link {% if current_view == 'employees:list' %}active{% endif %}" href="{{ url('employees:list') }}"><i class="bi bi-people" aria-hidden="true"></i><span>Xodimlar</span></a></li>
                 <li class="nav-item"><a class="nav-link {% if current_view == 'attendance:list' %}active{% endif %}" href="{{ url('attendance:list') }}"><i class="bi bi-calendar2-check" aria-hidden="true"></i><span>Davomat</span></a></li>
+                {% if current_user and current_user.r == 'admin' %}
                 <li class="nav-item"><a class="nav-link {% if current_view == 'recognition:live' %}active{% endif %}" href="{{ url('recognition:live') }}"><i class="bi bi-broadcast-pin" aria-hidden="true"></i><span>Jonli kuzatuv</span></a></li>
+                {% endif %}
                 <li class="nav-item"><a class="nav-link {% if current_view == 'employees:register' %}active{% endif %}" href="{{ url('employees:register') }}"><i class="bi bi-person-plus" aria-hidden="true"></i><span>Ro'yxatdan o'tkazish</span></a></li>
                 <li class="nav-item"><a class="nav-link {% if current_view == 'attendance:unknown' %}active{% endif %}" href="{{ url('attendance:unknown') }}"><i class="bi bi-person-x" aria-hidden="true"></i><span>Noma'lumlar</span></a></li>
+                {% if current_user and current_user.r == 'admin' %}
                 <li class="nav-item"><a class="nav-link {% if current_view == 'camera:settings' or current_view == 'camera:rtsp_register' %}active{% endif %}" href="{{ url('camera:settings') }}"><i class="bi bi-camera-video" aria-hidden="true"></i><span>Kameralar</span></a></li>
-                {% if current_user and current_user.adm %}
                 <li class="nav-item"><a class="nav-link {% if current_view == 'gallery:review' %}active{% endif %}" href="{{ PREFIX }}/gallery/review"><i class="bi bi-images" aria-hidden="true"></i><span>Galereya</span></a></li>
                 <li class="nav-item"><a class="nav-link {% if current_view == 'auth:users' %}active{% endif %}" href="{{ PREFIX }}/users"><i class="bi bi-shield-lock" aria-hidden="true"></i><span>Foydalanuvchilar</span></a></li>
                 {% endif %}
@@ -58,7 +62,7 @@
             <div class="app-nav__session d-flex align-items-center gap-2">
                 <span class="app-nav__user" title="{{ current_user.u }}">
                     <i class="bi bi-person-circle" aria-hidden="true"></i>
-                    <span>{{ current_user.u }}{% if current_user.adm %} <span class="badge text-bg-secondary">admin</span>{% endif %}</span>
+                    <span>{{ current_user.u }}{% if current_user.r == 'admin' %} <span class="badge text-bg-secondary">admin</span>{% elif current_user.r == 'operator' %} <span class="badge text-bg-info">operator</span>{% endif %}</span>
                 </span>
                 <form method="post" action="{{ PREFIX }}/logout" class="m-0">
                     <button class="btn app-nav__login" type="submit"><i class="bi bi-box-arrow-right" aria-hidden="true"></i><span>Chiqish</span></button>

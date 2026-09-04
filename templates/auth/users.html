@@ -45,8 +45,17 @@
               <td class="font-monospace">{{ u.username }}{% if u.username == current_user.u %} <span class="badge text-bg-primary">siz</span>{% endif %}</td>
               <td>{{ u.full_name or "—" }}</td>
               <td>
-                {% if u.is_admin %}<span class="badge text-bg-secondary">admin</span>
-                {% else %}<span class="badge text-bg-light border">operator</span>{% endif %}
+                <form method="post" action="{{ PREFIX }}/users/role" class="d-flex gap-1">
+                  <input type="hidden" name="username" value="{{ u.username }}">
+                  <select class="form-select form-select-sm" name="role" aria-label="{{ u.username }} roli">
+                    {% for value, label in roles %}
+                    <option value="{{ value }}" {% if u.role == value %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                  </select>
+                  <button class="btn btn-sm btn-outline-secondary" type="submit" title="Rolni saqlash">
+                    <i class="bi bi-check2" aria-hidden="true"></i>
+                  </button>
+                </form>
               </td>
               <td>
                 {% if u.is_active %}<span class="badge text-bg-success">faol</span>
@@ -71,6 +80,10 @@
           </tbody>
         </table>
       </div>
+      <p class="text-secondary small mb-0">
+        Rol o'zgarishi foydalanuvchi qayta kirganda kuchga kiradi — ochiq
+        sessiya eng ko'pi bilan 12 soat amal qiladi.
+      </p>
     </div>
   </div>
 
@@ -96,10 +109,18 @@
                    required minlength="6" autocomplete="new-password">
             <div class="form-text">Kamida 6 belgi.</div>
           </div>
-          <div class="form-check">
-            <input class="form-check-input" type="checkbox" id="new-admin" name="is_admin" value="1" checked>
-            <label class="form-check-label" for="new-admin">Admin huquqi</label>
-            <div class="form-text">Yangi hisoblar sukut bo'yicha admin bo'ladi.</div>
+          <div>
+            <label class="form-label" for="new-role">Rol</label>
+            <select class="form-select" id="new-role" name="role">
+              {% for value, label in roles %}
+              <option value="{{ value }}" {% if value == 'admin' %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+            <ul class="form-text ps-3 mb-0">
+              {% for value, label in roles %}
+              <li><strong>{{ label }}</strong> — {{ role_help[value] }}</li>
+              {% endfor %}
+            </ul>
           </div>
           <button class="btn btn-primary" type="submit"><i class="bi bi-person-plus" aria-hidden="true"></i> Qo'shish</button>
         </form>

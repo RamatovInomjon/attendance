@@ -253,7 +253,8 @@ def dashboard(request: Request, msg: str = "", error: str = ""):
         absent_today=max(0, total - present), late_arrivals=late,
         present_ratio=round(present / total * 100) if total else 0,
         today_attendance=records, recent_events=events,
-        is_admin=bool(_admin_only(request)), msg=msg, error=error,
+        can_correct=bool(_can_correct(request)),
+        can_admin=bool(_admin_only(request)), msg=msg, error=error,
         camera_health=camera_health, weekly_chart_data=weekly_chart_data,
         monthly_chart_data=monthly_chart_data,
         today=day,
@@ -742,7 +743,7 @@ def attendance_unknown(request: Request, show: str = "open", msg: str = "",
     shrinks stops being reviewed. `show=all` brings the decisions back so they
     can be corrected.
     """
-    me = _admin_only(request)
+    me = _can_correct(request)
     with session_scope() as s:
         q = select(UnknownSighting).order_by(UnknownSighting.last_seen.desc())
         if show != "all":
@@ -766,7 +767,7 @@ def attendance_unknown(request: Request, show: str = "open", msg: str = "",
     return render("attendance/unknown.html", request=request, current_view="attendance:unknown",
                   unknown_attempts=attempts, page_obj=Page(attempts), is_paginated=False,
                   employees=sorted(names.items(), key=lambda kv: kv[1]),
-                  is_admin=bool(me), show=show, msg=msg, error=error)
+                  can_correct=bool(me), show=show, msg=msg, error=error)
 
 
 @router.get("/attendance/day/{employee_id}/{day}", response_class=HTMLResponse)
@@ -787,7 +788,7 @@ def attendance_day(request: Request, employee_id: int, day: str, msg: str = "",
     bdate = _parse_attendance_date(day, "day")
     if bdate is None:
         raise HTTPException(400, "bad date")
-    me = _admin_only(request)
+    me = _can_correct(request)
     with session_scope() as s:
         emp = s.get(Employee, employee_id)
         if emp is None:
@@ -828,7 +829,7 @@ def attendance_day(request: Request, employee_id: int, day: str, msg: str = "",
             }
     return render("attendance/day.html", request=request, current_view="attendance:list",
                   employee=vm, day=bdate, events=events, summary=summary,
-                  is_admin=bool(me), msg=msg, error=error)
+                  can_correct=bool(me), msg=msg, error=error)
 
 
 @router.get("/attendance/event/{event_id}/evidence/{kind}")
@@ -840,8 +841,10 @@ def event_evidence(request: Request, event_id: int, kind: str):
     containment-checked - the same treatment /gallery/crop gets.
     """
     from app.services import corrections
-    if not _admin_only(request):
-        return JSONResponse({"detail": "Admin only"}, status_code=403)
+    # Whoever may void the event must be able to look at what it captured -
+    # a correction made without seeing the face is a guess.
+    if not _can_correct(request):
+        return JSONResponse({"detail": "Not permitted"}, status_code=403)
     if kind not in ("face", "aligned", "frame"):
         return JSONResponse({"detail": "bad kind"}, status_code=400)
     with session_scope() as s:
@@ -879,9 +882,9 @@ def _back(request: Request, form, default: str) -> str:
 @router.post("/attendance/event/{event_id}/void")
 async def event_void(request: Request, event_id: int):
     from app.services import corrections
-    me = _admin_only(request)
+    me = _can_correct(request)
     if not me:
-        return JSONResponse({"detail": "Admin only"}, status_code=403)
+        return JSONResponse({"detail": "Not permitted"}, status_code=403)
     form = await request.form()
     out = corrections.void_event(event_id, by=str(me.get("u") or ""),
                                  reason=str(form.get("reason") or ""))
@@ -899,9 +902,9 @@ async def event_void(request: Request, event_id: int):
 @router.post("/attendance/event/{event_id}/unvoid")
 async def event_unvoid(request: Request, event_id: int):
     from app.services import corrections
-    me = _admin_only(request)
+    me = _can_correct(request)
     if not me:
-        return JSONResponse({"detail": "Admin only"}, status_code=403)
+        return JSONResponse({"detail": "Not permitted"}, status_code=403)
     form = await request.form()
     out = corrections.unvoid_event(event_id, by=str(me.get("u") or ""))
     key = "msg" if out.get("ok") else "error"
@@ -913,9 +916,9 @@ async def event_unvoid(request: Request, event_id: int):
 @router.post("/attendance/unknown/{sighting_id}/resolve")
 async def unknown_resolve(request: Request, sighting_id: int):
     from app.services import corrections
-    me = _admin_only(request)
+    me = _can_correct(request)
     if not me:
-        return JSONResponse({"detail": "Admin only"}, status_code=403)
+        return JSONResponse({"detail": "Not permitted"}, status_code=403)
     form = await request.form()
     emp = str(form.get("employee_id") or "").strip()
     out = corrections.resolve_sighting(
@@ -1200,9 +1203,27 @@ def _augment_candidates(refresh: bool = False):
 
 
 def _admin_only(request):
+    """The signed-in user if they may reach the infrastructure, else None.
+
+    `app/api/auth.py` already refuses these paths in middleware; this is what
+    the handlers use to decide what to RENDER, and the belt to that braces.
+    """
     from app.api.auth import current_user
+    from app.services import auth as auth_svc
     me = current_user(request)
-    return me if me and me.get("adm") else None
+    return me if auth_svc.can_admin(me) else None
+
+
+def _can_correct(request):
+    """The signed-in user if they may void an event or resolve an unknown.
+
+    Wider than `_admin_only` on purpose: a Davomat operatori may fix the
+    record without being handed the cameras, the gallery and the accounts.
+    """
+    from app.api.auth import current_user
+    from app.services import auth as auth_svc
+    me = current_user(request)
+    return me if auth_svc.can_correct(me) else None
 
 
 @router.get("/gallery/review", response_class=HTMLResponse)

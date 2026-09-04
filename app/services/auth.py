@@ -21,6 +21,71 @@ log = logging.getLogger(__name__)
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9._-]{3,64}$")
 MIN_PASSWORD_LEN = 6
 
+# ---- roles -------------------------------------------------------------
+# One table, three roles, and the capability predicates below are the ONLY
+# place that answers "may this account do X". Scattering `role == "admin"`
+# through the routes is how a page ends up gated and its POST handler not.
+ROLE_ADMIN = "admin"
+ROLE_OPERATOR = "operator"
+ROLE_VIEWER = "viewer"
+
+ROLE_LABELS = {
+    ROLE_ADMIN: "Administrator",
+    ROLE_OPERATOR: "Davomat operatori",
+    ROLE_VIEWER: "Kuzatuvchi",
+}
+
+ROLE_HELP = {
+    ROLE_ADMIN: "Hamma narsa: kameralar, galereya, foydalanuvchilar, jonli kuzatuv.",
+    ROLE_OPERATOR: ("Davomat va noma'lumlar bilan ishlaydi, xato tanishlarni "
+                    "bekor qila oladi. Kameralar, galereya, jonli kuzatuv va "
+                    "foydalanuvchilar ko'rinmaydi."),
+    ROLE_VIEWER: "Faqat o'qiydi; hech narsani o'zgartira olmaydi.",
+}
+
+ROLES = tuple(ROLE_LABELS)
+
+
+def normalize_role(raw: str | None, *, is_admin: bool = False) -> str:
+    """A role name we recognise, or the safest one that fits.
+
+    Unknown input becomes VIEWER rather than raising: this is read from a
+    cookie and from a form, and the failure mode of an unrecognised value
+    must be less access, never more.
+    """
+    role = (raw or "").strip().lower()
+    if role in ROLE_LABELS:
+        return role
+    return ROLE_ADMIN if is_admin else ROLE_VIEWER
+
+
+def session_role(session: dict | None) -> str:
+    """The role carried by a signed-in session, or VIEWER for nobody."""
+    if not session:
+        return ROLE_VIEWER
+    return normalize_role(session.get("r"), is_admin=bool(session.get("adm")))
+
+
+def can_admin(session: dict | None) -> bool:
+    """May reach the infrastructure: cameras, live view, gallery, accounts.
+
+    These surfaces show the raw camera feed and can change what the system
+    believes a person looks like, which is a strictly larger power than
+    correcting a day's attendance.
+    """
+    return session_role(session) == ROLE_ADMIN
+
+
+def can_correct(session: dict | None) -> bool:
+    """May void a wrong recognition and resolve an unknown sighting.
+
+    Deliberately wider than `can_admin`: an attendance operator is exactly
+    the person who knows that the man in the 13:00 crop is not Rustam, and
+    making them ask an admin to press the button is how bad rows survive.
+    """
+    return session_role(session) in (ROLE_ADMIN, ROLE_OPERATOR)
+
+
 DEFAULT_USERNAME = "inomjon"
 DEFAULT_PASSWORD = "123456"
 
@@ -67,12 +132,19 @@ def authenticate(username: str, password: str) -> dict | None:
             row.password_hash = hash_password(password)
         row.last_login_at = utcnow()
         return {"uid": row.id, "username": row.username,
-                "is_admin": bool(row.is_admin), "full_name": row.full_name or ""}
+                "is_admin": bool(row.is_admin), "full_name": row.full_name or "",
+                "role": normalize_role(row.role, is_admin=bool(row.is_admin))}
 
 
 def create_user(username: str, password: str, *, is_admin: bool = False,
-                full_name: str = "") -> dict:
+                full_name: str = "", role: str | None = None) -> dict:
     u, pw = validate_new_user(username, password)
+    # `role` wins when given; `is_admin` is what the older callers pass. They
+    # are kept in step here so the column and the flag can never disagree -
+    # a row claiming is_admin with role "viewer" would authorise differently
+    # depending on which one the reader happened to consult.
+    role = normalize_role(role, is_admin=is_admin)
+    admin = role == ROLE_ADMIN
     with session_scope() as s:
         exists = s.execute(
             select(func.count()).select_from(User).where(User.username == u)
@@ -80,11 +152,37 @@ def create_user(username: str, password: str, *, is_admin: bool = False,
         if exists:
             raise AuthError(f"User {u!r} already exists.")
         row = User(username=u, password_hash=hash_password(pw),
-                   is_admin=bool(is_admin), full_name=full_name.strip(), is_active=True)
+                   is_admin=admin, role=role,
+                   full_name=full_name.strip(), is_active=True)
         s.add(row)
         s.flush()
-        log.info("created user %r (admin=%s)", u, bool(is_admin))
-        return {"uid": row.id, "username": row.username, "is_admin": row.is_admin}
+        log.info("created user %r (role=%s)", u, role)
+        return {"uid": row.id, "username": row.username,
+                "is_admin": row.is_admin, "role": row.role}
+
+
+def set_role(username: str, role: str) -> str:
+    """Change what an account may do. Refuses to demote the last active admin
+    for the same reason `set_active` refuses to disable one."""
+    u = normalize_username(username)
+    want = (role or "").strip().lower()
+    if want not in ROLE_LABELS:
+        raise AuthError(f"Unknown role: {role!r}")
+    with session_scope() as s:
+        row = s.execute(select(User).where(User.username == u)).scalar_one_or_none()
+        if row is None:
+            raise AuthError(f"No such user: {u}")
+        if row.is_admin and want != ROLE_ADMIN:
+            others = s.execute(
+                select(func.count()).select_from(User).where(
+                    User.is_admin.is_(True), User.is_active.is_(True), User.id != row.id)
+            ).scalar_one()
+            if not others:
+                raise AuthError("Cannot demote the last active admin.")
+        row.role = want
+        row.is_admin = want == ROLE_ADMIN
+        log.info("user %r role -> %s", u, want)
+        return want
 
 
 def set_password(username: str, password: str) -> None:
@@ -124,6 +222,9 @@ def list_users() -> list[dict]:
         rows = s.execute(select(User).order_by(User.username)).scalars().all()
         return [{"id": r.id, "username": r.username, "full_name": r.full_name or "",
                  "is_admin": bool(r.is_admin), "is_active": bool(r.is_active),
+                 "role": normalize_role(r.role, is_admin=bool(r.is_admin)),
+                 "role_label": ROLE_LABELS[normalize_role(
+                     r.role, is_admin=bool(r.is_admin))],
                  "created_at": r.created_at, "last_login_at": r.last_login_at}
                 for r in rows]
 
@@ -142,7 +243,8 @@ def ensure_default_admin() -> bool:
     """
     if user_count():
         return False
-    create_user(DEFAULT_USERNAME, DEFAULT_PASSWORD, is_admin=True, full_name="Inomjon")
+    create_user(DEFAULT_USERNAME, DEFAULT_PASSWORD, role=ROLE_ADMIN,
+                full_name="Inomjon")
     log.warning(
         "created default admin %r with the default password - change it at "
         "/users", DEFAULT_USERNAME)

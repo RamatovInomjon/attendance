@@ -51,12 +51,44 @@ from app.services import enrollment as enrollment_service
 from app.web.viewmodels import EventVM
 
 
-@pytest.fixture(scope="module")
-def client():
+def _app_as(role: str) -> FastAPI:
+    """The pages router with a signed-in user of `role` attached.
+
+    These tests mount the router without `auth_middleware`, so nothing would
+    populate `request.state.user` and every page would render its logged-out
+    shell - which is not the shell anybody sees. Standing a session in for it
+    keeps the assertions about the navigation honest, and lets the same tests
+    be run once per role.
+    """
     init_db()
     test_app = FastAPI()
+
+    @test_app.middleware("http")
+    async def _as_user(request, call_next):
+        request.state.user = {"uid": 1, "u": role, "adm": role == "admin", "r": role}
+        return await call_next(request)
+
     test_app.include_router(router)
-    with TestClient(test_app) as test_client:
+    return test_app
+
+
+@pytest.fixture(scope="module")
+def client():
+    with TestClient(_app_as("admin")) as test_client:
+        yield test_client
+
+
+@pytest.fixture(scope="module")
+def viewer_client():
+    """Reads the record, changes nothing."""
+    with TestClient(_app_as("viewer")) as test_client:
+        yield test_client
+
+
+@pytest.fixture(scope="module")
+def operator_client():
+    """A Davomat operatori: corrects attendance, never sees the cameras."""
+    with TestClient(_app_as("operator")) as test_client:
         yield test_client
 
 
@@ -1709,6 +1741,62 @@ def test_no_javascript_hardcodes_insecure_websockets():
                 assert "ws://" not in line, (
                     f"{js.name} hardcodes ws://; derive it from "
                     f"window.location.protocol: {line.strip()}")
+
+
+# ---- what each role's shell shows ---------------------------------------
+
+def test_operator_shell_hides_every_infrastructure_destination(operator_client: TestClient):
+    """The five things a Davomat operatori was asked not to see. Hiding the
+    link is only the cosmetic half - `tests/test_roles.py` proves the paths
+    themselves refuse - but a link to a 403 is its own kind of broken."""
+    body = operator_client.get("/").text
+    for label in ("Pipeline holati", "Jonli kuzatuv", "Kameralar",
+                  "Galereya", "Foydalanuvchilar"):
+        assert label not in body, f"operator shell still offers {label!r}"
+
+
+def test_operator_shell_keeps_the_pages_the_job_needs(operator_client: TestClient):
+    body = operator_client.get("/").text
+    for label in ("Boshqaruv", "Xodimlar", "Davomat", "Noma'lumlar"):
+        assert label in body
+
+
+def test_operator_dashboard_hides_the_pipeline_panel(operator_client: TestClient):
+    """"Tizim holati" is per-camera FPS and pipeline error counts - the same
+    content as the live page, in a card."""
+    body = operator_client.get("/").text
+    assert "Tizim holati" not in body
+    assert "Kunlik davomat" in body       # the rest of the page is untouched
+
+
+def test_operator_gets_exactly_the_same_correction_controls_as_an_admin(
+        client: TestClient, operator_client: TestClient, viewer_client: TestClient):
+    """The control the role exists for: "bu u emas" on the event feed.
+
+    Counted rather than merely looked for, so the test still means something
+    if the seeded events change - and compared against the admin's page so it
+    cannot pass by both being empty."""
+    from app.db.session import session_scope
+    from app.services.attendance import business_date
+
+    with session_scope() as session:
+        employee = Employee(full_name="Void Control Subject", external_id="AIRI-VC")
+        camera = Camera(name="Nazorat", role=CameraRole.IN,
+                        rtsp_url="rtsp://vc", enabled=True)
+        session.add_all([employee, camera])
+        session.flush()
+        now = datetime.now(timezone.utc)
+        session.add(RecognitionEvent(
+            employee_id=employee.id, camera_id=camera.id, role=CameraRole.IN,
+            ts=now, business_date=business_date(now), score=0.91,
+            snapshot="evidence/vc.jpg", transition="CHECK_IN"))
+
+    def voids(c):
+        return c.get("/").text.count("/attendance/event/")
+
+    assert voids(client) > 0, "no events seeded: this test would prove nothing"
+    assert voids(operator_client) == voids(client)
+    assert voids(viewer_client) == 0
 
 
 def test_live_stream_falls_back_to_mjpeg_when_the_socket_never_delivers_a_frame():

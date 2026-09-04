@@ -57,6 +57,10 @@ ADDITIONS = {
     # carry a value, so backfilling one here would silently re-threshold the
     # whole gallery.
     "face_embedding": [("threshold", "FLOAT")],
+    # Backfilled below from is_admin, not defaulted here: a NULL default would
+    # be indistinguishable from "role not chosen yet" and every existing
+    # account would silently lose or gain powers on the first restart.
+    "app_user": [("role", "VARCHAR(16)")],
 }
 
 # (name, table, columns) - created if absent.
@@ -96,6 +100,18 @@ def migrate_schema():
                     continue
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {decl}"))
                 print(f"  {table}.{name} added")
+
+    # Existing accounts predate roles. An admin becomes "admin" and everyone
+    # else "viewer", which is exactly what they could do yesterday: the new
+    # "operator" is opt-in and is never assigned by a migration.
+    insp = inspect(engine)
+    if "app_user" in insp.get_table_names():
+        with engine.begin() as conn:
+            n = conn.execute(text(
+                "UPDATE app_user SET role = CASE WHEN is_admin THEN 'admin' "
+                "ELSE 'viewer' END WHERE role IS NULL OR role = ''")).rowcount
+            if n:
+                print(f"  app_user.role backfilled for {n} account(s)")
 
     insp = inspect(engine)
     tables = set(insp.get_table_names())

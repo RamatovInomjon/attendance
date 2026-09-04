@@ -324,6 +324,12 @@ class User(Base):
     password_hash = Column(String(255), nullable=False)
     full_name = Column(String(255), default="")
     is_admin = Column(Boolean, default=False, nullable=False)
+    # What the account may DO, as opposed to who it is. `is_admin` stays
+    # because the session cookie and the templates already speak it and
+    # because "admin" is still a real answer to this column; the three-way
+    # role exists because "not an admin" had to cover both an operator who
+    # corrects attendance and a viewer who may only read it.
+    role = Column(String(16), default="viewer", nullable=False, index=True)
     is_active = Column(Boolean, default=True, nullable=False, index=True)
     created_at = Column(UtcDateTime(), default=utcnow)
     updated_at = Column(UtcDateTime(), default=utcnow, onupdate=utcnow)

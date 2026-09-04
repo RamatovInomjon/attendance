@@ -25,6 +25,42 @@ router = APIRouter()
 _PUBLIC_NAMES = ("/login", "/logout", "/favicon.ico", "/health")
 _PUBLIC_PREFIX_NAMES = ("/static/",)
 
+# Paths only an ADMIN may reach - the infrastructure of the system rather than
+# its output. Same reasoning as the public list above and the same shape: one
+# reviewable place, checked in the middleware, so a route added under any of
+# these prefixes is restricted the moment it exists rather than whenever
+# somebody remembers to decorate it.
+#
+# Hiding the nav link is not a control. An operator who types /cameras, or
+# whose browser replays a bookmark, arrives here.
+_ADMIN_PREFIX_NAMES = (
+    "/cameras",          # RTSP URLs and camera credentials
+    "/gallery",          # changes who the system thinks people are
+    "/users",            # accounts
+    "/recognition",      # live view and the pipeline's own health
+    "/video/",           # the raw camera stream behind the live view
+    "/api/health",       # camera-by-camera pipeline stats, same content
+)
+
+# Carved back out of the list above. `users_password` deliberately lets any
+# signed-in account change its OWN password (it checks that itself), and a
+# prefix match on "/users" would take that away from everyone but admins.
+_ADMIN_EXEMPT_NAMES = ("/users/password",)
+
+
+def _is_admin_path(path: str) -> bool:
+    """True for a path in the admin-only list, prefix-resolved.
+
+    Compared against the RAW request path, which under a sub-path deployment
+    arrives as /faceid/cameras - so the deployment prefix is applied here for
+    the same reason it is in `_is_public`.
+    """
+    from app.config import settings
+    p = settings.url_prefix.rstrip("/")
+    if path in {f"{p}{n}" for n in _ADMIN_EXEMPT_NAMES}:
+        return False
+    return path.startswith(tuple(f"{p}{n}" for n in _ADMIN_PREFIX_NAMES))
+
 
 def _is_public(path: str) -> bool:
     """Public paths, resolved against the deployment prefix.
@@ -62,7 +98,17 @@ async def auth_middleware(request: Request, call_next):
     session = read_session(request.cookies.get(COOKIE_NAME))
     request.state.user = session
 
-    if session or _is_public(path):
+    if session:
+        # Signed in, but not necessarily for this. A refusal here is 403 and
+        # not a redirect to the login form: they ARE logged in, and bouncing
+        # them to a form they would immediately pass tells them nothing.
+        if _is_admin_path(path) and not auth_svc.can_admin(session):
+            log.warning("role %s denied %s (user %s)",
+                        auth_svc.session_role(session), path, session.get("u"))
+            return _forbidden(request)
+        return await call_next(request)
+
+    if _is_public(path):
         return await call_next(request)
 
     accept = request.headers.get("accept", "")
@@ -78,6 +124,18 @@ async def auth_middleware(request: Request, call_next):
     if request.url.query:
         nxt = f"{nxt}?{request.url.query}"
     return RedirectResponse(_p(f"/login?next={_quote(nxt)}"), status_code=303)
+
+
+def _forbidden(request: Request):
+    """403, in whichever language the caller speaks."""
+    accept = request.headers.get("accept", "")
+    if ("application/json" in accept
+            or request.headers.get("x-requested-with") == "XMLHttpRequest"
+            or request.url.path.startswith(_p("/api/"))):
+        return JSONResponse({"detail": "Admin only"}, status_code=403)
+    from app.api.pages import render
+    return HTMLResponse(
+        render("auth/forbidden.html", request=request).body, status_code=403)
 
 
 def _quote(value: str) -> str:
@@ -113,7 +171,7 @@ def _set_session_cookie(response, user: dict) -> None:
     response.set_cookie(
         COOKIE_NAME,
         sign_session(user_id=user["uid"], username=user["username"],
-                     is_admin=user["is_admin"]),
+                     is_admin=user["is_admin"], role=user.get("role")),
         max_age=MAX_AGE_S,
         httponly=True,      # not readable from JS, so XSS cannot lift the session
         samesite="lax",     # blocks cross-site form posts, keeps normal links working
@@ -170,26 +228,34 @@ def logout():
 def users_page(request: Request, error: str = "", created: str = ""):
     from app.api.pages import render
     me = current_user(request)
-    if not me or not me.get("adm"):
+    if not auth_svc.can_admin(me):
         return HTMLResponse(
             render("auth/forbidden.html", request=request,
                    current_view="auth:users").body, status_code=403)
     return render("auth/users.html", request=request, current_view="auth:users",
-                  users=auth_svc.list_users(), me=me, error=error, created=created)
+                  users=auth_svc.list_users(), me=me, error=error, created=created,
+                  roles=[(r, auth_svc.ROLE_LABELS[r]) for r in auth_svc.ROLES],
+                  role_help=auth_svc.ROLE_HELP)
 
 
 @router.post("/users/add")
 def users_add(request: Request, username: str = Form(""), password: str = Form(""),
-              full_name: str = Form(""), is_admin: str = Form("")):
+              full_name: str = Form(""), is_admin: str = Form(""),
+              role: str = Form("")):
     me = current_user(request)
-    if not me or not me.get("adm"):
+    if not auth_svc.can_admin(me):
         return JSONResponse({"detail": "Admin only"}, status_code=403)
     try:
-        # Checkbox posts "on" when ticked and is absent otherwise; the user
-        # asked for new accounts to be admins by default, so an explicit "0"
-        # from the form is the only thing that makes a non-admin.
-        admin = str(is_admin).lower() not in {"0", "false", "no"}
-        auth_svc.create_user(username, password, is_admin=admin, full_name=full_name)
+        # The form posts a role. `is_admin` is still read for the older
+        # checkbox form and for any script that predates roles: absent role
+        # plus a non-"0" checkbox still means admin, which is what new
+        # accounts defaulted to.
+        if role:
+            auth_svc.create_user(username, password, role=role, full_name=full_name)
+        else:
+            admin = str(is_admin).lower() not in {"0", "false", "no"}
+            auth_svc.create_user(username, password, is_admin=admin,
+                                 full_name=full_name)
     except auth_svc.AuthError as e:
         return RedirectResponse(_p(f"/users?error={_quote(str(e))}"), status_code=303)
     return RedirectResponse(_p(f"/users?created={_quote(username.strip().lower())}"),
@@ -199,13 +265,36 @@ def users_add(request: Request, username: str = Form(""), password: str = Form("
 @router.post("/users/toggle")
 def users_toggle(request: Request, username: str = Form(""), active: str = Form("1")):
     me = current_user(request)
-    if not me or not me.get("adm"):
+    if not auth_svc.can_admin(me):
         return JSONResponse({"detail": "Admin only"}, status_code=403)
     try:
         auth_svc.set_active(username, str(active) not in {"0", "false", "no"})
     except auth_svc.AuthError as e:
         return RedirectResponse(_p(f"/users?error={_quote(str(e))}"), status_code=303)
     return RedirectResponse(_p("/users"), status_code=303)
+
+
+@router.post("/users/role")
+def users_role(request: Request, username: str = Form(""), role: str = Form("")):
+    """Change what an account may do.
+
+    Nothing re-issues the target's cookie, so a role change lands on their
+    next sign-in - or within MAX_AGE_S, whichever comes first. That is a
+    deliberate limit and not a bug to work around silently: it is stated on
+    the page so an admin who has just removed somebody's access knows the
+    old session is still good until it expires.
+    """
+    me = current_user(request)
+    if not auth_svc.can_admin(me):
+        return JSONResponse({"detail": "Admin only"}, status_code=403)
+    try:
+        applied = auth_svc.set_role(username, role)
+    except auth_svc.AuthError as e:
+        return RedirectResponse(_p(f"/users?error={_quote(str(e))}"), status_code=303)
+    label = auth_svc.ROLE_LABELS[applied]
+    note = (f"{auth_svc.normalize_username(username)} endi {label}. "
+            f"O'zgarish ular qayta kirganda kuchga kiradi.")
+    return RedirectResponse(_p(f"/users?created={_quote(note)}"), status_code=303)
 
 
 @router.post("/users/password")
@@ -215,7 +304,7 @@ def users_password(request: Request, username: str = Form(""), password: str = F
         return JSONResponse({"detail": "Not authenticated"}, status_code=401)
     target = auth_svc.normalize_username(username)
     # An admin may reset anyone; everyone else only themselves.
-    if not me.get("adm") and target != me.get("u"):
+    if not auth_svc.can_admin(me) and target != me.get("u"):
         return JSONResponse({"detail": "You may only change your own password"},
                             status_code=403)
     try:

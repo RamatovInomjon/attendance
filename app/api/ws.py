@@ -17,6 +17,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core.security import COOKIE_NAME, read_session
+from app.services import auth as auth_svc
 
 from app.runtime import runtime
 
@@ -62,7 +63,7 @@ def _resolve(camera_id: str) -> int | None:
 
 
 
-async def _authed(ws: WebSocket) -> bool:
+async def _authed(ws: WebSocket, *, admin_only: bool = False) -> bool:
     """Reject an unauthenticated socket before accepting it.
 
     HTTP middleware does not run for WebSocket scopes, so without this check
@@ -73,15 +74,23 @@ async def _authed(ws: WebSocket) -> bool:
     1008 is "policy violation"; closing before accept() means no frame is ever
     sent to a client that has not signed in.
     """
-    if read_session(ws.cookies.get(COOKIE_NAME)):
-        return True
-    await ws.close(code=1008, reason="not authenticated")
-    return False
+    session = read_session(ws.cookies.get(COOKIE_NAME))
+    if session is None:
+        await ws.close(code=1008, reason="not authenticated")
+        return False
+    # HTTP middleware does not run for WebSocket scopes, so the admin-only
+    # rule that keeps operators off /recognition and /video has to be
+    # repeated here - otherwise the live camera feed stays reachable by
+    # socket for exactly the accounts the page was hidden from.
+    if admin_only and not auth_svc.can_admin(session):
+        await ws.close(code=1008, reason="admin only")
+        return False
+    return True
 
 
 @router.websocket("/ws/camera/{camera_id}/")
 async def camera_ws(ws: WebSocket, camera_id: str):
-    if not await _authed(ws):
+    if not await _authed(ws, admin_only=True):
         return
     await ws.accept()
     cid = _resolve(camera_id)

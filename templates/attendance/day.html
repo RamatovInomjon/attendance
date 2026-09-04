@@ -67,7 +67,7 @@
           </div>
           {% endif %}
         </div>
-        {% if is_admin %}
+        {% if can_correct %}
         <form method="post" class="ms-auto"
               action="{{ PREFIX }}/attendance/event/{{ e.id }}/{{ 'unvoid' if e.voided else 'void' }}"
               {% if not e.voided %}onsubmit="return confirm('Bu {{ employee.name }} emasmi? Kun qaytadan hisoblanadi.')"{% endif %}>
@@ -83,7 +83,7 @@
     {% endfor %}
   </div>
   {% endif %}
-  {% if is_admin %}
+  {% if can_correct %}
   <p class="text-muted small mb-0 mt-3">
     Bekor qilingan hodisa <strong>o'chirilmaydi</strong> &mdash; kim va nima
     uchun bekor qilgani bilan qoladi, chunki xato ham yozuvning bir qismi va
