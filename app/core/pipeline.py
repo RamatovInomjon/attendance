@@ -76,16 +76,17 @@ class TrackState:
     # trajectory stays continuous and direction keeps resolving even when the
     # head is too small or turned away to detect.
     head_offset: tuple[float, float] | None = None
+    # ...and how big the head was relative to that box, so a synthesised head
+    # has the same area a detected one would. The depth signal compares areas
+    # along the track, and a synthesised box of a different size than the real
+    # head reads as the person moving when only the detector flickered.
+    head_rel: tuple[float, float] | None = None
     frames_without_head: int = 0
     trajectory: Trajectory = field(default_factory=Trajectory)
+    # Live verdict for the overlay. Attendance never reads it: the pass is
+    # decided in _prune() from the whole trajectory, once, when it ends.
     direction: Direction = Direction.UNKNOWN
     direction_reason: str = ""
-    # When `direction` was last actually SUPPORTED by the trajectory. The latch
-    # keeps a verdict across frames that cannot produce one, which is right for
-    # a brief pause - but a verdict whose evidence has aged out of the window is
-    # not a current fact, and must not move somebody in or out.
-    direction_at: float = 0.0
-    reported_direction: Direction | None = None   # what we already wrote an event for
     embedded: int = 0
     best_face_px: int = 0
     nearest_id: int | None = None
@@ -280,25 +281,41 @@ def _offset_of(head: np.ndarray, person: np.ndarray) -> tuple[float, float]:
     return ((hcx - float(person[0])) / pw, (hcy - float(person[1])) / ph)
 
 
+def _rel_size(head: np.ndarray, person: np.ndarray) -> tuple[float, float]:
+    """Head width and height as fractions of the person box."""
+    pw = max(float(person[2] - person[0]), 1.0)
+    ph = max(float(person[3] - person[1]), 1.0)
+    return (max(float(head[2] - head[0]), 1.0) / pw,
+            max(float(head[3] - head[1]), 1.0) / ph)
+
+
 # Head centre when none has ever been seen for this track: horizontally centred,
 # and a tenth of the way down - where a standing person's head is.
 _DEFAULT_HEAD_OFFSET = (0.5, 0.10)
+# ...and its size, when no head was ever measured: about a third of the
+# shoulder width, and a seventh of a (whole) body's height.
+_DEFAULT_HEAD_REL = (0.36, 0.14)
 
 
-def _synth_head(person: np.ndarray, offset: tuple[float, float] | None) -> np.ndarray:
+def _synth_head(person: np.ndarray, offset: tuple[float, float] | None,
+                rel: tuple[float, float] | None = None) -> np.ndarray:
     """A head-sized box where this person's head should be.
 
     Returned as a box rather than a point because Trajectory records boxes and
-    uses their AREA for the depth signal. Its size is tied to the person box, so
-    the area still grows and shrinks with distance the way a real head box does.
+    uses their AREA for the depth signal. Both its position and its size come
+    from the last frame on which the head was actually seen inside this
+    person box, so the synthesised head is the detected head's stand-in and
+    not a differently sized box that reads as a change of distance.
     """
     ox, oy = offset or _DEFAULT_HEAD_OFFSET
+    rw, rh = rel or _DEFAULT_HEAD_REL
     px1, py1 = float(person[0]), float(person[1])
     pw = max(float(person[2]) - px1, 1.0)
     ph = max(float(person[3]) - py1, 1.0)
     cx, cy = px1 + ox * pw, py1 + oy * ph
-    half = max(pw * 0.18, 4.0)          # ~a head's width relative to shoulders
-    return np.array([cx - half, cy - half, cx + half, cy + half], np.float32)
+    hw = max(pw * rw * 0.5, 4.0)
+    hh = max(ph * rh * 0.5, 4.0)
+    return np.array([cx - hw, cy - hh, cx + hw, cy + hh], np.float32)
 
 
 class CameraPipeline:
@@ -327,15 +344,33 @@ class CameraPipeline:
             # <name>.enc on disk, and a plain existence check silently disabled
             # head tracking and fell back to face detection.
             if model_available(hp):
-                self.head_detector = HeadDetector(hp, size=settings.head_input,
-                                                  conf=settings.head_conf)
+                # Detect down to ByteTrack's LOW threshold, not head_conf.
+                # ByteTrack's second association keeps an occluded or blurred
+                # person on their track while their confidence dips into
+                # [track_low_thresh, track_high_thresh); pre-filtering at
+                # head_conf never let those boxes reach it, so a pass split
+                # into two tracks that each needed its own five agreeing
+                # frames. head_conf still gates the HEAD boxes below, which
+                # feed recognition and the trajectory; new tracks still need
+                # new_track_thresh, so a low box cannot start one.
+                self.head_detector = HeadDetector(
+                    hp, size=settings.head_input,
+                    conf=min(settings.head_conf, settings.track_low_thresh))
 
-        self.detector = detector or build_detector(
-            settings.detector_kind,
-            settings.model_path(settings.detector_model),
-            imgsz=settings.detect_width,
-            conf=settings.detect_conf,
-        )
+        # The face detector only runs when there is no head detector. Building
+        # it anyway cost every worker a torch CUDA context and the YOLO-face
+        # weights on a card that is deliberately shared.
+        if detector is not None:
+            self.detector = detector
+        elif self.head_detector is None:
+            self.detector = build_detector(
+                settings.detector_kind,
+                settings.model_path(settings.detector_model),
+                imgsz=settings.detect_width,
+                conf=settings.detect_conf,
+            )
+        else:
+            self.detector = None
         self.aligner = aligner or FaceAligner(
             settings.model_path(settings.aligner_model),
             crop_size=settings.align_crop_size,
@@ -393,25 +428,14 @@ class CameraPipeline:
             # else writes attendance. res.outcomes, emitted during the pass, is
             # a live feed for scripts/live_test.py and must never be persisted -
             # it carries provisional identities that the consensus can overturn.
-            # A latched direction whose evidence has aged out of the trajectory
-            # window is not a current fact. Reporting it as one is what booked
-            # check-outs for people standing still on the entrance camera.
-            direction = t.direction
-            direction_reason = t.direction_reason
-            # Age is measured against the track's LAST SIGHTING, not against
-            # `now`. The question is "how long before this person disappeared
-            # was their direction last supported" - a property of the pass
-            # itself. Using `now` would instead measure how long ago the track
-            # was pruned, which depends on when the caller happens to sweep and
-            # made every replayed track look stale.
-            age = max(0.0, t.last_seen - t.direction_at)
-            if (direction is not Direction.UNKNOWN
-                    and t.direction_at > 0.0
-                    and age > settings.direction_max_age_s):
-                direction_reason = f"stale({age:.0f}s, was {direction.value})"
-                direction = Direction.UNKNOWN
-            elif direction is not Direction.UNKNOWN and t.direction_at <= 0.0:
-                direction = Direction.UNKNOWN     # never supported at all
+            # Direction is decided HERE, from the whole trajectory, exactly
+            # once. The per-frame verdict on the track is for the overlay and
+            # may lag by a few frames; this one has every point of the pass.
+            # There is no latch and no staleness: the track keeps its full
+            # history, so "where did this person end up relative to where
+            # they started" is answered from evidence, however long ago they
+            # last moved. See app/core/direction.py.
+            direction, direction_reason = t.trajectory.direction(self.direction_cfg)
 
             final_id = t.vote.finalize()
             t.employee_id = final_id
@@ -445,7 +469,7 @@ class CameraPipeline:
                 direction=direction.value, direction_reason=direction_reason,
                 face_px=t.best_face_px, duration_s=max(0.0, t.last_seen - t.first_seen),
                 first_seen=t.first_seen,
-                traj_points=len(t.trajectory.points), travel=t.trajectory.travel(),
+                traj_points=len(t.trajectory), travel=t.trajectory.travel(),
                 # Display artifacts all from the quality-best frame.
                 native=t.disp_native, context=t.disp_context, quality=t.disp_quality_obj,
                 # The best-shot box, not the box at pruning: by then the person
@@ -495,7 +519,13 @@ class CameraPipeline:
         return out
 
     def _detect(self, frame_bgr: np.ndarray):
-        """Detect on a downscale; return boxes in FULL-RES coordinates."""
+        """Detect on a downscale; return boxes in FULL-RES coordinates.
+
+        Face-detector path only: with a head detector configured there is no
+        face detector to run (see __init__), and this must not be reached.
+        """
+        if self.detector is None:
+            raise RuntimeError("no face detector: the head detector is in use")
         h, w = frame_bgr.shape[:2]
         if w > settings.detect_width:
             scale = settings.detect_width / w
@@ -565,7 +595,7 @@ class CameraPipeline:
             # twice the fragmentation - from the same number of detections. A
             # body is simply a larger, more persistent thing to associate.
             dets = self.head_detector.detect(small, want=None)
-            hd = [d for d in dets if d.cls == CLS_HEAD]
+            hd = [d for d in dets if d.cls == CLS_HEAD and d.score >= settings.head_conf]
             pd = [d for d in dets if d.cls == CLS_PERSON]
             head_boxes = (np.stack([d.box for d in hd]).astype(np.float32) / scale
                           if hd else np.zeros((0, 4), np.float32))
@@ -642,9 +672,11 @@ class CameraPipeline:
                         st.last_body_save = now
                         st.body_saves += 1
 
+                synth = head is None
                 if head is not None:
                     st.face_box = head
                     st.head_offset = _offset_of(head, box)
+                    st.head_rel = _rel_size(head, box)
                     st.frames_without_head = 0
                     traj_box = head
                 else:
@@ -655,8 +687,9 @@ class CameraPipeline:
                     # simply does not run on these frames.
                     st.face_box = None
                     st.frames_without_head += 1
-                    traj_box = _synth_head(box, st.head_offset)
+                    traj_box = _synth_head(box, st.head_offset, st.head_rel)
             else:
+                synth = False
                 st.person_box = None
                 st.face_box = box
                 traj_box = box
@@ -669,12 +702,17 @@ class CameraPipeline:
             # synthesise its position from the person box using the offset
             # observed while both were visible, so the path stays continuous and
             # in the same geometry throughout.
-            st.trajectory.add(now, traj_box, frame.image.shape[1], frame.image.shape[0])
-            d, why = st.trajectory.direction(self.direction_cfg)
-            st.direction_reason = why          # refresh: a stale reason misleads
-            if d is not Direction.UNKNOWN:
-                st.direction = d
-                st.direction_at = now              # ...and record WHEN it held
+            st.trajectory.add(now, traj_box, frame.image.shape[1], frame.image.shape[0],
+                              synth=synth)
+            # Live verdict for the overlay, over the whole track so far. It
+            # is a few vectorised operations, but a long track asks them every
+            # frame, so beyond the first 100 points it is refreshed every
+            # fifth frame - the final decision in _prune() uses every point
+            # regardless.
+            n_pts = len(st.trajectory)
+            if n_pts <= 100 or n_pts % 5 == 0:
+                st.direction, st.direction_reason = \
+                    st.trajectory.direction(self.direction_cfg)
             # Only tracks showing a head this frame can be recognized. With
             # person tracking a track can live for many frames with no head at
             # all, and those frames have nothing to align.
@@ -870,7 +908,6 @@ class CameraPipeline:
                                 direction=st.direction.value,
                                 direction_reason=st.direction_reason,
                             ))
-                            st.reported_direction = st.direction
                     elif not st.emitted:
                         st.name = "…" if m.employee_id is None else gallery.name(m.employee_id)
 

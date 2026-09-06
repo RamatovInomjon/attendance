@@ -256,7 +256,18 @@ class ReidWorker:
         and rejected.
         """
         limit = settings.track_max_age_s + settings.body_crop_interval_s + 2.0
-        for key in [k for k, p in self._open.items() if now - p.last_seen > limit]:
+        # A pass at the crop cap stopped RECEIVING crops, not walking: the
+        # pipeline collects nothing past body_crop_max_per_pass, so silence
+        # from it says nothing about the track. Flushed at `limit` it went out
+        # as UNKNOWN while the person was still in view, and the CompletedTrack
+        # that arrived later - with the name - found nothing to attach to. So a
+        # capped pass waits out the longest it could plausibly still be alive.
+        capped = (settings.track_max_age_s
+                  + settings.body_crop_max_per_pass * settings.body_crop_interval_s
+                  + 60.0)
+        cap = settings.body_crop_max_per_pass
+        for key in [k for k, p in self._open.items()
+                    if now - p.last_seen > (capped if len(p.crops) >= cap else limit)]:
             p = self._open.pop(key)
             if p.crops:
                 try:

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import threading
 from collections import defaultdict
 from datetime import datetime
@@ -36,8 +37,16 @@ class DebugCapture:
         self._trace_starts: dict = {}
         self.root = root or settings.debug_dir
         self.max_per_person = max_per_person or settings.debug_max_per_person
+        # Seeded from disk on first use, per person - see _on_disk. An
+        # in-memory count starting at zero made the cap per INSTANCE, and there
+        # is one instance per camera worker, per process start: 242 sidecars
+        # for one person against a cap of 40.
         self._counts: dict[str, int] = defaultdict(int)
         self._lock = threading.Lock()
+        # Resolved once, like the pipeline does: the threshold in force is the
+        # calibrated one for this recognizer (plus any override), not the
+        # generic default the old sidecars recorded.
+        self.threshold = settings.threshold_for(settings.recognizer_model)
         if self.enabled:
             self.root.mkdir(parents=True, exist_ok=True)
 
@@ -45,16 +54,35 @@ class DebugCapture:
         keep = "".join(c if (c.isalnum() or c in " _-") else "_" for c in name).strip()
         return keep.replace(" ", "_") or "unknown"
 
+    def _on_disk(self, slug: str) -> int:
+        """Sidecars already in this person's folder, so the cap survives a
+        restart and is shared between cameras. One cheap glob, once per slug."""
+        try:
+            return sum(1 for _ in (self.root / slug).glob("*.json"))
+        except OSError:
+            return 0
+
+    def _disk_full(self) -> bool:
+        """The same guard `frame()` has: a full disk must fail the audit
+        trail, not the service."""
+        try:
+            return (shutil.disk_usage(self.root).free / 1073741824
+                    < settings.save_all_min_free_gb)
+        except OSError:
+            return True
+
     def capture(
         self, *, name: str, frame_bgr: np.ndarray, box, aligned_chw: np.ndarray | None,
         camera: str, role: str, score: float, margin: float, track_id: int,
         ts: datetime, quality=None, extra: dict | None = None,
         native: np.ndarray | None = None,
     ) -> str | None:
-        if not self.enabled:
+        if not self.enabled or self._disk_full():
             return None
         slug = self._slug(name)
         with self._lock:
+            if slug not in self._counts:
+                self._counts[slug] = self._on_disk(slug)
             # max_per_person == 0 means uncapped, for runs where every pass matters.
             if self.max_per_person and self._counts[slug] >= self.max_per_person:
                 return None
@@ -121,7 +149,7 @@ class DebugCapture:
                 "face_px": (int(quality.face_px) if quality is not None
                             else None),
                 "min_face_px": settings.min_face_px,
-                "threshold": settings.recognition_threshold,
+                "threshold": self.threshold,
                 "align_margin": settings.align_margin, "align_mode": settings.align_mode,
             }
             if quality is not None:
@@ -153,8 +181,7 @@ class DebugCapture:
                                     or settings.debug_trace_tracks):
             return
         try:
-            import shutil as _sh
-            if _sh.disk_usage(self.root).free / 1073741824 < settings.save_all_min_free_gb:
+            if self._disk_full():
                 return
             # While tracing, group by TRACK, not by guessed identity. The name
             # comes from whichever gallery entry scored highest, so a single

@@ -129,6 +129,7 @@ class EventVM:
             "CHECK_IN": "IN",
             "CHECK_OUT": "OUT",
             "DUPLICATE_VIEW": "SEEN",
+            "DEBOUNCED": "SEEN",
         }.get(transition, role)
         return cls(
             id=e.id, employee_name=name or "Unknown", employee_department=dept or "",
@@ -139,6 +140,21 @@ class EventVM:
             voided=getattr(e, "voided_at", None) is not None,
             void_reason=getattr(e, "void_reason", "") or "",
         )
+
+
+def live_event(ev: dict) -> dict:
+    """A worker's recent-event dict, with its snapshot made into a URL.
+
+    The worker records the stored path (`snapshots/x.jpg`). The attendance
+    socket and /api/events used to hand that out raw, and the live page then
+    built `/media/...` off the DOMAIN root - which under /faceid belongs to
+    another project. Built here, once, for both consumers, through the same
+    helper every rendered page uses.
+    """
+    out = dict(ev)
+    if out.get("snapshot"):
+        out["snapshot"] = media_path(out["snapshot"])
+    return out
 
 
 @dataclass

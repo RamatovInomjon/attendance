@@ -8,9 +8,11 @@
             <h1 class="h4 mb-0 fw-bold">Xodimlar ro'yxati</h1>
             <small class="text-muted">Profil, bo'lim va ro'yxatdan o'tish holatini boshqaring.</small>
         </div>
+        {% if current_user and current_user.r == 'admin' %}
         <a href="{{ url('employees:register') }}" class="btn btn-navbar-gradient">
             <i class="bi bi-person-plus me-2" aria-hidden="true"></i>Ro'yxatdan o'tkazish
         </a>
+        {% endif %}
     </div>
     <div class="card-body">
         <form method="get" class="row g-3 mb-4 search-form-compact" aria-label="Xodimlarni filtrlash">

@@ -74,7 +74,10 @@ function airiHttpUrl(path) {
         if (typeof value !== 'string' || !value.trim()) return null;
         const source = value.trim();
         if (source.startsWith('/') || /^https?:\/\//i.test(source)) return source;
-        return `/media/${source.replace(/^\/+/, '')}`;
+        // A bare stored path. The server now sends these as prefixed URLs
+        // (see viewmodels.live_event); anything still arriving bare is built
+        // under the deployment prefix, never off the domain root.
+        return `${airiPrefix()}/media/${source.replace(/^\/+/, '')}`;
     }
 
     function normalizeAttendanceEvent(data) {
@@ -295,13 +298,21 @@ function airiHttpUrl(path) {
         decodeFrame(stream, rawData) {
             try {
                 const data = JSON.parse(rawData);
-                if (data.type !== 'frame' || !data.data) return;
+                if (data.type !== 'frame') return;
+                // Counted before the stale check: a stale notice proves the
+                // socket transport works, and the frameless-close fallback to
+                // MJPEG must not be taken on a camera that is merely quiet.
                 stream.framesSeen += 1;
                 const frameSequence = ++stream.frameSequence;
                 if (data.stale === true) {
+                    // Sent WITHOUT a frame: the server stops repainting a
+                    // source that has gone quiet rather than re-encoding its
+                    // last image at 10 fps, and the last frame drawn stays
+                    // on the canvas under this label.
                     this.updateState(stream, 'unavailable', 'Oqim eskirgan');
                     return;
                 }
+                if (!data.data) return;
                 const image = new Image();
                 image.addEventListener('load', () => {
                     if (frameSequence !== stream.frameSequence) return;

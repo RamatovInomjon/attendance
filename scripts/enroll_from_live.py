@@ -14,7 +14,9 @@ let one wrong match poison an identity permanently:
 
     phase 1   collect      capture high-confidence crops to data/live_enroll/
     phase 2   confirm      you review the folders, delete anything wrong
-    phase 3   commit       --commit adds what survived to the gallery
+    phase 3   commit       --commit adds what survived to the gallery, tagged
+                           `live:` and floored like any other corridor crop
+                           (see app/services/augment.py)
 
 Usage:
     python scripts/enroll_from_live.py 300        # collect for 5 minutes
@@ -38,6 +40,8 @@ from app.core.stream import RtspSource
 from app.core.tracker import FaceTracker
 from app.db.models import Camera, Employee, FaceEmbedding
 from app.db.session import session_scope
+from app.services import augment
+from app.services.augment import TAG
 from app.services.enrollment import load_gallery
 
 logging.basicConfig(level=logging.WARNING, format="%(message)s")
@@ -48,31 +52,54 @@ MAX_PER_PERSON = 12
 
 
 def commit():
-    """Add reviewed crops to the gallery as extra embeddings."""
+    """Add reviewed crops to the gallery as corridor references.
+
+    Written the way app/services/augment.py writes one: tagged `live:` so the
+    review page can list and remove them, and floored at
+    max(threshold, augment_live_floor) so a corridor face answers to the same
+    higher bar as every other. This used to insert untagged rows with no floor
+    - judged at the global threshold, invisible to the review page, and exempt
+    from the one policy that makes holding corridor crops safe.
+    """
     rec = FaceRecognizer(settings.model_path(settings.recognizer_model))
+    floor = max(settings.threshold_for(settings.recognizer_model),
+                settings.augment_live_floor)
+    with session_scope() as s:
+        known = {ext: (eid, full) for eid, ext, full in s.execute(
+            select(Employee.id, Employee.external_id, Employee.full_name)).all()}
+
+    # Embed first, write second: the batch embed must not run inside the
+    # write transaction while the capture threads wait on it.
+    batches = []
+    for folder in sorted(p for p in OUT.iterdir() if p.is_dir()):
+        if folder.name not in known:
+            print(f"  ?? no employee '{folder.name}' - skipped"); continue
+        crops = sorted(folder.glob("*.png"))
+        if not crops:
+            continue
+        # crops are already the canonical 112x112 aligned output
+        batch = np.stack([to_normalized_chw(
+            cv2.cvtColor(cv2.imread(str(c)), cv2.COLOR_BGR2RGB)) for c in crops])
+        batches.append((folder.name, crops, rec.embed(batch)))
+
     added = 0
     with session_scope() as s:
-        for folder in sorted(p for p in OUT.iterdir() if p.is_dir()):
-            emp = s.execute(select(Employee).where(
-                Employee.external_id == folder.name)).scalar_one_or_none()
-            if emp is None:
-                print(f"  ?? no employee '{folder.name}' - skipped"); continue
-            crops = sorted(folder.glob("*.png"))
-            if not crops:
-                continue
-            # crops are already the canonical 112x112 aligned output
-            batch = np.stack([to_normalized_chw(
-                cv2.cvtColor(cv2.imread(str(c)), cv2.COLOR_BGR2RGB)) for c in crops])
-            embs = rec.embed(batch)
+        for ext, crops, embs in batches:
+            emp_id, full = known[ext]
             for c, e in zip(crops, embs):
                 s.add(FaceEmbedding(
-                    employee_id=emp.id, source_file=f"live/{c.name}",
-                    vector=e.astype(np.float32).tobytes(), dim=512,
+                    employee_id=emp_id, source_file=f"{TAG}live_enroll/{ext}/{c.name}",
+                    vector=e.astype(np.float32).tobytes(), dim=int(e.shape[0]),
                     model_name=settings.recognizer_model, quality=1.0,
+                    threshold=floor,
                 ))
                 added += 1
-            print(f"  + {emp.full_name:<30} {len(crops)} live crops")
+            print(f"  + {full:<30} {len(crops)} live crops  (floor {floor:.3f})")
     print(f"\nadded {added} live embeddings")
+    if added:
+        # What augment.add() does after an insert: every live row's floor
+        # re-checked against the corridor probes, and any lookalike logged.
+        augment.recalibrate()
     g = load_gallery()
     print(f"gallery now {len(g)} embeddings / {g.n_people} people")
     print("POST /api/gallery/reload (or restart) to pick this up")

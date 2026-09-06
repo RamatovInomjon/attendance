@@ -109,7 +109,11 @@ def main():
     ap.add_argument("--inside", choices=["above", "below", "left", "right"])
     ap.add_argument("--depth", choices=["grow", "shrink"], default="grow",
                     help="does the face GROW or SHRINK as the person walks inward")
-    ap.add_argument("--min-travel", type=float, default=0.06)
+    # No default: with one, every --line re-run silently reset a min_travel
+    # that had been tuned on site. Unset, the stored value is left alone.
+    ap.add_argument("--min-travel", type=float, default=None,
+                    help="how far a track must move to count as walking "
+                         "(normalized; the camera keeps its current value if omitted)")
     a = ap.parse_args()
 
     if a.camera and a.line:
@@ -127,9 +131,10 @@ def main():
             cam.line_x1, cam.line_y1, cam.line_x2, cam.line_y2 = pts
             cam.inside_side = sign
             cam.depth_grows_inward = (a.depth == "grow")
-            cam.min_travel = a.min_travel
+            if a.min_travel is not None:
+                cam.min_travel = a.min_travel
             print(f"  camera {cam.id} ({cam.name}): line={pts} inside={a.inside} "
-                  f"(sign {sign:+d}) depth={a.depth}")
+                  f"(sign {sign:+d}) depth={a.depth} min_travel={cam.min_travel}")
         print("saved - restart the server to apply")
         return
 

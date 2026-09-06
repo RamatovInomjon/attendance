@@ -42,7 +42,7 @@ python-multipart pydantic-settings opencv-python ultralytics lap`.
 
 ```bash
 python scripts/enroll.py         # rebuild gallery (idempotent; wipes embeddings first)
-python scripts/seed_cameras.py   # register cameras + roles
+CAMERA_USER=admin CAMERA_PASSWORD='...' python scripts/seed_cameras.py   # register cameras + roles
 python scripts/run.py            # workers + web UI  → http://localhost:8000
 ```
 
@@ -79,8 +79,10 @@ xdg-open data/debug/index.html         # every recognition, grouped by person
 ```
 
 The contact sheet outlines the aligned crops in teal so they are easy to pick
-out. Capture is capped at `debug_max_per_person` (30) so the folder cannot run
-away; set `debug_capture=false` to turn it off entirely.
+out. Capture is capped at `debug_max_per_person` (40) per person - counted
+from what is already on disk, so a restart or a second camera does not reset
+it - and skipped when free disk drops under `save_all_min_free_gb`; set
+`debug_capture=false` to turn it off entirely.
 
 ## Diagnostics
 
@@ -160,10 +162,11 @@ cat /proc/loadavg && free -g                          # CPU / RAM pressure
 ```
 
 Low GPU utilisation with a high load average means the bottleneck is CPU-side
-buffer work, not the network. Note that `preload_cuda_libs()` must be *called*
-(importing `app.core.onnx_env` alone does nothing) or sessions silently fall
-back to CPU and every measurement is meaningless — check
-`session.get_providers()` before trusting a benchmark.
+buffer work, not the network. Sessions built through `best_providers()` (every
+session in `app/`) preload the CUDA libraries themselves; a bench script that
+constructs `ort.InferenceSession` directly must call `preload_cuda_libs()`
+first or it silently falls back to CPU and every measurement is meaningless —
+check `session.get_providers()` before trusting a benchmark.
 
 ## Calibration — done, and how to redo it
 
@@ -223,8 +226,11 @@ project directory.
 
 - **SQLite.** Fine for two cameras. Move to PostgreSQL before adding a third or
   serving reports to many users; `UtcDateTime` already behaves correctly there.
-- **No authentication.** The UI and API are open. Do not expose the port beyond
-  the LAN until auth is added.
+- **Authentication is a session cookie** (`app/api/auth.py`): admin, operator
+  and viewer roles, same-origin checks on state-changing requests, a lockout
+  after repeated failed logins. Still serve it behind TLS (the cookie is only
+  marked `Secure` when the request arrived over https) and keep the port off
+  the public internet.
 - **No liveness detection.** Deliberate — these cameras are 3 m up behind a wide
   lens, where holding a photo to the lens is not practical. Revisit if a
   door-level camera is added.

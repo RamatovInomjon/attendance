@@ -26,7 +26,7 @@ import uuid
 import cv2
 import numpy as np
 from PIL import Image, UnidentifiedImageError
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 
 from app.config import settings
 from app.core.aligner import FaceAligner
@@ -36,6 +36,7 @@ from app.core.quality import assess, sharpness_of
 from app.core.recognizer import FaceRecognizer
 from app.db.models import Employee, FaceEmbedding
 from app.db.session import session_scope
+from app.services.augment import TAG
 
 log = logging.getLogger(__name__)
 
@@ -392,16 +393,62 @@ class Enroller:
             if p.is_dir() and not p.name.startswith("_")
         )
 
+        # Everything expensive happens first, with NO transaction open. This
+        # used to run inside the write transaction below, so the SQLite write
+        # lock was held for the whole decode/detect/align/embed of every image
+        # - ten seconds and more - while the capture threads sat blocked on it.
+        prepared: list[tuple[Path, dict, str, list]] = []
+        for folder in folders:
+            meta_path = folder / "metadata.json"
+            meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+            ext_id = meta.get("user_id") or folder.name.split("_", 1)[-1]
+
+            rows, vecs = [], []
+            for img in sorted(folder.glob("*.png")):
+                rep.images_seen += 1
+                out = self.embed_file(img)
+                if out is None:
+                    rep.no_face.append(f"{folder.name}/{img.name}")
+                    continue
+                emb, ascore, sharp, face_px = out
+                rows.append((img.name, emb, ascore))
+                vecs.append(emb)
+
+            # Flag images that disagree with the rest of their own folder.
+            if len(vecs) >= 3:
+                V = np.stack(vecs)
+                S = V @ V.T
+                np.fill_diagonal(S, np.nan)
+                cohesion = np.nanmean(S, axis=1)
+                for (name, _e, _q), c in zip(rows, cohesion):
+                    if c < outlier_threshold:
+                        rep.outliers.append((f"{folder.name}/{name}", float(c)))
+            prepared.append((folder, meta, ext_id, rows))
+
+        # One short transaction: the wipe and every upsert together.
         with session_scope() as s:
             if wipe:
-                s.execute(delete(FaceEmbedding))
+                # Enrolment rows only. A `live:` row is an admin-reviewed
+                # corridor crop carrying its own floor (app/services/augment.py);
+                # re-enrolling used to throw those away along with the
+                # photographs they were added to supplement.
+                s.execute(delete(FaceEmbedding).where(or_(
+                    FaceEmbedding.source_file.is_(None),
+                    FaceEmbedding.source_file.not_like(f"{TAG}%"))))
+                # ...except live rows built by a DIFFERENT recognizer. Those are
+                # meaningless to this one, and keeping them would make
+                # load_gallery() refuse the very gallery this run rebuilds.
+                stale = [i for i, m in s.execute(
+                    select(FaceEmbedding.id, FaceEmbedding.model_name)
+                    .where(FaceEmbedding.source_file.like(f"{TAG}%"))).all()
+                    if _model_key(m) != _model_key(model_name)]
+                if stale:
+                    s.execute(delete(FaceEmbedding).where(FaceEmbedding.id.in_(stale)))
+                    log.warning("dropped %d live row(s) built by another recognizer",
+                                len(stale))
                 s.flush()
 
-            for folder in folders:
-                meta_path = folder / "metadata.json"
-                meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
-                ext_id = meta.get("user_id") or folder.name.split("_", 1)[-1]
-
+            for folder, meta, ext_id, rows in prepared:
                 emp = s.execute(
                     select(Employee).where(Employee.external_id == ext_id)
                 ).scalar_one_or_none()
@@ -416,27 +463,6 @@ class Enroller:
                 emp.user_type = meta.get("user_type", "") or ""
                 emp.is_active = True
                 s.flush()
-
-                rows, vecs = [], []
-                for img in sorted(folder.glob("*.png")):
-                    rep.images_seen += 1
-                    out = self.embed_file(img)
-                    if out is None:
-                        rep.no_face.append(f"{folder.name}/{img.name}")
-                        continue
-                    emb, ascore, sharp, face_px = out
-                    rows.append((img.name, emb, ascore))
-                    vecs.append(emb)
-
-                # Flag images that disagree with the rest of their own folder.
-                if len(vecs) >= 3:
-                    V = np.stack(vecs)
-                    S = V @ V.T
-                    np.fill_diagonal(S, np.nan)
-                    cohesion = np.nanmean(S, axis=1)
-                    for (name, _e, _q), c in zip(rows, cohesion):
-                        if c < outlier_threshold:
-                            rep.outliers.append((f"{folder.name}/{name}", float(c)))
 
                 for name, emb, ascore in rows:
                     s.add(FaceEmbedding(

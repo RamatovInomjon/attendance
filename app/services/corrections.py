@@ -32,7 +32,7 @@ a UI that can be wrong in a way nobody can see.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, select
 
@@ -93,7 +93,8 @@ def evidence(stem: str) -> dict:
     return out
 
 
-def void_event(event_id: int, *, by: str, reason: str = "") -> dict:
+def void_event(event_id: int, *, by: str, reason: str = "",
+               on_gallery_change=None) -> dict:
     """Mark one recognition as wrong, and undo everything it caused.
 
     Three effects, in this order, because each depends on the last:
@@ -106,6 +107,19 @@ def void_event(event_id: int, *, by: str, reason: str = "") -> dict:
     the gallery, that face is now a permanent reference for the wrong person and
     the same error gets easier every day. Voiding the event without removing the
     row would fix one attendance record and leave the cause in place.
+
+    An ADMIN void of a cross-camera winner also voids its DUPLICATE_VIEW twins
+    - the same employee within `cross_camera_window_s` of it. They recorded the
+    same walk from the other camera under the same wrong name, so left standing
+    they are evidence for an identity a human just rejected. A recheck void
+    (reason starting "recheck") leaves them: it judges one capture at a time,
+    and each twin has a capture of its own to be judged by. Reported as
+    `duplicates_voided`.
+
+    `on_gallery_change` is called, with no arguments, after step 3 actually
+    removed a row and the floors were recalibrated. The running gallery keeps a
+    deleted row in memory until it is reloaded, so the caller that owns the
+    runtime passes its reload here; it is not called when nothing was removed.
     """
     from app.db.session import session_scope
 
@@ -125,17 +139,37 @@ def void_event(event_id: int, *, by: str, reason: str = "") -> dict:
         employee_id, bdate = e.employee_id, e.business_date
         name = s.execute(select(Employee.full_name)
                          .where(Employee.id == employee_id)).scalar() or str(employee_id)
-        e.voided_at = datetime.now(timezone.utc)
+        # Still read-only: pysqlite opens the write transaction at the first
+        # UPDATE, which is the flush below. The camera lookup and the directory
+        # walk in capture_stem() therefore run BEFORE the write lock is taken.
+        # They used to run after it, holding every capture thread for as long
+        # as a glob over data/debug took.
+        cam = s.execute(select(Camera.name)
+                        .where(Camera.id == e.camera_id)).scalar() or ""
+        key = capture_stem(e.ts, e.score, cam)
+
+        now = datetime.now(timezone.utc)
+        e.voided_at = now
         e.voided_by = (by or "")[:64]
         e.void_reason = (reason or "")[:160]
+
+        twins = 0
+        if e.transition != "DUPLICATE_VIEW" and not (reason or "").startswith("recheck"):
+            win = timedelta(seconds=settings.cross_camera_window_s)
+            for d in s.execute(select(RecognitionEvent).where(
+                    RecognitionEvent.employee_id == employee_id,
+                    RecognitionEvent.transition == "DUPLICATE_VIEW",
+                    RecognitionEvent.voided_at.is_(None),
+                    RecognitionEvent.id != e.id,
+                    RecognitionEvent.ts >= e.ts - win,
+                    RecognitionEvent.ts <= e.ts + win)).scalars():
+                d.voided_at, d.voided_by, d.void_reason = now, e.voided_by, e.void_reason
+                twins += 1
         s.flush()
 
         replayed = AttendanceService().rebuild(s, employee_id, bdate)
 
-        cam = s.execute(select(Camera.name)
-                        .where(Camera.id == e.camera_id)).scalar() or ""
         removed = 0
-        key = capture_stem(e.ts, e.score, cam)
         if key:
             removed = int(s.execute(delete(FaceEmbedding).where(
                 FaceEmbedding.employee_id == employee_id,
@@ -143,14 +177,24 @@ def void_event(event_id: int, *, by: str, reason: str = "") -> dict:
 
         out = {"ok": True, "employee_id": employee_id, "name": name,
                "business_date": str(bdate), "replayed": replayed,
-               "gallery_rows_removed": removed, "capture": key}
+               "gallery_rows_removed": removed, "capture": key,
+               "duplicates_voided": twins}
     if out.get("gallery_rows_removed"):
         # The floors of the remaining crops are a statement about the gallery,
         # so removing one can only lower them - free accuracy, collected here.
         from app.services import augment
         augment.recalibrate()
-    log.info("correction: voided event %s (%s) by %s - %s", event_id,
-             out.get("name"), by, reason or "no reason given")
+        if on_gallery_change is not None:
+            try:
+                on_gallery_change()
+            except Exception:
+                # The void itself is committed; a failed reload is the
+                # caller's problem to log, not a reason to report the void failed.
+                log.exception("gallery reload after voiding event %s failed", event_id)
+    log.info("correction: voided event %s (%s) by %s - %s%s", event_id,
+             out.get("name"), by, reason or "no reason given",
+             f" (+{out['duplicates_voided']} duplicate view(s))"
+             if out.get("duplicates_voided") else "")
     return out
 
 

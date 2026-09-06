@@ -293,20 +293,27 @@ class CameraWorker:
                     snapshot=snap,
                 ))
             for g in groups:
-                self._apply(s, g.winner, winner=True)
+                self._apply(s, g.winner, winner=True, direction=g.direction,
+                            direction_reason=g.direction_reason)
                 for loser in g.others:
                     self._apply(s, loser, winner=False)
 
-    def _apply(self, s, p, *, winner: bool):
-        """Write one pass. Only the winner of a group moves attendance state."""
+    def _apply(self, s, p, *, winner: bool, direction: str | None = None,
+               direction_reason: str | None = None):
+        """Write one pass. Only the winner of a group moves attendance state,
+        and it moves it in the direction the GROUP resolved - which may have
+        come from the other camera's view of the same walk."""
         ct = p.track
+        direction = ct.direction if direction is None else direction
+        direction_reason = (ct.direction_reason if direction_reason is None
+                            else direction_reason)
         d = self.attendance.record(
             s, employee_id=p.employee_id, camera_id=p.camera_id,
             role=p.role, ts=p.ts, score=ct.best_score, margin=ct.best_margin,
             track_id=ct.track_id, face_px=ct.face_px,
             votes=f"emb{ct.embedded_frames}/traj{ct.traj_points}",
-            snapshot=p.snapshot, direction=ct.direction,
-            direction_reason=ct.direction_reason,
+            snapshot=p.snapshot, direction=direction,
+            direction_reason=direction_reason,
             require_direction=self.direction_cfg.configured,
             apply_state=winner,
         )
@@ -318,7 +325,7 @@ class CameraWorker:
             "name": ct.name, "employee_id": p.employee_id,
             "camera": p.camera_name or self.name, "role": p.role.value,
             "score": round(ct.best_score, 3), "transition": d.transition,
-            "snapshot": p.snapshot, "direction": ct.direction,
+            "snapshot": p.snapshot, "direction": direction,
         }
         with self._lock:
             self.recent_events.insert(0, entry)
@@ -327,7 +334,7 @@ class CameraWorker:
                  "travel=%.3f dur=%.1fs dir=%s (%s)",
                  p.camera_name or self.name, d.transition, ct.name[:20],
                  ct.best_score, ct.best_margin, ct.embedded_frames, ct.traj_points,
-                 ct.travel, ct.duration_s, ct.direction, ct.direction_reason)
+                 ct.travel, ct.duration_s, direction, direction_reason)
 
     # -- main loop --------------------------------------------------------
     def _run(self):
@@ -384,6 +391,15 @@ class CameraWorker:
                 continue
             with self._lock:
                 self.latest = res
+
+            # Tell the arbiter who this camera still has in view, so a pass
+            # waiting to be decided is not decided while its person's other
+            # track is still running on either camera.
+            self.arbiter.note_live(
+                self.camera_id,
+                {t.employee_id for t in res.tracks
+                 if t.employee_id is not None and frame.ts - t.last_seen < 1.0},
+                time.monotonic())
 
             # Hand the periodic body crops over and move on. The queue is
             # bounded and drop-oldest, so a slow or failed ReID cannot stall

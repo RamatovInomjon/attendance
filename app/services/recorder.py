@@ -89,6 +89,8 @@ class ClipRecorder:
                                     self.camera, self._free_gb(), self.min_free_gb)
                     return
                 self._open(small, ts, meta or {})
+                if self._writer is None:       # _open failed; it has logged why
+                    return
 
             if active:
                 self._last_active = ts

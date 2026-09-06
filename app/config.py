@@ -199,8 +199,8 @@ class Settings(BaseSettings):
     #     35 deg pitch        -> 0.91-0.95
     # The first walkthrough gated 104 of 116 observations, mostly on blur, while
     # scores that low are still perfectly recognizable.  Gates now reject only
-    # genuinely unusable frames; the threshold and the 3-of-5 vote do the real
-    # filtering.
+    # genuinely unusable frames; the threshold and the consensus vote do the
+    # real filtering.
     # Measured against HEAD boxes, which run ~1.33x the face box, so this is
     # about a 42 px face.
     #
@@ -262,7 +262,7 @@ class Settings(BaseSettings):
     #   not-enrolled walker : 43 gate-passing obs, best score max 0.184
     #   enrolled walkers    : 87 gate-passing obs, best score max 0.514
     # 0.26 sits 41% above the worst impostor ever observed live, and the
-    # 3-of-5 same-identity vote requires three such frames to agree.
+    # consensus vote requires vote_min_recognitions such frames to agree.
     # Zero false commits in simulation at every threshold from 0.22 up.
     # The gallery-photo measurement suggested 0.40; live crops are a lower-
     # scoring domain, which is exactly why this had to be measured.
@@ -406,18 +406,6 @@ class Settings(BaseSettings):
     vote_consensus: float = 0.65
     vote_min_recognitions: int = 5
 
-    # How long a direction verdict may be relied on after the evidence for it
-    # left the trajectory window. The window is 90 points - 4.5 s at 20 fps - so
-    # a verdict older than that was computed from data the trajectory no longer
-    # holds, and nothing has confirmed it since.
-    #
-    # Without this, `st.direction` latched the last non-UNKNOWN verdict forever
-    # while `direction_reason` kept refreshing, so a person standing still was
-    # committed with a direction up to TEN MINUTES old. Seven live instances on
-    # 2026-08-27, including check-outs on the entrance camera for people who had
-    # not moved. The latch itself is right - somebody pausing at a door should
-    # keep their direction - it just may not outlive the window that produced it.
-    direction_max_age_s: float = 5.0
 
     # ---- tracking -------------------------------------------------------
     track_high_thresh: float = 0.5
@@ -532,10 +520,9 @@ class Settings(BaseSettings):
     save_all_frames: bool = False
 
     # ---- track tracing (DEBUG ONLY) --------------------------------------
-    # Normally recognition stops the moment the 3-of-5 vote commits: once the
-    # identity is known, embedding more frames costs GPU time and changes
-    # nothing. That also means the saved frames only cover the run-up to the
-    # decision, so you cannot see how the score behaved across the WHOLE pass.
+    # Normally only gate-passing frames are embedded, and nothing is saved
+    # per frame, so you cannot see how the score behaved across the WHOLE
+    # pass - including the frames the quality gates rejected.
     #
     # With this on, every frame of a track is embedded and scored for as long
     # as the track lives, and each aligned face is written with its score. A

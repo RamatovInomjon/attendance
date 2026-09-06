@@ -846,10 +846,14 @@ def test_camera_diagnostics_separate_configuration_observation_pipeline_and_drif
         session.add_all([online, offline])
         session.flush()
         online_id = online.id
+        # What CameraWorker.stats() really carries: stream fps and the last
+        # frame's timings. The algorithm rate is derived from the stream rate
+        # and process_every_nth; nothing emits it directly.
+        monkeypatch.setattr(pages.settings, "process_every_nth", 2)
         monkeypatch.setattr(pages.runtime, "workers", {
             online_id: SimpleNamespace(camera_id=online_id, stats=lambda: {
-                "stream": {"connected": True, "stale": False, "resolution": "1920x1080", "fps": 12.5},
-                "processed_fps": 9.5, "latency_ms": 44.0, "dropped_frames": 3,
+                "stream": {"connected": True, "stale": False, "resolution": "1920x1080", "fps": 13.0},
+                "timings": {"total": 44.0},
                 "pipeline_errors": 1, "last_error": "Dekoder kechikmoqda",
             }),
         })
@@ -860,10 +864,10 @@ def test_camera_diagnostics_separate_configuration_observation_pipeline_and_drif
         assert label in html
     assert "NVR encoder sozlamalariga egalik qiladi" in html
     assert "1920x1080" in html
-    assert "12.5" in html
-    assert "9.5" in html
-    assert "44" in html
-    assert "3" in html
+    assert "13.0" in html
+    assert "6.5" in html                     # 13 fps, every second frame
+    assert "44.0 ms" in html
+    assert "Tushib qolgan kadrlar" not in html   # nothing ever emitted it
     assert "Dekoder kechikmoqda" in html
     assert "operator" not in html
     assert "very-secret" not in html
@@ -1364,21 +1368,22 @@ def test_live_console_normalizes_role_cameras_and_missing_workers_as_offline(mon
         session.flush()
         entrance_id = entrance.id
         exit_id = exit_camera.id
+        monkeypatch.setattr(pages.settings, "process_every_nth", 2)
         worker = SimpleNamespace(
             camera_id=entrance_id,
+            # The source's own clock is where the last frame time comes from;
+            # stats() carries no such key.
+            source=SimpleNamespace(
+                last_frame_ts=datetime(2026, 8, 25, 3, 14, tzinfo=timezone.utc).timestamp()),
             stats=lambda: {
                 "camera_id": entrance_id,
                 "name": "Asosiy kirish",
                 "role": "IN",
                 "stream": {
-                    "connected": True, "stale": False, "fps": 12.5,
+                    "connected": True, "stale": False, "fps": 25.0,
                     "frames": 120, "resolution": "1920x1080",
                 },
                 "frames_processed": 100,
-                "processed_fps": 25.0,
-                "latency_ms": 40.0,
-                "dropped_frames": 20,
-                "last_frame_time": datetime(2026, 8, 25, 3, 14, tzinfo=timezone.utc),
                 "pipeline_errors": 2,
                 "last_error": "Decoder navbati to'ldi",
                 "timings": {"total": 40.0},
@@ -1398,12 +1403,13 @@ def test_live_console_normalizes_role_cameras_and_missing_workers_as_offline(mon
     assert 'data-stream-canvas' in html
     assert 'data-stream-state="online"' in html
     assert 'data-stream-state="offline"' in html
-    for label in ("Kamera FPS", "Algoritm FPS", "Kechikish", "Tushib qolgan kadrlar", "Oxirgi kadr"):
+    for label in ("Kamera FPS", "Algoritm FPS", "Kechikish", "Oxirgi kadr"):
         assert label in html
+    assert "Tushib qolgan kadrlar" not in html      # nothing ever emitted it
     assert "1920x1080" in html
-    assert "12.5" in html
-    assert "25" in html
-    assert "20" in html
+    assert "25.0" in html                            # camera fps
+    assert "12.5" in html                            # 25 fps, every second frame
+    assert "40.0 ms" in html
     assert "08:14:00" in html
     assert "Decoder navbati to'ldi" in unescape(html)
     assert "Mavjud emas" in html
@@ -1904,4 +1910,276 @@ assert.equal(FakeImage.instances.filter((i) => String(i.src).includes('/video/')
     result = subprocess.run(
         ["node", "-e", contract], cwd=root, capture_output=True, text=True,
     )
+    assert result.returncode == 0, result.stderr
+
+
+# ---- review fixes -----------------------------------------------------------
+
+def test_escapejs_neutralises_everything_that_could_end_a_string_literal():
+    """json.dumps left the apostrophe alone, so a name closed the confirm('...')
+    literal an inline handler had put it in and the rest ran as code."""
+    from app.web.django_compat import escapejs, json_script
+    out = escapejs("x'); alert(1); //")
+    assert "'" not in out and ";" not in out
+    assert out == "x\\u0027)\\u003B alert(1)\\u003B //"
+    assert escapejs('a"b<c>&d\\e') == "a\\u0022b\\u003Cc\\u003E\\u0026d\\u005Ce"
+    assert escapejs(None) == ""
+    # The JSON island cannot close its own <script> block either.
+    block = str(json_script({"name": "</script><img src=x onerror=alert(1)>&"}, "x"))
+    assert "</script><img" not in block
+    assert block.count("</script>") == 1
+    assert json.loads(re.search(r">(\{.*\})<", block).group(1)) == {
+        "name": "</script><img src=x onerror=alert(1)>&"}
+
+
+def test_a_hostile_employee_name_cannot_break_out_of_the_confirm_handler(client: TestClient):
+    """Rendered end to end: the dashboard feed and the day view both put the
+    name inside onsubmit="return confirm('...')"."""
+    from app.db.session import session_scope
+    from app.services.attendance import business_date
+
+    name = "Ali'); alert(1); //"
+    with session_scope() as session:
+        employee = Employee(full_name=name, external_id="AIRI-XSS")
+        camera = Camera(name="Nazorat-XSS", role=CameraRole.IN, rtsp_url="rtsp://xss", enabled=True)
+        session.add_all([employee, camera])
+        session.flush()
+        now = datetime.now(timezone.utc)
+        session.add(RecognitionEvent(
+            employee_id=employee.id, camera_id=camera.id, role=CameraRole.IN,
+            ts=now, business_date=business_date(now), score=0.9,
+            snapshot="evidence/xss.jpg", transition="CHECK_IN"))
+        emp_id, day = employee.id, business_date(now)
+
+    for path in ("/", f"/attendance/day/{emp_id}/{day}"):
+        html = client.get(path).text
+        handlers = [unescape(v) for v in re.findall(r'onsubmit="([^"]*)"', html)]
+        ours = [h for h in handlers if "alert(1)" in h]
+        assert ours, f"{path}: the seeded event did not render with a void control"
+        for h in ours:
+            # Exactly the two delimiting quotes: the name's own is ' now.
+            assert h.count("'") == 2, h
+            assert re.fullmatch(r"return confirm\('[^']*'\)", h), h
+            assert "\\u0027)\\u003B alert(1)" in h
+
+
+def test_enrolment_is_offered_only_to_an_admin(client: TestClient, operator_client: TestClient,
+                                              viewer_client: TestClient):
+    """The route is admin-only now (tests/test_roles.py); a link to a 403 is
+    its own kind of broken."""
+    for path in ("/", "/employees"):
+        assert "Ro'yxatdan o'tkazish" in client.get(path).text
+        for other in (operator_client, viewer_client):
+            assert "Ro'yxatdan o'tkazish" not in other.get(path).text, path
+
+
+def test_enrolment_uses_the_browser_camera_even_with_cameras_configured(monkeypatch):
+    """The IP-camera branch opens /ws/camera/registration/, which app/api/ws.py
+    has never resolved - so with cameras configured, i.e. on every real
+    deployment, the capture never produced a frame."""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(Camera(name="Kirish", role=CameraRole.IN, rtsp_url="rtsp://in", enabled=True))
+        session.flush()
+        _isolated_employee_session(monkeypatch, session)
+        html = pages.employee_add(_employee_page_request("/employees/add")).body.decode()
+    assert "const useIpCamera = false;" in html
+    assert 'id="cameraSelector"' not in html
+    assert "registration" not in (Path(__file__).resolve().parents[1] / "app/api/ws.py").read_text()
+
+
+def test_the_attendance_table_stops_at_a_month_and_says_so(monkeypatch):
+    """Up to a year of rows used to be materialised for one page. The table
+    keeps the newest month and says so; the CSV export keeps the range."""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    day = date(2026, 8, 25)
+    with Session(engine) as session:
+        emp = Employee(full_name="Oy Chegarasi", external_id="AIRI-31", department="IT")
+        session.add(emp)
+        session.flush()
+        for d in (date(2026, 6, 15), date(2026, 7, 25), date(2026, 8, 20)):
+            session.add(DailyAttendance(
+                employee_id=emp.id, business_date=d, status="PRESENT",
+                check_in_time=datetime(d.year, d.month, d.day, 3, tzinfo=timezone.utc)))
+        session.flush()
+        html = _attendance_page_response(
+            monkeypatch, session, day, start_date="2026-06-01", end_date="2026-08-25",
+        ).body.decode()
+        # A calendar month - the page's own "Bir oy" shortcut - is never cut.
+        month = _attendance_page_response(
+            monkeypatch, session, day, start_date="2026-07-25", end_date="2026-08-25",
+        ).body.decode()
+
+    assert "data-range-cap" in html
+    assert "31 kun" in unescape(html)
+    assert 'value="2026-07-25"' in html and 'value="2026-08-25"' in html
+    # One "Hodisalar" link per rendered row.
+    rows = re.findall(r"/attendance/day/\d+/(\d{4}-\d{2}-\d{2})", html)
+    assert sorted(rows) == ["2026-07-25", "2026-08-20"]
+    assert "data-range-cap" not in month
+    assert sorted(re.findall(r"/attendance/day/\d+/(\d{4}-\d{2}-\d{2})", month)) == [
+        "2026-07-25", "2026-08-20"]
+
+
+def test_the_day_view_lists_the_debug_directory_once(monkeypatch, tmp_path):
+    """`capture_stem` globs data/debug per call, so a day of events was a
+    directory walk per row. One listing, the same answers."""
+    import glob
+    from app.config import settings
+    from app.services import corrections
+    from app.services.attendance import business_date
+
+    monkeypatch.setattr(settings, "debug_dir", tmp_path, raising=False)
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        emp = Employee(full_name="Indeks Sinovi", external_id="AIRI-IDX")
+        cam = Camera(name="Exit", role=CameraRole.OUT, rtsp_url="rtsp://exit", enabled=True)
+        session.add_all([emp, cam])
+        session.flush()
+        base = datetime(2026, 9, 3, 8, 0, 30, tzinfo=timezone.utc)
+        (tmp_path / "Indeks Sinovi").mkdir()
+        stems = []
+        for i in range(3):
+            ts, score = base + timedelta(minutes=i), 0.25 + i / 100
+            session.add(RecognitionEvent(
+                employee_id=emp.id, camera_id=cam.id, role=CameraRole.OUT, ts=ts,
+                business_date=business_date(ts), score=score, transition="CHECK_OUT"))
+            stem = f"{ts.astimezone(settings.tz):%Y%m%d_%H%M%S}_{score:.3f}_Exit_001"
+            (tmp_path / "Indeks Sinovi" / f"{stem}.json").write_text("{}")
+            stems.append((ts, score, stem))
+        session.flush()
+        _isolated_employee_session(monkeypatch, session)
+
+        # Parity with the per-event helper, the miss included.
+        index = pages._capture_index()
+        for ts, score, stem in stems:
+            assert pages._capture_stem_from(index, ts, score, "Exit") == stem
+            assert corrections.capture_stem(ts, score, "Exit") == stem
+        assert pages._capture_stem_from(index, base, 0.999, "Exit") == ""
+        assert corrections.capture_stem(base, 0.999, "Exit") == ""
+
+        calls: list = []
+        real_glob = glob.glob
+        monkeypatch.setattr(glob, "glob", lambda *a, **k: calls.append(a) or real_glob(*a, **k))
+        html = pages.attendance_day(_employee_page_request("/attendance/day"), emp.id,
+                                    business_date(base).isoformat()).body.decode()
+    assert len(calls) == 1
+    assert html.count("/evidence/face") == 3
+
+
+def test_unknown_review_preselects_the_resolved_employee(monkeypatch):
+    """The picker reads `attempt.resolved_employee_id`, which the row omitted."""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        emp = Employee(full_name="Belgilangan Xodim", external_id="AIRI-RS")
+        session.add(emp)
+        session.flush()
+        session.add(UnknownSighting(
+            camera_id=1, track_id=7, business_date=date(2026, 8, 25), frames=3,
+            first_seen=datetime(2026, 8, 25, 3, 5, tzinfo=timezone.utc),
+            last_seen=datetime(2026, 8, 25, 3, 7, tzinfo=timezone.utc),
+            resolved_kind="employee", resolved_employee_id=emp.id, resolved_by="inomjon"))
+        session.flush()
+        _isolated_employee_session(monkeypatch, session)
+        request = Request({
+            "type": "http", "method": "GET", "path": "/attendance/unknown", "headers": [],
+            "query_string": b"show=all", "server": ("testserver", 80),
+            "client": ("testclient", 50000), "scheme": "http",
+            "state": {"user": {"uid": 1, "u": "inomjon", "adm": True, "r": "admin"}},
+        })
+        html = pages.attendance_unknown(request, show="all").body.decode()
+    assert f'data-selected="{emp.id}"' in html
+
+
+def test_the_forbidden_page_link_carries_the_prefix(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "url_prefix", "/faceid", raising=False)
+    html = pages.render("auth/forbidden.html",
+                        request=_employee_page_request("/cameras")).body.decode()
+    assert 'href="/faceid/"' in html
+    assert 'href="/"' not in html
+
+
+def test_live_script_prefixes_bare_snapshot_paths_under_a_sub_path():
+    root = Path(__file__).resolve().parents[1]
+    contract = r"""
+const assert = require('node:assert/strict');
+global.window = { location: { protocol: 'https:', host: 'aiscan.airi.uz', origin: 'https://aiscan.airi.uz' },
+                  addEventListener() {} };
+global.document = {
+    querySelector: (sel) => sel === '[data-url-prefix]' ? { dataset: { urlPrefix: '/faceid' } } : null,
+    querySelectorAll: () => [],
+    addEventListener() {},
+};
+const { normalizeAttendanceEvent } = require('./static/js/camera_stream.js');
+assert.equal(normalizeAttendanceEvent({ type: 'event', snapshot: 'snapshots/evt_1.jpg' }).snapshot,
+             '/faceid/media/snapshots/evt_1.jpg');
+// Already a URL - which is what the server sends now - passes through.
+assert.equal(normalizeAttendanceEvent({ type: 'event', snapshot: '/faceid/media/snapshots/evt_1.jpg' }).snapshot,
+             '/faceid/media/snapshots/evt_1.jpg');
+"""
+    result = subprocess.run(["node", "-e", contract], cwd=root, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_camera_socket_marks_a_stale_notice_that_carries_no_frame():
+    """The server no longer re-sends a quiet camera's last frame; it says
+    `stale` without `data`, and the page must act on that rather than drop it."""
+    root = Path(__file__).resolve().parents[1]
+    contract = r"""
+const assert = require('node:assert/strict');
+global.window = { location: { protocol: 'http:', host: 'testserver', origin: 'http://testserver' },
+                  setTimeout: () => 1, clearTimeout() {} };
+class FakeSocket {
+    static instances = [];
+    constructor(url) { this.url = url; this.listeners = {}; FakeSocket.instances.push(this); }
+    addEventListener(type, handler) { this.listeners[type] = handler; }
+    emit(type, data = {}) { this.listeners[type]?.(data); }
+    close() {}
+}
+class FakeImage {
+    static instances = [];
+    constructor() { FakeImage.instances.push(this); }
+    addEventListener(type, handler) { if (type === 'load') this.loadHandler = handler; }
+    set src(value) { this._src = value; this.width = 640; this.height = 360; }
+    get src() { return this._src; }
+}
+global.WebSocket = FakeSocket;
+global.Image = FakeImage;
+const { CameraStreamManager } = require('./static/js/camera_stream.js');
+const status = { dataset: {}, textContent: '', classList: { toggle() {} } };
+const canvas = { dataset: { streamEndpoint: '7' }, width: 0, height: 0,
+                 getContext() { return { drawImage() {} }; },
+                 setAttribute() {}, removeAttribute() {}, after() {}, getAttribute() { return ''; } };
+const card = {
+    dataset: { cameraId: '7', streamState: 'unavailable' },
+    querySelector(selector) {
+        return { '[data-stream-canvas]': canvas,
+                 '.live-camera-card__header [data-stream-state]': status,
+                 '[data-stream-placeholder]': { setAttribute() {}, removeAttribute() {} } }[selector] || null;
+    },
+};
+const manager = new CameraStreamManager();
+manager.connect(card);
+const socket = FakeSocket.instances[0];
+socket.emit('open');
+socket.emit('message', { data: JSON.stringify({ type: 'frame', data: 'jpeg', stale: false, fps: 8.5 }) });
+FakeImage.instances[0].loadHandler();
+assert.equal(card.dataset.streamState, 'online');
+
+socket.emit('message', { data: JSON.stringify({ type: 'frame', stale: true, fps: 8.5 }) });
+assert.equal(card.dataset.streamState, 'unavailable');
+assert.equal(status.textContent, 'Oqim eskirgan');
+assert.equal(FakeImage.instances.length, 1, 'a frameless notice decodes nothing');
+
+// A stale notice proves the transport works: a drop afterwards reconnects
+// rather than downgrading to MJPEG.
+socket.emit('close');
+assert.equal(FakeImage.instances.filter((i) => String(i.src).includes('/video/')).length, 0);
+"""
+    result = subprocess.run(["node", "-e", contract], cwd=root, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr

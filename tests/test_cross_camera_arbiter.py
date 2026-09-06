@@ -127,3 +127,117 @@ def test_fused_count_is_reported():
     a.submit(_pass(9, 2, 104.6, 6, 0.27))
     a.due(120.0)
     assert a.stats()["fused"] == 1
+
+
+# --- direction is resolved on its own evidence -----------------------------
+
+@dataclass
+class DirTrack:
+    embedded_frames: int
+    best_score: float
+    direction: str
+    direction_reason: str
+
+
+def _dpass(emp, cam, mono, frames, score, direction, reason):
+    return PendingPass(employee_id=emp, camera_id=cam, role=None, ts=None,
+                       monotonic=mono, track=DirTrack(frames, score, direction, reason),
+                       snapshot=None, camera_name=f"cam{cam}")
+
+
+def test_the_view_that_ended_last_decides_a_contradiction():
+    """The export's 14 contradicted groups: a person walks to the door area
+    and comes back. The Exit camera saw the outbound half (EXIT), the
+    Entrance camera the return (ENTER). The stronger face used to decide the
+    direction; when EXIT won, somebody who never left was checked out."""
+    a = PassArbiter(window_s=15.0)
+    a.submit(_dpass(30, 2, 100.0, 34, 0.65, "EXIT", "line+depth agree (EXIT)"))     # stronger face
+    a.submit(_dpass(30, 1, 109.5, 11, 0.37, "ENTER", "line+depth agree (ENTER)"))   # later, weaker
+    g = a.due(130.0)[0]
+    assert g.winner.camera_id == 2                     # identity evidence: still the stronger view
+    assert g.direction == "ENTER"                      # direction: the later movement
+    assert g.direction_reason.startswith("line+depth agree (ENTER) [over cam2:EXIT")
+    assert g.contradicted
+    assert a.stats()["contradictions"] == 1
+
+
+def test_a_whole_u_turn_beats_a_half_view_of_it():
+    """One camera saw the person cross out and come back: a tripwire finding
+    that they are inside. It outranks the other camera's EXIT half."""
+    a = PassArbiter(window_s=15.0)
+    a.submit(_dpass(5, 2, 100.0, 40, 0.6, "EXIT", "line+depth agree (EXIT)"))
+    a.submit(_dpass(5, 1, 104.0, 20, 0.5, "ENTER", "crossed and returned (inside)"))
+    g = a.due(120.0)[0]
+    assert g.direction == "ENTER"
+    assert g.direction_reason.startswith("crossed and returned (inside) [over cam2:EXIT")
+
+
+def test_a_tripwire_verdict_outranks_depth_only_whatever_the_order():
+    a = PassArbiter(window_s=15.0)
+    a.submit(_dpass(8, 1, 100.0, 50, 0.7, "ENTER", "line+depth agree (ENTER)"))
+    a.submit(_dpass(8, 2, 106.0, 9, 0.3, "EXIT", "depth only (EXIT, travel 0.21)"))
+    g = a.due(120.0)[0]
+    assert g.direction == "ENTER"
+    assert not g.contradicted
+
+
+def test_a_view_without_a_verdict_never_overrides_one():
+    a = PassArbiter(window_s=15.0)
+    a.submit(_dpass(8, 1, 100.0, 12, 0.4, "ENTER", "line only (ENTER)"))
+    a.submit(_dpass(8, 2, 108.0, 60, 0.8, "UNKNOWN", "stationary (0.010 < 0.06)"))
+    g = a.due(120.0)[0]
+    assert g.winner.camera_id == 2          # best face
+    assert g.direction == "ENTER"           # but the other view's direction
+
+
+def test_agreeing_views_keep_the_winners_own_reason():
+    a = PassArbiter(window_s=15.0)
+    a.submit(_dpass(8, 1, 100.0, 12, 0.4, "ENTER", "line+depth agree (ENTER)"))
+    a.submit(_dpass(8, 2, 103.0, 6, 0.3, "ENTER", "depth only (ENTER, travel 0.30)"))
+    g = a.due(120.0)[0]
+    assert g.direction == "ENTER"
+    assert "[over" not in g.direction_reason
+
+
+# --- the window stretches while the person is still in view ---------------
+
+def test_a_group_waits_for_a_live_track_of_the_same_person():
+    """The return leg of a U-turn is a track that is still running when the
+    outbound pass's window would close. Deciding then is deciding on half
+    the walk - and 55 such pairs completed 15-60 s apart in the export."""
+    a = PassArbiter(window_s=15.0)
+    a.submit(_dpass(30, 2, 100.0, 34, 0.65, "EXIT", "line+depth agree (EXIT)"))
+    a.note_live(1, {30}, 114.0)                 # Entrance camera has them in view
+    assert a.due(116.0) == []                    # window passed, but still live
+    a.note_live(1, {30}, 124.0)
+    assert a.due(125.0) == []
+    a.submit(_dpass(30, 1, 126.0, 11, 0.37, "ENTER", "line+depth agree (ENTER)"))
+    a.note_live(1, set(), 127.0)                 # ...and now they have left
+    g = a.due(128.0)
+    assert len(g) == 1
+    assert g[0].direction == "ENTER" and g[0].contradicted
+
+
+def test_a_live_note_goes_stale_and_the_group_closes():
+    a = PassArbiter(window_s=15.0)
+    a.submit(_dpass(30, 2, 100.0, 34, 0.65, "EXIT", "line+depth agree (EXIT)"))
+    a.note_live(1, {30}, 114.0)
+    assert a.due(116.0) == []
+    assert len(a.due(118.5)) == 1               # no fresh note for >3 s
+
+
+def test_the_hold_is_capped_even_while_live():
+    a = PassArbiter(window_s=15.0, max_hold_s=60.0)
+    a.submit(_dpass(30, 2, 100.0, 34, 0.65, "EXIT", "line+depth agree (EXIT)"))
+    for t in range(101, 160, 2):
+        a.note_live(1, {30}, float(t))
+        assert a.due(float(t)) == []
+    a.note_live(1, {30}, 161.0)
+    assert len(a.due(161.0)) == 1
+
+
+def test_somebody_else_being_live_does_not_hold_a_group():
+    a = PassArbiter(window_s=15.0)
+    a.submit(_dpass(30, 2, 100.0, 34, 0.65, "EXIT", "line+depth agree (EXIT)"))
+    a.note_live(1, {31}, 115.5)
+    assert len(a.due(116.0)) == 1

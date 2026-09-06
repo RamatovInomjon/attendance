@@ -24,6 +24,7 @@ from app.services.auth import ensure_default_admin
 from app.api import auth as auth_router
 from app.api import pages as pages_router
 from app.api import ws as ws_router
+from app.web.viewmodels import live_event
 
 log = logging.getLogger(__name__)
 
@@ -208,7 +209,15 @@ async def video(camera_id: int):
         # WebSocket send and page render in the process. The WebSocket path
         # (app/api/ws.py) always got this right; this one did not.
         while True:
-            jpg = await asyncio.to_thread(w.render)
+            if w.source.is_stale:
+                # Not repainted - see ws.frame_message. Multipart has no way
+                # to say "still nothing", so the stream simply pauses and the
+                # viewer keeps the last frame it received.
+                await asyncio.sleep(1 / 10)
+                continue
+            # Shared with the WebSocket viewers: one encode per frame, not
+            # one per viewer.
+            jpg = await asyncio.to_thread(ws_router.shared_jpeg, w)
             if jpg:
                 yield b"--f\r\nContent-Type: image/jpeg\r\n\r\n" + jpg + b"\r\n"
             await asyncio.sleep(1 / 10)
@@ -242,7 +251,9 @@ def health():
 
 @app.get(f"{PREFIX}/api/events")
 def events(limit: int = 40):
-    return runtime.events(limit)
+    # Snapshots leave as URLs carrying the deployment prefix, the same way
+    # every rendered page hands them out.
+    return [live_event(e) for e in runtime.events(limit)]
 
 
 def _filtered_attendance_rows(day: str | None = None, query: str | None = None,

@@ -41,8 +41,7 @@ URL_MAP = {
     "employees:edit": "/employees/{pk}/edit", "employees:delete": "/employees/{pk}/delete",
     "recognition:live": "/recognition", "recognition:register": "/employees/add",
     "recognition:logs": "/recognition/logs", "recognition:stream": "/recognition/stream",
-    "camera:settings": "/cameras", "camera:add": "/cameras/add",
-    "camera:rtsp_register": "/cameras/rtsp",
+    "camera:settings": "/cameras",
     "attendance:list": "/attendance", "attendance:history": "/attendance/history",
     "attendance:unknown_attempts": "/attendance/unknown",
     "attendance:unknown": "/attendance/unknown",
@@ -124,13 +123,34 @@ def yesno(value, arg="yes,no,maybe"):
     return parts[1] if len(parts) > 1 else "no"
 
 
+# Django's escapejs table. Every character that could end a JS string literal,
+# an HTML attribute or a <script> block becomes \uXXXX, which the JS parser
+# turns back into the character INSIDE the string. The previous version used
+# json.dumps, which leaves ' alone - so a name with an apostrophe closed the
+# confirm('...') literal an inline handler had put it in, and whatever followed
+# the apostrophe ran as code.
+_JS_ESCAPES = {
+    ord("\\"): "\\u005C", ord("'"): "\\u0027", ord('"'): "\\u0022",
+    ord(">"): "\\u003E", ord("<"): "\\u003C", ord("&"): "\\u0026",
+    ord("="): "\\u003D", ord("-"): "\\u002D", ord(";"): "\\u003B",
+    ord("`"): "\\u0060", ord("\u2028"): "\\u2028", ord("\u2029"): "\\u2029",
+}
+_JS_ESCAPES.update((z, "\\u%04X" % z) for z in range(32))
+
+# The same idea for JSON dropped into a <script type="application/json">
+# block: json.dumps leaves "</script>" intact, and the HTML parser ends the
+# block right there, before the JSON parser ever sees it. \u003C and friends
+# are valid JSON and decode to the same characters.
+_JSON_SCRIPT_ESCAPES = {ord(">"): "\\u003E", ord("<"): "\\u003C", ord("&"): "\\u0026"}
+
+
 def escapejs(value):
-    return "" if value is None else json.dumps(str(value))[1:-1]
+    return "" if value is None else str(value).translate(_JS_ESCAPES)
 
 
 def json_script(value, element_id=""):
-    return Markup(f'<script id="{element_id}" type="application/json">'
-                  f'{json.dumps(value, default=str)}</script>')
+    body = json.dumps(value, default=str).translate(_JSON_SCRIPT_ESCAPES)
+    return Markup(f'<script id="{element_id}" type="application/json">{body}</script>')
 
 
 def app_prefix() -> str:

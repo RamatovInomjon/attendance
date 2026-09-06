@@ -165,9 +165,11 @@ def corridor_probes(days: int = 14, dim: int | None = None):
     corridor crop at most 0.17, while a real corridor face reaches one at 0.31 -
     so calibrating against the gallery understated the danger by nearly double.
 
-    Returns `(P, nearest)`: unit vectors, and the employee each was NEAREST to
-    when it was rejected, or -1. The caller uses `nearest` to drop probes that
-    are probably the crop's own person seen again - see `calibrate`.
+    Returns `(P, attributed)`: unit vectors, and the employee each probe is
+    taken to BE, or -1. The caller uses it to drop probes that are the crop's
+    own person seen again - see `calibrate`. An admin's label decides that
+    where one exists (`_attributed`); otherwise it is the employee the
+    pipeline found nearest when it rejected the face.
     """
     from datetime import date, timedelta
 
@@ -179,7 +181,8 @@ def corridor_probes(days: int = 14, dim: int | None = None):
     cutoff = date.today() - timedelta(days=max(1, days))
     with session_scope() as s:
         rows = s.execute(
-            select(UnknownSighting.vector, UnknownSighting.nearest_employee_id)
+            select(UnknownSighting.vector, UnknownSighting.nearest_employee_id,
+                   UnknownSighting.resolved_kind, UnknownSighting.resolved_employee_id)
             .where(UnknownSighting.vector.is_not(None),
                    UnknownSighting.business_date >= cutoff)).all()
     # A gallery rebuilt on another recognizer leaves older vectors of a
@@ -193,8 +196,28 @@ def corridor_probes(days: int = 14, dim: int | None = None):
         return empty
     P = np.stack([np.frombuffer(r[0], np.float32) for r in kept])
     P /= np.linalg.norm(P, axis=1, keepdims=True) + 1e-12
-    near = np.array([r[1] if r[1] is not None else -1 for r in kept], np.int64)
+    near = np.array([_attributed(r) for r in kept], np.int64)
     return P, near
+
+
+def _attributed(row) -> int:
+    """Whose face a probe is, for the purpose of not counting as an impostor.
+
+    A label from app/services/corrections.py beats the pipeline's guess. A
+    sighting an admin resolved as employee X IS X, walking past unrecognised:
+    a genuine probe for X's crops and an impostor for everyone else's, whatever
+    the pipeline had found nearest. Judging it by `nearest_employee_id` alone
+    counted X's own face against X unless the guess happened to agree. And a
+    confirmed VISITOR is an impostor for everybody - including the employee
+    the pipeline came closest to naming, which is exactly the lookalike the
+    floor exists to keep out.
+    """
+    _vec, nearest, kind, resolved = row
+    if kind == "visitor":
+        return -1
+    if kind == "employee" and resolved is not None:
+        return int(resolved)
+    return int(nearest) if nearest is not None else -1
 
 
 def calibrate(cands: list[Candidate], M: np.ndarray, owner: np.ndarray,
@@ -390,7 +413,10 @@ def scan(min_score: float | None = None, min_margin: float = 0.10,
 
 
 def _gallery_rows():
-    """Every stored embedding, normalised, with owners and display labels."""
+    """Every stored embedding of an ACTIVE employee, normalised, with owners
+    and display labels. The same population `load_gallery()` serves live:
+    a deactivated person's rows can name nobody, so measuring floors and
+    worst pairs against them reported risks the matcher could not take."""
     from sqlalchemy import select
     from app.db.models import Employee, FaceEmbedding
     from app.db.session import session_scope
@@ -398,7 +424,9 @@ def _gallery_rows():
     with session_scope() as s:
         rows = s.execute(select(FaceEmbedding.id, FaceEmbedding.employee_id,
                                 FaceEmbedding.vector, FaceEmbedding.source_file,
-                                FaceEmbedding.threshold)).all()
+                                FaceEmbedding.threshold)
+                         .join(Employee, Employee.id == FaceEmbedding.employee_id)
+                         .where(Employee.is_active.is_(True))).all()
         names = dict(s.execute(select(Employee.id, Employee.full_name)).all())
     if not rows:
         return (np.zeros((0, 512), np.float32), np.zeros((0,), np.int64),

@@ -49,7 +49,6 @@
                 <dl>
                     <div><dt>Algoritm FPS</dt><dd>{{ camera.pipeline.fps if camera.pipeline.fps is not none else "Mavjud emas" }}</dd></div>
                     <div><dt>Kechikish</dt><dd>{{ camera.pipeline.latency_ms if camera.pipeline.latency_ms is not none else "Mavjud emas" }}{% if camera.pipeline.latency_ms is not none %} ms{% endif %}</dd></div>
-                    <div><dt>Tushib qolgan kadrlar</dt><dd>{{ camera.pipeline.dropped_frames if camera.pipeline.dropped_frames is not none else "Mavjud emas" }}</dd></div>
                     <div><dt>Xatolar</dt><dd>{{ camera.pipeline.errors if camera.pipeline.errors is not none else "Mavjud emas" }}</dd></div>
                     <div><dt>Oxirgi xato</dt><dd>{{ camera.pipeline.last_error or "Mavjud emas" }}</dd></div>
                 </dl>

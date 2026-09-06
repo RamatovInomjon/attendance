@@ -10,6 +10,8 @@ named in ONE list below, where it can be reviewed.
 from __future__ import annotations
 
 import logging
+import time
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -40,6 +42,12 @@ _ADMIN_PREFIX_NAMES = (
     "/recognition",      # live view and the pipeline's own health
     "/video/",           # the raw camera stream behind the live view
     "/api/health",       # camera-by-camera pipeline stats, same content
+    # Enrolment creates an identity the cameras will then trust - it is the
+    # gallery by another door, and every signed-in role could reach it.
+    "/employees/add",
+    "/api/employees",
+    "/api/gallery",      # POST /api/gallery/reload
+    "/api/debug",        # GET /api/debug/captures: who the debug folder holds
 )
 
 # Carved back out of the list above. `users_password` deliberately lets any
@@ -86,6 +94,43 @@ def current_user(request: Request) -> dict | None:
     return getattr(request.state, "user", None)
 
 
+def _request_hosts(request: Request) -> set[str]:
+    """Hostnames this request may legitimately have been addressed to.
+
+    `request.url.hostname` is the Host header. Behind the edge proxy that is
+    whatever the proxy chose to forward - often the upstream's own address -
+    so X-Forwarded-Host, when present, is accepted as well.
+    """
+    hosts = {(request.url.hostname or "").lower()}
+    for h in request.headers.get("x-forwarded-host", "").split(","):
+        h = h.strip().lower()
+        if h:
+            hosts.add(urlsplit(f"//{h}").hostname or h)
+    hosts.discard("")
+    return hosts
+
+
+def _cross_site(request: Request) -> bool:
+    """True for a state-changing request that another site sent.
+
+    The session cookie is SameSite=Lax, which already keeps it off cross-site
+    form posts in current browsers. This is the second lock: browsers attach
+    the page's Origin (older ones its Referer) to every POST, and a value that
+    names another host is refused whatever the cookie policy did. A request
+    with neither header - curl, a script - is let through: an absent header
+    is not evidence of anything, and the cookie check still applies.
+    """
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return False
+    origin = request.headers.get("origin") or request.headers.get("referer")
+    if not origin:
+        return False
+    # "null" - a sandboxed frame or a privacy redirect - parses to no host and
+    # is refused like any other stranger.
+    host = (urlsplit(origin).hostname or "").lower()
+    return host not in _request_hosts(request)
+
+
 async def auth_middleware(request: Request, call_next):
     """Attach the signed-in user, or turn the request away.
 
@@ -95,6 +140,11 @@ async def auth_middleware(request: Request, call_next):
     'you are logged out'.
     """
     path = request.url.path
+    if _cross_site(request):
+        log.warning("refused cross-site %s %s (origin %r, host %r)", request.method,
+                    path, request.headers.get("origin") or request.headers.get("referer"),
+                    request.url.hostname)
+        return JSONResponse({"detail": "Cross-site request refused"}, status_code=403)
     session = read_session(request.cookies.get(COOKIE_NAME))
     request.state.user = session
 
@@ -160,14 +210,35 @@ def _safe_next(raw: str | None) -> str:
     """
     from app.config import settings
     prefix = settings.url_prefix.rstrip("/")
-    if not raw or not raw.startswith("/") or raw.startswith("//"):
+    # A backslash is refused outright: browsers normalise "/\evil.example"
+    # to "//evil.example", so the "//" check alone can be walked around.
+    if not raw or not raw.startswith("/") or raw.startswith("//") or "\\" in raw:
         return _p("/")
     if prefix and raw != prefix and not raw.startswith(f"{prefix}/"):
         return _p("/")
     return raw
 
 
-def _set_session_cookie(response, user: dict) -> None:
+def _cookie_path() -> str:
+    """Where the session cookie applies: this deployment's prefix.
+
+    On the shared host the other projects under the same origin (/manim,
+    /ppe, ...) must never receive it; a "/" cookie went to all of them.
+    """
+    from app.config import settings
+    return settings.url_prefix.rstrip("/") or "/"
+
+
+def _is_https(request: Request | None) -> bool:
+    if request is None:
+        return False
+    if request.url.scheme == "https":
+        return True
+    proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+    return proto == "https"
+
+
+def _set_session_cookie(response, user: dict, request: Request | None = None) -> None:
     response.set_cookie(
         COOKIE_NAME,
         sign_session(user_id=user["uid"], username=user["username"],
@@ -175,8 +246,61 @@ def _set_session_cookie(response, user: dict) -> None:
         max_age=MAX_AGE_S,
         httponly=True,      # not readable from JS, so XSS cannot lift the session
         samesite="lax",     # blocks cross-site form posts, keeps normal links working
-        path="/",
+        # Secure when the client came in over TLS - directly, or through the
+        # edge proxy, which terminates it and says so in X-Forwarded-Proto.
+        # Not unconditionally: the LAN deployment is plain http, and a Secure
+        # cookie there is silently never sent back, which looks like a login
+        # that does not stick.
+        secure=_is_https(request),
+        path=_cookie_path(),
     )
+
+
+# Failed sign-ins per client address. Five inside a minute lock that address
+# out for a minute: enough to make guessing pointless, short enough that an
+# operator who mistyped twice is not on the phone to an admin. In-process,
+# so a restart forgets it - acceptable for a limiter whose job is to slow
+# things down, not to keep a permanent record.
+LOGIN_MAX_FAILURES = 5
+LOGIN_WINDOW_S = 60.0
+LOGIN_LOCKOUT_S = 60.0
+_LOGIN_FAILURES: dict[str, dict] = {}     # ip -> {"at": [timestamps], "until": lockout end}
+
+
+def _client_ip(request: Request) -> str:
+    """The address the attempt came from.
+
+    Behind the edge proxy every request arrives from the proxy's own address,
+    so counting on that would lock the whole site out after five failures by
+    anyone. The proxy appends the real client to X-Forwarded-For; the LAST
+    entry is the one it wrote itself and the only one a client cannot forge.
+    """
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd:
+        last = fwd.split(",")[-1].strip()
+        if last:
+            return last
+    return request.client.host if request.client else "?"
+
+
+def _login_locked_for(ip: str, now: float | None = None) -> float:
+    """Seconds left on this address's lockout, or 0."""
+    now = time.time() if now is None else now
+    entry = _LOGIN_FAILURES.get(ip)
+    return max(0.0, entry["until"] - now) if entry else 0.0
+
+
+def _note_login_failure(ip: str, now: float | None = None) -> None:
+    now = time.time() if now is None else now
+    # Forget addresses that have gone quiet, or the table only ever grows.
+    for quiet in [k for k, v in _LOGIN_FAILURES.items()
+                  if v["until"] < now and all(now - t > LOGIN_WINDOW_S for t in v["at"])]:
+        del _LOGIN_FAILURES[quiet]
+    entry = _LOGIN_FAILURES.setdefault(ip, {"at": [], "until": 0.0})
+    entry["at"] = [t for t in entry["at"] if now - t <= LOGIN_WINDOW_S] + [now]
+    if len(entry["at"]) >= LOGIN_MAX_FAILURES:
+        entry["until"] = now + LOGIN_LOCKOUT_S
+        entry["at"] = []
 
 
 # ---- routes ------------------------------------------------------------
@@ -201,17 +325,28 @@ async def login_submit(request: Request,
                        username: str = Form(""), password: str = Form(""),
                        next: str = Form("/")):
     target = _safe_next(next)
+    ip = _client_ip(request)
+    wait = _login_locked_for(ip)
+    if wait > 0:
+        # Before the password is even looked at: a locked-out address gets no
+        # PBKDF2 work out of us either.
+        log.warning("login from %s refused: locked out for %.0fs more", ip, wait)
+        resp = _render_login(request, error="Too many failed attempts. Try again in a minute.",
+                             next_url=target, status=429)
+        resp.headers["Retry-After"] = str(int(wait) + 1)
+        return resp
     # PBKDF2 verify is ~140 ms of CPU; off the event loop so one login cannot
     # stall frame delivery to every other viewer.
     from starlette.concurrency import run_in_threadpool
     user = await run_in_threadpool(auth_svc.authenticate, username, password)
     if not user:
-        log.warning("failed login for %r from %s", username,
-                    request.client.host if request.client else "?")
+        _note_login_failure(ip)
+        log.warning("failed login for %r from %s", username, ip)
         return _render_login(request, error="Incorrect username or password.",
                              next_url=target, status=401)
+    _LOGIN_FAILURES.pop(ip, None)          # a real sign-in clears the slate
     resp = RedirectResponse(target, status_code=303)
-    _set_session_cookie(resp, user)
+    _set_session_cookie(resp, user, request)
     log.info("login: %s", user["username"])
     return resp
 
@@ -220,7 +355,12 @@ async def login_submit(request: Request,
 @router.post("/logout")
 def logout():
     resp = RedirectResponse(_p("/login"), status_code=303)
-    resp.delete_cookie(COOKIE_NAME, path="/")
+    resp.delete_cookie(COOKIE_NAME, path=_cookie_path())
+    if _cookie_path() != "/":
+        # Sessions issued before the cookie was scoped to the prefix live at
+        # "/". A browser keys cookies on path, so that one has to be named
+        # separately or it outlives the sign-out.
+        resp.delete_cookie(COOKIE_NAME, path="/")
     return resp
 
 
@@ -232,8 +372,15 @@ def users_page(request: Request, error: str = "", created: str = ""):
         return HTMLResponse(
             render("auth/forbidden.html", request=request,
                    current_view="auth:users").body, status_code=403)
+    from app.config import settings
+    users = auth_svc.list_users()
+    for u in users:
+        # Stored as UTC; shown in the console's own zone like every other
+        # time on every other page.
+        if u.get("last_login_at"):
+            u["last_login_at"] = u["last_login_at"].astimezone(settings.tz)
     return render("auth/users.html", request=request, current_view="auth:users",
-                  users=auth_svc.list_users(), me=me, error=error, created=created,
+                  users=users, me=me, error=error, created=created,
                   roles=[(r, auth_svc.ROLE_LABELS[r]) for r in auth_svc.ROLES],
                   role_help=auth_svc.ROLE_HELP)
 

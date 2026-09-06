@@ -70,7 +70,7 @@
         {% if can_correct %}
         <form method="post" class="ms-auto"
               action="{{ PREFIX }}/attendance/event/{{ e.id }}/{{ 'unvoid' if e.voided else 'void' }}"
-              {% if not e.voided %}onsubmit="return confirm('Bu {{ employee.name }} emasmi? Kun qaytadan hisoblanadi.')"{% endif %}>
+              {% if not e.voided %}onsubmit="return confirm('Bu {{ employee.name|escapejs }} emasmi? Kun qaytadan hisoblanadi.')"{% endif %}>
           <input type="hidden" name="next" value="{{ PREFIX }}/attendance/day/{{ employee.id }}/{{ day }}">
           {% if not e.voided %}<input type="hidden" name="reason" value="admin: boshqa odam"><input type="hidden" name="reason_hint" value="">{% endif %}
           <button class="btn btn-sm {{ 'btn-outline-secondary' if e.voided else 'btn-outline-danger' }}" type="submit">

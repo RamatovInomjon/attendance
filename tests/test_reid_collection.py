@@ -371,3 +371,58 @@ def test_zero_means_use_the_calibration_not_accept_everything():
     """A falsy override must not read as 'threshold 0', which accepts anybody."""
     from app.config import Settings
     assert Settings(recognition_threshold_override=0.0).threshold_for() > 0.2
+
+
+# --- a pass at the crop cap is not a pass that ended -----------------------
+# The pipeline stops collecting after body_crop_max_per_pass, so a capped pass
+# goes silent while its person is still in view. Stale-closing it on the
+# ordinary ~6 s limit wrote it as UNKNOWN, and the CompletedTrack that arrived
+# later - carrying the name - found nothing to attach to.
+
+def _crop(track_id, t, first_seen):
+    return SimpleNamespace(track_id=track_id, ts=t, first_seen=first_seen,
+                           image=np.zeros((4, 4, 3), np.uint8), score=0.5)
+
+
+def _recording_worker():
+    from app.services.reid_worker import ReidWorker
+    w = ReidWorker(model_path="unused")
+    w.enabled = True
+    flushed = []
+    w._flush = lambda p, ct, ts, direction: flushed.append((p.track_id, direction))
+    return w, flushed
+
+
+def test_a_pass_at_the_crop_cap_waits_for_its_track_to_end():
+    w, flushed = _recording_worker()
+    t0 = 1_700_000_000.0
+    cap = settings.body_crop_max_per_pass
+    for i in range(cap):
+        w._on_crop(1, "Entrance", _crop(1, t0 + i, t0))       # capped: a loiterer
+    for i in range(3):
+        w._on_crop(1, "Entrance", _crop(2, t0 + i, t0))       # short: walked past
+    short = settings.track_max_age_s + settings.body_crop_interval_s + 2.0
+
+    w._close_stale(t0 + cap + short + 1.0)
+    assert flushed == [(2, "UNKNOWN")], "only the short pass is stale"
+
+    ct = SimpleNamespace(track_id=1, first_seen=t0, employee_id=7, name="Named",
+                         direction="ENTER", best_score=0.6)
+    w._on_pass(1, "Entrance", ct, None)
+    assert (1, "ENTER") in flushed, "the capped pass was still there to be named"
+
+
+def test_a_capped_pass_still_closes_eventually():
+    """Bounded: somebody standing there past the longest plausible track is
+    written as UNKNOWN rather than held in memory until shutdown."""
+    w, flushed = _recording_worker()
+    t0 = 1_700_000_000.0
+    cap = settings.body_crop_max_per_pass
+    for i in range(cap):
+        w._on_crop(1, "Entrance", _crop(1, t0 + i, t0))
+    long = (settings.track_max_age_s
+            + settings.body_crop_max_per_pass * settings.body_crop_interval_s + 60.0)
+    w._close_stale(t0 + cap + long - 5.0)
+    assert flushed == []
+    w._close_stale(t0 + cap + long + 1.0)
+    assert flushed == [(1, "UNKNOWN")]

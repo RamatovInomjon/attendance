@@ -77,7 +77,9 @@ class RtspSource:
     def stop(self):
         self._stop.set()
         if self._thread:
-            self._thread.join(timeout=3.0)
+            # A read blocked on a silent camera returns after the read
+            # timeout; give the thread that long to notice the stop.
+            self._thread.join(timeout=self.stale_after_s + 2.0)
 
     @property
     def is_stale(self) -> bool:
@@ -87,9 +89,20 @@ class RtspSource:
     def _open(self) -> cv2.VideoCapture | None:
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
             f"rtsp_transport;{self.transport}|fflags;nobuffer|flags;low_delay"
-            f"|stimeout;{self.open_timeout_ms * 1000}"
         )
-        cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
+        # Timeouts as capture properties, which OpenCV enforces itself through
+        # its interrupt callback whatever FFmpeg sits underneath. They used to
+        # be passed as the `stimeout` option, which FFmpeg 5 removed; the
+        # bundled build ignored it silently and the defaults applied - 30 s
+        # to open and 30 s per read. A camera that stalled without closing
+        # the socket (a reboot, a switch flap, a half-open connection) then
+        # blocked every read for 30 s, and the thirty-failure rule below took
+        # a quarter of an hour to notice, with /api/health saying "stale" the
+        # whole time and nothing acting on it. Measured against a black-holed
+        # host: open failed after 3.0 s with the property, 30.1 s without.
+        params = [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, int(self.open_timeout_ms),
+                  cv2.CAP_PROP_READ_TIMEOUT_MSEC, int(max(1.0, self.stale_after_s) * 1000)]
+        cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG, params)
         if not cap.isOpened():
             cap.release()
             return None
@@ -133,6 +146,7 @@ class RtspSource:
     def _read_loop(self):
         attempt = 0
         cap = None
+        opened_at = 0.0
         t_fps = time.time()
         n_fps = 0
 
@@ -149,6 +163,7 @@ class RtspSource:
                         self._stop.wait(delay)
                         continue
                     attempt = 0
+                    opened_at = time.time()
                     self.connected = True
                     self.reconnects += 1
                     log.info("[%s] connected %dx%d", self.name, self.width, self.height)
@@ -156,9 +171,14 @@ class RtspSource:
                 ok, img = cap.read()
                 if not ok or img is None:
                     self.read_failures += 1
-                    # A few dropped frames are normal; a run of them is a dead link.
-                    if self.read_failures >= 30:
-                        log.warning("[%s] stream lost, reconnecting", self.name)
+                    # A few dropped frames are normal. A link is dead when
+                    # nothing has arrived for `stale_after_s` - each failed
+                    # read now takes at most that long, so this is one or two
+                    # reads, not a run of thirty at 30 s apiece.
+                    silent = time.time() - max(self.last_frame_ts, opened_at)
+                    if self.read_failures >= 30 or silent > self.stale_after_s:
+                        log.warning("[%s] stream lost (%.0fs without a frame), reconnecting",
+                                    self.name, silent)
                         cap.release()
                         cap = None
                         self.connected = False
@@ -379,8 +399,12 @@ class ReplaySource:
 
             # A shared, deterministic epoch so both cameras start the same loop
             # at the same instant and keep the timing they were recorded with.
+            # Quantised to five seconds, not to the whole span: both workers
+            # start within milliseconds of each other and land in the same
+            # slot either way, but rounding up to the span made the first
+            # frame wait up to the length of the entire schedule.
             span = max(o + self._duration(p) for o, p in plan) + 10.0
-            epoch = (int(time.time() / span) + 1) * span
+            epoch = (int(time.time() / 5.0) + 1) * 5.0
 
             for offset, path in plan:
                 if self._stop.is_set():

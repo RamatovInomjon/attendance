@@ -258,3 +258,73 @@ def test_the_cooldown_still_expires():
         d = svc.record(s, employee_id=emp, camera_id=CAM_IN, role=CameraRole.IN,
                        ts=_at(9, 2, 0), score=0.5, direction=ENTER)
         assert d.transition != "DEBOUNCED"
+
+
+# --- a later EXIT corrects an earlier check-out time ---------------------
+
+def test_an_exit_while_already_out_moves_the_check_out_time_forward():
+    """Baxtiyor, 2026-09-03: a U-turn at the door was recorded as a check-out
+    at 11:01, and the real departure at 11:50 was then only a re-sighting, so
+    the day showed him leaving 49 minutes early. Somebody seen LEAVING was
+    inside a moment before, so the later time is the true one. No state
+    moves and nothing is worked for the unobserved interval."""
+    svc = AttendanceService(cooldown_s=90)
+    with session_scope() as s:
+        emp = _emp(s, "Later Exit")
+        svc.record(s, employee_id=emp, camera_id=CAM_IN, role=CameraRole.IN,
+                   ts=_at(5, 8), score=0.5, direction=ENTER)
+        d1 = svc.record(s, employee_id=emp, camera_id=CAM_OUT, role=CameraRole.OUT,
+                        ts=_at(6, 1), score=0.5, direction=EXIT)
+        assert d1.transition == "CHECK_OUT"
+        d2 = svc.record(s, employee_id=emp, camera_id=CAM_OUT, role=CameraRole.OUT,
+                        ts=_at(6, 50), score=0.5, direction=EXIT, snapshot="s2.jpg")
+        assert d2.transition == "RE_SIGHTING"
+        row = _daily(s, emp, _at(6, 50))
+        assert row.presence == PresenceStatus.OUTSIDE
+        assert row.check_out_time == _at(6, 50)
+        assert row.check_out_snapshot == "s2.jpg"
+        assert row.worked_seconds == 53 * 60          # only the observed interval
+        assert row.status == "PRESENT"
+
+
+def test_an_exit_before_the_recorded_check_out_does_not_move_it_back():
+    svc = AttendanceService(cooldown_s=90)
+    with session_scope() as s:
+        emp = _emp(s, "Out Of Order")
+        svc.record(s, employee_id=emp, camera_id=CAM_IN, role=CameraRole.IN,
+                   ts=_at(5, 0), score=0.5, direction=ENTER)
+        svc.record(s, employee_id=emp, camera_id=CAM_OUT, role=CameraRole.OUT,
+                   ts=_at(7, 0), score=0.5, direction=EXIT)
+        svc.record(s, employee_id=emp, camera_id=CAM_OUT, role=CameraRole.OUT,
+                   ts=_at(6, 0), score=0.5, direction=EXIT)      # arrives late, earlier ts
+        row = _daily(s, emp, _at(7, 0))
+        assert row.check_out_time == _at(7, 0)
+
+
+def test_a_debounced_pass_is_written_and_moves_nothing():
+    """Anvarxodja, 2026-09-04 09:55: in, back toward the door, and in again
+    forty seconds later. The second entry was inside the cooldown and was
+    dropped without a trace; it is now a row that changes no state and that
+    a rebuild ignores."""
+    from sqlalchemy import select
+    from app.db.models import RecognitionEvent
+    svc = AttendanceService(cooldown_s=90)
+    with session_scope() as s:
+        emp = _emp(s, "Debounced Row")
+        svc.record(s, employee_id=emp, camera_id=CAM_IN, role=CameraRole.IN,
+                   ts=_at(5, 0, 0), score=0.5, direction=ENTER)
+        d = svc.record(s, employee_id=emp, camera_id=CAM_IN, role=CameraRole.IN,
+                       ts=_at(5, 0, 40), score=0.4, direction=ENTER, snapshot="again.jpg")
+        assert d.transition == "DEBOUNCED"
+        rows = s.execute(select(RecognitionEvent).where(
+            RecognitionEvent.employee_id == emp).order_by(RecognitionEvent.ts)).scalars().all()
+        assert [r.transition for r in rows] == ["CHECK_IN", "DEBOUNCED"]
+        assert rows[1].snapshot == "again.jpg"
+        row = _daily(s, emp, _at(5, 0))
+        assert row.presence == PresenceStatus.INSIDE
+        assert row.check_in_time == _at(5, 0, 0)
+        # ...and a rebuild treats it as evidence only.
+        n = svc.rebuild(s, emp, business_date(_at(5, 0)))
+        assert n == 2
+        row = _daily(s, emp, _at(5, 0))
+        assert row.check_in_time == _at(5, 0, 0) and row.presence == PresenceStatus.INSIDE

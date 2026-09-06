@@ -148,6 +148,19 @@ class AttendanceService:
         bdate = business_date(ts)
 
         if self._debounced(s, employee_id, camera_id, ts, direction):
+            # Written, not dropped. A debounced pass is still a sighting with
+            # a direction and a snapshot; throwing it away left the record
+            # unable to show, for a person walking in, out and in again
+            # inside ninety seconds, that the second entry ever happened -
+            # and made every replay of the log blind to it. The row moves no
+            # state and `rebuild` skips it, exactly like DUPLICATE_VIEW.
+            s.add(RecognitionEvent(
+                employee_id=employee_id, camera_id=camera_id, role=role, ts=ts,
+                business_date=bdate, score=score, margin=margin, track_id=track_id,
+                face_px=face_px, votes=votes, snapshot=snapshot, accepted=True,
+                transition="DEBOUNCED", direction=direction,
+                direction_reason=direction_reason[:96],
+            ))
             return Decision("DEBOUNCED")
 
         if not apply_state:
@@ -229,6 +242,19 @@ class AttendanceService:
                 daily.check_out_snapshot = snapshot
             transition = "CHECK_OUT"
 
+        elif eff in (CameraRole.OUT, CameraRole.BOTH) and daily.presence == PresenceStatus.OUTSIDE \
+                and daily.check_out_time is not None and ts > daily.check_out_time:
+            # Seen LEAVING while already recorded as out. The person was
+            # demonstrably inside a moment ago, so the earlier check-out time
+            # is wrong - either their return was missed, or that check-out was
+            # a U-turn at the door that never was a departure. The later time
+            # is the one that is true. No state moves and no time is worked,
+            # because nothing observed the interval; the transition stays a
+            # re-sighting so the log says what happened.
+            daily.check_out_time = ts
+            if snapshot:
+                daily.check_out_snapshot = snapshot
+
         # First sighting of the day on the OUT camera: the person is leaving a
         # building we never saw them enter -- they came in through an uncovered
         # door, or the IN camera missed them.  Flag it for review rather than
@@ -297,11 +323,12 @@ class AttendanceService:
 
         for e in events:
             row.event_count = (row.event_count or 0) + 1
-            if e.transition == "DUPLICATE_VIEW":
-                # The losing half of a cross-camera pair. It was recorded as
-                # evidence and deliberately moved no state; replaying it as a
+            if e.transition in ("DUPLICATE_VIEW", "DEBOUNCED"):
+                # The losing half of a cross-camera pair, or a repeat inside
+                # the cooldown. Both were recorded as evidence and
+                # deliberately moved no state; replaying either as a
                 # transition would invent the second check-in the arbiter
-                # exists to prevent.
+                # and the cooldown exist to prevent.
                 continue
             eff = self._effective_role(e.role, e.direction or "")
             if eff is None and not geom.get(e.camera_id, True):

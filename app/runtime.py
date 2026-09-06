@@ -2,14 +2,17 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 
+from app.config import settings
 from app.core.direction import config_from_camera
 from app.core.gallery import Gallery
 from app.db.models import Camera
 from app.db.session import init_db, session_scope
 from app.services.arbiter import PassArbiter
+from app.services.attendance import AttendanceService, business_date
 from app.services.reid_worker import ReidWorker
 from app.services.enrollment import load_gallery
 from app.services.worker import CameraWorker
@@ -79,8 +82,31 @@ class Runtime:
         # own model; the cameras only hand it crops.
         self.reid = ReidWorker()
 
+    @staticmethod
+    def _sweep_open_days() -> int:
+        """Flag every finished day that still has somebody INSIDE.
+
+        The end-of-day timer in app/api/main.py fires at 04:10 - while the
+        process is up. A service started after that, or down across it, never
+        revisited the days it missed, so their rows kept claiming people were
+        in the building until the next 04:10 the process happened to see. Run
+        once at start-up it catches up on all of them; the sweep is idempotent
+        and flags rather than closes, so running it twice costs nothing.
+        """
+        try:
+            upto = business_date(datetime.now(settings.tz)) - timedelta(days=1)
+            with session_scope() as s:
+                n = AttendanceService().close_open_intervals(s, upto, catch_up=True)
+            log.info("start-up sweep: flagged %d open interval(s) up to %s", n, upto)
+            return n
+        except Exception:
+            # Housekeeping; it must not keep the cameras from starting.
+            log.exception("start-up sweep failed")
+            return 0
+
     def start(self):
         init_db()
+        self._sweep_open_days()
 
         # Fail loudly if we are about to run ~10x slower on CPU.  The failure
         # mode this guards against is silent: onnxruntime just reports

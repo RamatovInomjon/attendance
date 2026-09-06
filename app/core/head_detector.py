@@ -38,7 +38,7 @@ CLS_HEAD, CLS_PERSON = 0, 1
 class HeadDetection:
     box: np.ndarray      # xyxy in original-frame pixels
     score: float
-    cls: int             # 0 person, 1 head
+    cls: int             # 0 head, 1 person (CLS_HEAD / CLS_PERSON)
 
 
 class HeadDetector:
@@ -132,10 +132,27 @@ class HeadDetector:
         xy[:, [1, 3]] -= dy
         xy /= r
 
-        idx = cv2.dnn.NMSBoxes(
-            [[float(x1), float(y1), float(x2 - x1), float(y2 - y1)] for x1, y1, x2, y2 in xy],
-            c.tolist(), self.conf, self.iou)
+        # Suppression is PER CLASS. The pipeline asks for both classes in one
+        # pass, and a person box that is only head and shoulders - somebody
+        # at the bottom of the frame, the closest and best face there is -
+        # overlaps its own head well above the IoU limit, so class-agnostic
+        # NMS dropped whichever of the two scored lower: no head, no
+        # recognition on that frame; no person, a hole in the track.
+        rects = [[float(x1), float(y1), float(x2 - x1), float(y2 - y1)] for x1, y1, x2, y2 in xy]
+        idx = _nms_per_class(rects, c, k, self.conf, self.iou)
         if len(idx) == 0:
             return []
-        idx = np.array(idx).ravel()
         return [HeadDetection(xy[i], float(c[i]), int(k[i])) for i in idx]
+
+
+def _nms_per_class(rects, conf: np.ndarray, cls: np.ndarray, thr: float, iou: float) -> list[int]:
+    if hasattr(cv2.dnn, "NMSBoxesBatched"):
+        idx = cv2.dnn.NMSBoxesBatched(rects, conf.tolist(), cls.tolist(), thr, iou)
+        return [int(i) for i in np.array(idx).ravel()] if len(idx) else []
+    keep: list[int] = []
+    for c in np.unique(cls):
+        members = np.flatnonzero(cls == c)
+        idx = cv2.dnn.NMSBoxes([rects[i] for i in members], conf[members].tolist(), thr, iou)
+        if len(idx):
+            keep.extend(int(members[i]) for i in np.array(idx).ravel())
+    return keep

@@ -650,3 +650,139 @@ def test_a_day_whose_only_sighting_was_voided_does_not_still_read_present():
     d = _daily(emp)
     assert d.check_in_time is None and d.check_out_time is None
     assert d.status == "NO_CHECKIN", "a day with nothing left is not a day attended"
+
+
+# --- an admin void of the winner takes its duplicate view with it ----------
+
+def _duplicate_view(emp, ts, cam=CAM_OUT):
+    """The losing half of a cross-camera pair, as the arbiter records it."""
+    with session_scope() as s:
+        AttendanceService(cooldown_s=0).record(
+            s, employee_id=emp, camera_id=cam, role=CameraRole.OUT, ts=ts,
+            score=0.4, direction=ENTER, apply_state=False)
+
+
+def test_an_admin_void_of_the_winner_voids_its_duplicate_view_twin():
+    """Both cameras saw one walk; the arbiter let one event move state and
+    recorded the other as DUPLICATE_VIEW under the same name. "Not him" is a
+    statement about the walk, so the twin goes too. A duplicate view outside
+    `cross_camera_window_s` is somebody else's walk and stays."""
+    emp = _emp()
+    _pass(emp, CAM_IN, CameraRole.IN, _at(9, 0), ENTER)
+    _duplicate_view(emp, _at(9, 0, 5))                 # inside the window
+    _duplicate_view(emp, _at(9, 30))                   # a different walk
+    winner = _events(emp)[0][0]
+
+    out = corrections.void_event(winner, by="admin", reason="not him")
+    assert out["ok"] and out["duplicates_voided"] == 1
+    assert [t for _i, t, v in _events(emp) if v is not None] == ["CHECK_IN", "DUPLICATE_VIEW"]
+    assert [t for _i, t, v in _events(emp) if v is None] == ["DUPLICATE_VIEW"]
+    with session_scope() as s:
+        twin = s.execute(select(RecognitionEvent).where(
+            RecognitionEvent.employee_id == emp,
+            RecognitionEvent.ts == _at(9, 0, 5))).scalar_one()
+        assert (twin.voided_by, twin.void_reason) == ("admin", "not him"), \
+            "the twin carries the same audit trail"
+    d = _daily(emp)
+    assert d.check_in_time is None and d.status == "NO_CHECKIN"
+
+
+def test_a_recheck_void_leaves_the_twin_to_its_own_verdict():
+    """The recheck judges one capture at a time, and the twin has a capture of
+    its own to be judged by. Taking it along would void on evidence nobody
+    re-examined."""
+    emp = _emp()
+    _pass(emp, CAM_IN, CameraRole.IN, _at(9, 0), ENTER)
+    _duplicate_view(emp, _at(9, 0, 5))
+    winner = _events(emp)[0][0]
+    out = corrections.void_event(winner, by="recheck", reason="recheck: 0.251 -> 0.160")
+    assert out["ok"] and out["duplicates_voided"] == 0
+    assert [v is not None for _i, _t, v in _events(emp)] == [True, False]
+
+
+def test_the_gallery_reload_hook_fires_only_when_a_row_actually_went():
+    """The running gallery keeps a deleted row in memory until it is reloaded;
+    the hook is how the caller that owns the runtime finds out. It must not
+    fire for a void that removed nothing, or every correction would reload
+    the gallery for no reason."""
+    import json
+    from app.config import settings
+    from app.db.models import Camera
+
+    calls = []
+    emp = _emp("Hook Person")
+    _pass(emp, CAM_IN, CameraRole.IN, _at(9, 0), ENTER, score=0.611)
+    _pass(emp, CAM_IN, CameraRole.IN, _at(9, 30), ENTER, score=0.5)
+    first, second = (e[0] for e in _events(emp))
+
+    # No capture on disk behind the 09:30 pass: nothing removed, no call.
+    out = corrections.void_event(second, by="admin",
+                                 on_gallery_change=lambda: calls.append("x"))
+    assert out["ok"] and out["gallery_rows_removed"] == 0 and calls == []
+
+    local = _at(9, 0).astimezone(settings.tz)
+    stem = f"{local:%Y%m%d_%H%M%S}_0.611_Entrance_001"
+    folder = settings.debug_dir / "Hook Person"
+    folder.mkdir(parents=True, exist_ok=True)
+    v = np.random.default_rng(4).standard_normal(512).astype(np.float32)
+    v /= np.linalg.norm(v)
+    try:
+        (folder / f"{stem}.json").write_text(json.dumps({"score": 0.611}))
+        with session_scope() as s:
+            if s.get(Camera, CAM_IN) is None:
+                s.add(Camera(id=CAM_IN, name="Entrance", role=CameraRole.IN,
+                             rtsp_url="rtsp://x", enabled=False))
+            s.add(FaceEmbedding(employee_id=emp, source_file=f"live:{stem}",
+                                vector=v.tobytes(), dim=512, model_name="m",
+                                threshold=0.35))
+        out = corrections.void_event(first, by="admin",
+                                     on_gallery_change=lambda: calls.append("reload"))
+        assert out["gallery_rows_removed"] == 1 and calls == ["reload"]
+    finally:
+        for f in folder.glob(f"{stem}*"):
+            f.unlink()
+        if folder.is_dir():
+            folder.rmdir()
+
+
+# --- a label from an admin beats a guess from the pipeline -----------------
+
+def test_labelled_sightings_are_attributed_by_the_admin_not_the_pipeline():
+    """The probe set decides which corridor faces count as impostors for a
+    crop. A sighting resolved as employee X IS X - a genuine probe for X's
+    crops and an impostor for everyone else's, whatever the pipeline had found
+    nearest; judging it by `nearest_employee_id` alone counted X's own face
+    against X. And a confirmed visitor is an impostor for everybody, including
+    the person the pipeline came closest to naming."""
+    from app.services import augment
+
+    x, y = _emp("Probe X"), _emp("Probe Y")
+
+    def unit(seed):
+        v = np.random.default_rng(seed).standard_normal(512).astype(np.float32)
+        return v / np.linalg.norm(v)
+
+    missed, visitor, plain = unit(11), unit(12), unit(13)
+    day = business_date(_at(9, 0))
+    with session_scope() as s:
+        s.add_all([
+            UnknownSighting(camera_id=CAM_IN, track_id=1, business_date=day,
+                            vector=missed.tobytes(), nearest_employee_id=y,
+                            resolved_kind="employee", resolved_employee_id=x),
+            UnknownSighting(camera_id=CAM_IN, track_id=2, business_date=day,
+                            vector=visitor.tobytes(), nearest_employee_id=x,
+                            resolved_kind="visitor"),
+            UnknownSighting(camera_id=CAM_IN, track_id=3, business_date=day,
+                            vector=plain.tobytes(), nearest_employee_id=y),
+        ])
+
+    P, who = augment.corridor_probes(days=3650)
+
+    def attributed(v):
+        i = int(np.argmax(P @ v))
+        assert float(P[i] @ v) > 0.999, "the probe must be in the set"
+        return int(who[i])
+
+    assert attributed(missed) == x, "resolved as X: X's own face, not an impostor for X"
+    assert attributed(visitor) == -1, "a confirmed visitor is an impostor for everybody"
+    assert attributed(plain) == y, "unlabelled: the pipeline's guess stands"

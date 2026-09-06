@@ -55,7 +55,6 @@
                 <div><dt>Kamera FPS</dt><dd data-camera-metric="camera-fps">{{ camera.camera_fps if camera.camera_fps is not none else "Mavjud emas" }}</dd></div>
                 <div><dt>Algoritm FPS</dt><dd>{{ camera.algorithm_fps if camera.algorithm_fps is not none else "Mavjud emas" }}</dd></div>
                 <div><dt>Kechikish</dt><dd data-camera-metric="latency">{% if camera.latency_ms is not none %}{{ camera.latency_ms|round(1) }} ms{% else %}Mavjud emas{% endif %}</dd></div>
-                <div><dt>Tushib qolgan kadrlar</dt><dd>{{ camera.dropped_frames if camera.dropped_frames is not none else "Mavjud emas" }}</dd></div>
                 <div><dt>Oxirgi kadr</dt><dd data-camera-metric="last-frame">{{ camera.last_frame if camera.last_frame is not none else "Mavjud emas" }}</dd></div>
             </dl>
 

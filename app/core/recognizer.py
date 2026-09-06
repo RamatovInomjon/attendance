@@ -81,8 +81,14 @@ class FaceRecognizer:
 
         outs = []
         for i in range(0, len(aligned), self.batch_size):
-            outs.append(self.session.run(
-                None, {self.input_name: aligned[i : i + self.batch_size]})[0])
+            chunk = aligned[i : i + self.batch_size]
+            n = len(chunk)
+            if self.fixed_batch and n < self.fixed_batch:
+                # The last chunk of a fixed-batch model is padded to the
+                # batch and trimmed after; a short chunk is a shape error.
+                pad = np.zeros((self.fixed_batch - n,) + chunk.shape[1:], chunk.dtype)
+                chunk = np.concatenate([chunk, pad], axis=0)
+            outs.append(self.session.run(None, {self.input_name: chunk})[0][:n])
         emb = np.concatenate(outs, axis=0).astype(np.float32)
 
         if normalize:

@@ -13,11 +13,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import threading
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core.security import COOKIE_NAME, read_session
 from app.services import auth as auth_svc
+from app.web.viewmodels import live_event
 
 from app.runtime import runtime
 
@@ -25,6 +27,68 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 FPS = 10
+
+# One JPEG per processed frame, however many viewers are watching. Each
+# connection used to call worker.render() for itself - a resize of a 4K frame
+# plus an encode, tens of milliseconds - so N open tabs cost N encodes of the
+# SAME frame, ten times a second. The cache is keyed on the identity of the
+# worker's latest FrameResult plus its capture time (a recycled id alone could
+# serve the previous image); `_render_busy` serialises the encode per camera
+# so two viewers arriving together do not both do the work either.
+_render_lock = threading.Lock()
+_render_cache: dict[int, tuple[tuple, bytes | None]] = {}
+_render_busy: dict[int, threading.Lock] = {}
+
+
+def shared_jpeg(worker) -> bytes | None:
+    """`worker.render()`, encoded at most once per frame across all viewers."""
+    latest = getattr(worker, "latest", None)
+    if latest is None:
+        return None
+    key = (id(latest), getattr(getattr(latest, "frame", None), "ts", None))
+    cid = worker.camera_id
+    with _render_lock:
+        hit = _render_cache.get(cid)
+        if hit is not None and hit[0] == key:
+            return hit[1]
+        busy = _render_busy.setdefault(cid, threading.Lock())
+    with busy:
+        with _render_lock:              # the viewer we waited on may have filled it
+            hit = _render_cache.get(cid)
+            if hit is not None and hit[0] == key:
+                return hit[1]
+        jpg = worker.render()
+        with _render_lock:
+            _render_cache[cid] = (key, jpg)
+    return jpg
+
+
+def frame_message(worker, camera_id: int) -> dict | None:
+    """One tick of the camera socket: what to send, or None for nothing.
+
+    A stale source - no frame for `stale_after_s` - used to be re-encoded and
+    re-sent at 10 fps, so a camera that had been down for hours still looked
+    live to anyone watching. It is now announced as stale WITHOUT a frame, and
+    the page paints "Oqim eskirgan" over the last image it drew. A camera that
+    has never delivered a frame at all says nothing while it connects: the
+    page's own "Kadr kutilmoqda" is the right state for that.
+    """
+    source = worker.source
+    if source.is_stale:
+        if getattr(worker, "latest", None) is None:
+            return None
+        return {"type": "frame", "stale": True, "camera_id": camera_id,
+                "fps": round(source.fps, 1)}
+    jpg = shared_jpeg(worker)
+    if not jpg:
+        return None
+    return {
+        "type": "frame",
+        "data": base64.b64encode(jpg).decode("ascii"),
+        "camera_id": camera_id,
+        "fps": round(source.fps, 1),
+        "stale": False,
+    }
 
 
 async def _pump(ws: WebSocket, camera_id: int):
@@ -34,15 +98,9 @@ async def _pump(ws: WebSocket, camera_id: int):
         return
     try:
         while True:
-            jpg = await asyncio.to_thread(worker.render)
-            if jpg:
-                await ws.send_json({
-                    "type": "frame",
-                    "data": base64.b64encode(jpg).decode("ascii"),
-                    "camera_id": camera_id,
-                    "fps": round(worker.source.fps, 1),
-                    "stale": worker.source.is_stale,
-                })
+            msg = await asyncio.to_thread(frame_message, worker, camera_id)
+            if msg:
+                await ws.send_json(msg)
             await asyncio.sleep(1 / FPS)
     except WebSocketDisconnect:
         pass
@@ -115,11 +173,15 @@ async def attendance_ws(ws: WebSocket):
     try:
         while True:
             for ev in runtime.events(12):
-                key = (ev["ts"], ev["name"], ev["camera"])
+                # The real timestamp and the person, not the "%H:%M:%S"
+                # display string: two recognitions of one name within the
+                # same second on one camera are two events, and the same
+                # event seen on the next poll is one.
+                key = (ev.get("sort_ts"), ev.get("employee_id"), ev.get("camera"))
                 if key in seen:
                     continue
                 seen.add(key)
-                await ws.send_json({"type": "event", **ev})
+                await ws.send_json({"type": "event", **live_event(ev)})
             if len(seen) > 400:
                 seen = set(list(seen)[-200:])
             await asyncio.sleep(2)

@@ -29,7 +29,10 @@ ADMIN, OPERATOR, VIEWER = _cookie("admin"), _cookie("operator"), _cookie("viewer
 # The surfaces an operator asked to be kept away from, by the path that serves
 # them rather than by the link that points at them.
 ADMIN_PATHS = ["/cameras", "/gallery/review", "/users", "/recognition",
-               "/recognition/logs", "/video/1", "/api/health"]
+               "/recognition/logs", "/video/1", "/api/health",
+               # Enrolment is the gallery by another door; the debug folder
+               # is the pipeline's own evidence.
+               "/employees/add", "/api/debug/captures"]
 
 
 # ---- the capability table ----------------------------------------------
@@ -192,3 +195,18 @@ def test_an_unknown_role_is_refused_rather_than_stored():
     auth_svc.create_user("role-typo", "password1", role="operator")
     with pytest.raises(auth_svc.AuthError):
         auth_svc.set_role("role-typo", "administrator")
+
+
+# ---- enrolment and the ops endpoints --------------------------------------
+
+def test_enrolment_and_the_ops_endpoints_refuse_everyone_but_an_admin():
+    """/employees/add and POST /api/employees/ create an identity the cameras
+    will trust from then on; /api/gallery/reload and /api/debug/captures act
+    on the pipeline. All of them answered any signed-in role."""
+    for headers in (OPERATOR, VIEWER):
+        assert client.post("/api/employees/", headers=headers).status_code == 403
+        assert client.post("/api/gallery/reload", headers=headers).status_code == 403
+        assert client.get("/api/debug/captures", headers=headers).status_code == 403
+    # An admin gets past the gate: the 400 is the handler objecting to an
+    # empty form, which is exactly the point.
+    assert client.post("/api/employees/", headers=ADMIN).status_code == 400

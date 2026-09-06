@@ -23,7 +23,7 @@ cannot correct on its own:
 import argparse
 import shutil
 import sys
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -146,8 +146,12 @@ def _backup() -> Path | None:
 
 def repair_attendance(apply: bool) -> int:
     from app.db.models import DailyAttendance, RecognitionEvent, UnknownSighting
+    from app.services.attendance import business_date
 
-    today = date.today()
+    # The BUSINESS date, not the calendar one: between midnight and 04:00 the
+    # current business day is yesterday's calendar date, and date.today()
+    # would flag every row of a shift still in progress as unfinished.
+    today = business_date(datetime.now(settings.tz))
     changes = 0
     with session_scope() as s:
         rows = s.execute(select(DailyAttendance)).scalars().all()

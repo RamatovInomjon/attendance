@@ -29,14 +29,24 @@ def main():
         log.info("flagged %d open interval(s) for %s", n, yesterday)
 
         cutoff = business_date(now - timedelta(days=settings.snapshot_retention_days))
+        # Labelled rows are kept whatever their age. A voided event is a
+        # confirmed false accept and a resolved sighting a confirmed visitor or
+        # miss - the ground truth app/services/corrections.py exists to
+        # produce, and the only real measurement the thresholds have.
         gone = s.execute(delete(RecognitionEvent).where(
-            RecognitionEvent.business_date < cutoff)).rowcount
+            RecognitionEvent.business_date < cutoff,
+            RecognitionEvent.voided_at.is_(None))).rowcount
         gone_u = s.execute(delete(UnknownSighting).where(
-            UnknownSighting.business_date < cutoff)).rowcount
+            UnknownSighting.business_date < cutoff,
+            UnknownSighting.resolved_kind.is_(None))).rowcount
         log.info("deleted %d event(s), %d unknown(s) older than %s", gone, gone_u, cutoff)
 
         keep = {r for (r,) in s.execute(
             select(RecognitionEvent.snapshot).where(RecognitionEvent.snapshot.isnot(None))) }
+        # A resolved sighting's face goes with its label.
+        keep |= {r for (r,) in s.execute(
+            select(UnknownSighting.snapshot).where(UnknownSighting.snapshot.isnot(None),
+                                                   UnknownSighting.resolved_kind.isnot(None)))}
 
     snap_dir = settings.media_dir / "snapshots"
     removed = freed = 0

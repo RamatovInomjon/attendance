@@ -324,7 +324,12 @@ def _employee_registration_page(
         action="add",
         cameras=cams,
         available_cameras=cams,
-        use_ip_camera=bool(cams),
+        # Always the browser's own camera. The IP-camera branch of the template
+        # opens /ws/camera/registration/, a name app/api/ws.py has never
+        # resolved (it knows ids, "primary", and camera names or roles), so on
+        # every deployment with cameras configured - i.e. every real one - the
+        # capture never produced a frame.
+        use_ip_camera=False,
         default_camera_url=cams[0]["url"] if cams else "",
         enrollment_error=enrollment_error,
         enrollment_rejections=enrollment_rejections,
@@ -576,7 +581,7 @@ async def employee_enroll(request: Request):
             "Tanib olish xizmatini qayta ishga tushiring."
         )
 
-    redirect_url = f"/employees/{result.employee_id}"
+    redirect_url = _p(f"/employees/{result.employee_id}")
     if _enrollment_wants_json(request):
         return JSONResponse(
             {
@@ -636,6 +641,8 @@ def employee_detail(request: Request, employee_id: int):
 
 # --------------------------------------------------------------- attendance --
 MAX_ATTENDANCE_RANGE_DAYS = 366
+# The HTML table stops at a calendar month; the CSV export keeps the year.
+MAX_ATTENDANCE_HTML_DAYS = 31
 
 
 def _parse_attendance_date(value: str | None, field: str) -> date | None:
@@ -707,6 +714,17 @@ def attendance_list(request: Request, target_date: str | None = None,
     selected_day, start, end, range_notice = _attendance_date_range(
         target_date, start_date, end_date,
     )
+    # The page materialises every row in the range - up to a year of them,
+    # thousands of rows nobody scrolls. The table shows the most recent
+    # month, says so, and points at the CSV export, which keeps the full
+    # range (it reads the ORIGINAL query string). A difference of 31 days is
+    # allowed so the page's own "Bir oy" shortcut never trips the note.
+    cap_notice = ""
+    if (end - start).days > MAX_ATTENDANCE_HTML_DAYS:
+        start = end - timedelta(days=MAX_ATTENDANCE_HTML_DAYS)
+        cap_notice = (f"Jadvalda ko'pi bilan {MAX_ATTENDANCE_HTML_DAYS} kun ko'rsatiladi: "
+                      f"{start.isoformat()} — {end.isoformat()}. To'liq oraliq uchun "
+                      f"CSV eksportdan foydalaning.")
     with session_scope() as s:
         records = [DailyVM.of(record, employee) for record, employee in s.execute(
             attendance_newest_first(attendance_records_query(
@@ -725,7 +743,7 @@ def attendance_list(request: Request, target_date: str | None = None,
         daily_records=records, page_obj=Page(records), is_paginated=False,
         selected_date=selected_day, start_date=start.isoformat(), end_date=end.isoformat(),
         query=query or "", employee=query or "", department=department or "", status=status or "",
-        departments=departments, range_notice=range_notice,
+        departments=departments, range_notice=range_notice, cap_notice=cap_notice,
     )
 
 
@@ -759,6 +777,7 @@ def attendance_unknown(request: Request, show: str = "open", msg: str = "",
             "last_seen": u.last_seen.astimezone(settings.tz),
             "best_score": u.best_score or 0.0,
             "resolved_kind": u.resolved_kind,
+            "resolved_employee_id": u.resolved_employee_id,
             "resolved_name": names.get(u.resolved_employee_id or -1, ""),
             "resolved_by": u.resolved_by or "",
             "has_vector": u.vector is not None,
@@ -768,6 +787,33 @@ def attendance_unknown(request: Request, show: str = "open", msg: str = "",
                   unknown_attempts=attempts, page_obj=Page(attempts), is_paginated=False,
                   employees=sorted(names.items(), key=lambda kv: kv[1]),
                   can_correct=bool(me), show=show, msg=msg, error=error)
+
+
+def _capture_index() -> dict[str, str]:
+    """Debug-capture stems on disk, keyed by everything but their sequence.
+
+    `corrections.capture_stem` finds one event's capture with a glob over
+    data/debug. Called per event, a day view is a directory walk per row, so
+    the day view lists the directory ONCE and looks its events up here. The
+    key is the stem minus its trailing `_NNN` sequence - exactly the prefix
+    `capture_stem` globs for - and the first hit in path order wins, as it
+    does there.
+    """
+    import glob
+    from pathlib import Path
+    index: dict[str, str] = {}
+    for hit in sorted(glob.glob(str(settings.debug_dir / "*" / "*.json"))):
+        stem = Path(hit).stem
+        index.setdefault(stem[:stem.rfind("_") + 1], stem)
+    return index
+
+
+def _capture_stem_from(index: dict[str, str], ts, score, camera: str) -> str:
+    """`corrections.capture_stem`, answered from a prebuilt index."""
+    if not ts:
+        return ""
+    local = ts.astimezone(settings.tz)
+    return index.get(f"{local:%Y%m%d_%H%M%S}_{float(score or 0):.3f}_{camera or ''}_", "")
 
 
 @router.get("/attendance/day/{employee_id}/{day}", response_class=HTMLResponse)
@@ -784,7 +830,6 @@ def attendance_day(request: Request, employee_id: int, day: str, msg: str = "",
     walked past; it does not show what was matched. A false accept is only
     visible when the face is on screen next to the name it was given.
     """
-    from app.services import corrections
     bdate = _parse_attendance_date(day, "day")
     if bdate is None:
         raise HTTPException(400, "bad date")
@@ -803,8 +848,9 @@ def attendance_day(request: Request, employee_id: int, day: str, msg: str = "",
                    RecognitionEvent.business_date == bdate)
             .order_by(RecognitionEvent.ts)).all()
         events = []
+        captures = _capture_index()
         for e, cam in rows:
-            stem = corrections.capture_stem(e.ts, e.score, cam or "")
+            stem = _capture_stem_from(captures, e.ts, e.score, cam or "")
             events.append({
                 "id": e.id, "time": e.ts.astimezone(settings.tz).strftime("%H:%M:%S"),
                 "camera": cam or "—", "role": e.role.value if hasattr(e.role, "value") else str(e.role),
@@ -886,8 +932,12 @@ async def event_void(request: Request, event_id: int):
     if not me:
         return JSONResponse({"detail": "Not permitted"}, status_code=403)
     form = await request.form()
-    out = corrections.void_event(event_id, by=str(me.get("u") or ""),
-                                 reason=str(form.get("reason") or ""))
+    # Rebuilds the day and may recalibrate the gallery: database and numpy
+    # work that must not run on the event loop, where it stalls every frame
+    # on its way to every viewer. Same treatment as the enrol handler.
+    out = await run_in_threadpool(
+        corrections.void_event, event_id, by=str(me.get("u") or ""),
+        reason=str(form.get("reason") or ""))
     if out.get("ok"):
         extra = (f" {out['gallery_rows_removed']} galereya kadri o'chirildi."
                  if out.get("gallery_rows_removed") else "")
@@ -906,7 +956,8 @@ async def event_unvoid(request: Request, event_id: int):
     if not me:
         return JSONResponse({"detail": "Not permitted"}, status_code=403)
     form = await request.form()
-    out = corrections.unvoid_event(event_id, by=str(me.get("u") or ""))
+    out = await run_in_threadpool(corrections.unvoid_event, event_id,
+                                  by=str(me.get("u") or ""))
     key = "msg" if out.get("ok") else "error"
     val = "Qaytarildi." if out.get("ok") else out.get("error", "")
     return RedirectResponse(f"{_back(request, form, '/')}?{key}={_quote(val)}",
@@ -921,7 +972,8 @@ async def unknown_resolve(request: Request, sighting_id: int):
         return JSONResponse({"detail": "Not permitted"}, status_code=403)
     form = await request.form()
     emp = str(form.get("employee_id") or "").strip()
-    out = corrections.resolve_sighting(
+    out = await run_in_threadpool(
+        corrections.resolve_sighting,
         sighting_id, kind=str(form.get("kind") or ""),
         employee_id=int(emp) if emp.isdigit() else None,
         by=str(me.get("u") or ""))
@@ -996,13 +1048,8 @@ def _camera_diagnostics_context(cameras: list[Camera]) -> list[dict]:
                 ),
             },
             "pipeline": {
-                "fps": pipeline.get("processed_fps"),
-                "latency_ms": (
-                    pipeline.get("latency_ms")
-                    if pipeline.get("latency_ms") is not None
-                    else (pipeline.get("timings") or {}).get("total")
-                ),
-                "dropped_frames": pipeline.get("dropped_frames"),
+                "fps": _algorithm_fps(observed_fps),
+                "latency_ms": _positive_number((pipeline.get("timings") or {}).get("total")),
                 "errors": pipeline.get("pipeline_errors"),
                 "last_error": pipeline.get("last_error"),
             },
@@ -1024,26 +1071,31 @@ def cameras(request: Request):
                   camera_diagnostics=diagnostics)
 
 
-@router.get("/cameras/rtsp", response_class=HTMLResponse)
-@router.get("/cameras/add", response_class=HTMLResponse)
-def cameras_add(request: Request):
-    with session_scope() as s:
-        cams = s.execute(select(Camera)).scalars().all()
-    return render("camera/rtsp_register.html", request=request, current_view="camera:rtsp_register", camera=None,
-                  cameras=[{"id": c.id, "name": c.name} for c in cams], action="add")
+# Cameras are configured with scripts/ (see docs/OPERATIONS.md). The page that
+# used to live at /cameras/rtsp posted to /api/cameras/add, which nothing has
+# ever served, so it was a form that could only fail.
 
 
 # -------------------------------------------------------------- recognition --
-def _available_value(*values):
-    """Return the first present runtime value while preserving legitimate zeroes."""
-    return next((value for value in values if value is not None), None)
-
-
 def _positive_number(value):
     """Return a positive numeric metric, excluding booleans and invalid values."""
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
         return None
     return float(value)
+
+
+def _algorithm_fps(stream_fps) -> float | None:
+    """What the pipeline actually processes, derived rather than read.
+
+    The worker runs every `process_every_nth` frame of the stream and keeps no
+    rate counter of its own. The keys these pages used to look for -
+    `processed_fps`, `algorithm_fps`, `pipeline_fps` - were never emitted by
+    CameraWorker.stats(), so the cell said "Mavjud emas" on a healthy camera.
+    """
+    fps = _positive_number(stream_fps)
+    if fps is None:
+        return None
+    return round(fps / max(1, int(settings.process_every_nth or 1)), 1)
 
 
 def _available_resolution(value) -> str | None:
@@ -1100,7 +1152,7 @@ def _live_camera_context(cameras: list[Camera]) -> list[dict]:
                 "state": "offline", "state_label": "Offline",
                 "state_detail": "Ishchi mavjud emas",
                 "resolution": None, "camera_fps": None, "algorithm_fps": None,
-                "latency_ms": None, "dropped_frames": None, "last_frame": None,
+                "latency_ms": None, "last_frame": None,
                 "pipeline_errors": None, "pipeline_status": "unavailable",
                 "pipeline_status_label": "Pipeline ma'lumoti mavjud emas",
                 "last_error": None,
@@ -1114,13 +1166,13 @@ def _live_camera_context(cameras: list[Camera]) -> list[dict]:
         state_label = "Onlayn" if connected else "Mavjud emas"
         state_detail = "Oqim faol" if connected else "Oqim ulanmagan yoki eskirgan"
 
-        algorithm_fps = _available_value(
-            stats.get("processed_fps"), stats.get("algorithm_fps"), stats.get("pipeline_fps"),
-        )
-        total_ms = _positive_number(timings.get("total"))
-        dropped_frames = _available_value(
-            stats.get("dropped_frames"), stream.get("dropped_frames"), stream.get("dropped"),
-        )
+        # Every figure here comes from what CameraWorker.stats() and the source
+        # really carry: stream fps, the last frame's pipeline timings, and the
+        # source's own last-frame clock. The keys this used to read
+        # (processed_fps, latency_ms, dropped_frames, last_frame_time) did not
+        # exist, so the live page showed "Mavjud emas" for all of them.
+        last_frame_ts = _positive_number(
+            getattr(getattr(worker, "source", None), "last_frame_ts", None))
 
         pipeline_errors = stats.get("pipeline_errors") if "pipeline_errors" in stats else None
         last_error = stats.get("last_error") or None
@@ -1137,15 +1189,9 @@ def _live_camera_context(cameras: list[Camera]) -> list[dict]:
             "state": state, "state_label": state_label, "state_detail": state_detail,
             "resolution": _available_resolution(stream.get("resolution")),
             "camera_fps": _positive_number(stream.get("fps")),
-            "algorithm_fps": algorithm_fps,
-            "latency_ms": _available_value(
-                stats.get("latency_ms"), stream.get("latency_ms"), total_ms,
-            ),
-            "dropped_frames": dropped_frames,
-            "last_frame": _last_frame_label(_available_value(
-                stream.get("last_frame_time"), stream.get("last_frame_ts"),
-                stream.get("last_frame"), stats.get("last_frame_time"),
-            )),
+            "algorithm_fps": _algorithm_fps(stream.get("fps")),
+            "latency_ms": _positive_number(timings.get("total")),
+            "last_frame": _last_frame_label(last_frame_ts),
             "pipeline_errors": pipeline_errors, "pipeline_status": pipeline_status,
             "pipeline_status_label": pipeline_status_label, "last_error": last_error,
         })
@@ -1301,10 +1347,10 @@ async def gallery_enrolment_remove(request: Request):
         return JSONResponse({"detail": "Admin only"}, status_code=403)
     form = await request.form()
     ids = [int(x) for x in form.getlist("id") if str(x).isdigit()]
-    out = augment.remove_enrolment(ids)
+    out = await run_in_threadpool(augment.remove_enrolment, ids)
     _AUGMENT_CACHE["candidates"] = None
     try:
-        runtime.reload_gallery()
+        await run_in_threadpool(runtime.reload_gallery)
     except Exception:
         log.exception("gallery reload after enrolment removal failed")
     parts = []
@@ -1327,13 +1373,14 @@ async def gallery_augment(request: Request):
         return JSONResponse({"detail": "Admin only"}, status_code=403)
     form = await request.form()
     keys = set(form.getlist("key"))
-    chosen = [c for c in _augment_candidates()
+    # A cold cache means augment.scan() embeds every capture - seconds.
+    chosen = [c for c in await run_in_threadpool(_augment_candidates)
               if c.key in keys and c.vec is not None and not c.rejected]
     if not chosen:
         return RedirectResponse(_p("/gallery/review?error=Nothing+selected"),
                                 status_code=303)
 
-    check = augment.check_impostors(chosen)
+    check = await run_in_threadpool(augment.check_impostors, chosen)
     if not check.safe:
         # Per crop, and it names what each one collides with. The old message
         # reported the gallery's worst pair - two enrolment photographs that no
@@ -1347,10 +1394,10 @@ async def gallery_augment(request: Request):
         return RedirectResponse(_p("/gallery/review?error=" + _quote(why)),
                                 status_code=303)
 
-    n = augment.add(chosen)
+    n = await run_in_threadpool(augment.add, chosen)
     _AUGMENT_CACHE["candidates"] = None          # they are in the gallery now
     try:
-        runtime.reload_gallery()
+        await run_in_threadpool(runtime.reload_gallery)
     except Exception:
         log.exception("gallery reload after augment failed")
     floor = max(check.threshold, settings.augment_live_floor)
@@ -1368,10 +1415,10 @@ async def gallery_augment_remove(request: Request):
         return JSONResponse({"detail": "Admin only"}, status_code=403)
     form = await request.form()
     ids = [int(x) for x in form.getlist("id") if str(x).isdigit()]
-    n = augment.remove(ids)
+    n = await run_in_threadpool(augment.remove, ids)
     _AUGMENT_CACHE["candidates"] = None
     try:
-        runtime.reload_gallery()
+        await run_in_threadpool(runtime.reload_gallery)
     except Exception:
         log.exception("gallery reload after removal failed")
     return RedirectResponse(_p("/gallery/review?msg=" + _quote(f"Removed {n}.")),

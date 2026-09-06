@@ -50,10 +50,12 @@
                 {% if current_user and current_user.r == 'admin' %}
                 <li class="nav-item"><a class="nav-link {% if current_view == 'recognition:live' %}active{% endif %}" href="{{ url('recognition:live') }}"><i class="bi bi-broadcast-pin" aria-hidden="true"></i><span>Jonli kuzatuv</span></a></li>
                 {% endif %}
+                {% if current_user and current_user.r == 'admin' %}
                 <li class="nav-item"><a class="nav-link {% if current_view == 'employees:register' %}active{% endif %}" href="{{ url('employees:register') }}"><i class="bi bi-person-plus" aria-hidden="true"></i><span>Ro'yxatdan o'tkazish</span></a></li>
+                {% endif %}
                 <li class="nav-item"><a class="nav-link {% if current_view == 'attendance:unknown' %}active{% endif %}" href="{{ url('attendance:unknown') }}"><i class="bi bi-person-x" aria-hidden="true"></i><span>Noma'lumlar</span></a></li>
                 {% if current_user and current_user.r == 'admin' %}
-                <li class="nav-item"><a class="nav-link {% if current_view == 'camera:settings' or current_view == 'camera:rtsp_register' %}active{% endif %}" href="{{ url('camera:settings') }}"><i class="bi bi-camera-video" aria-hidden="true"></i><span>Kameralar</span></a></li>
+                <li class="nav-item"><a class="nav-link {% if current_view == 'camera:settings' %}active{% endif %}" href="{{ url('camera:settings') }}"><i class="bi bi-camera-video" aria-hidden="true"></i><span>Kameralar</span></a></li>
                 <li class="nav-item"><a class="nav-link {% if current_view == 'gallery:review' %}active{% endif %}" href="{{ PREFIX }}/gallery/review"><i class="bi bi-images" aria-hidden="true"></i><span>Galereya</span></a></li>
                 <li class="nav-item"><a class="nav-link {% if current_view == 'auth:users' %}active{% endif %}" href="{{ PREFIX }}/users"><i class="bi bi-shield-lock" aria-hidden="true"></i><span>Foydalanuvchilar</span></a></li>
                 {% endif %}

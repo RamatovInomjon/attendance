@@ -33,7 +33,7 @@ never handle timezones.
 | `/employees`, `/employees/{id}`, `/employees/add` | `employees/*.html` | employee table |
 | `/attendance` | `attendance/list.html` | daily rows + 7-day chart |
 | `/attendance/unknown` | `attendance/unknown.html` | unknown sightings |
-| `/cameras`, `/cameras/rtsp` | `camera/*.html` | camera table + live stream stats |
+| `/cameras` | `camera/settings.html` | camera table + live stream stats |
 | `/login` | `auth/login.html` | renders; **auth is not implemented** |
 
 `/recognition/logs` returns JSON and is polled by the live page to refresh its

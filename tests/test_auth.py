@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -227,6 +228,7 @@ import pytest as _pytest
     ("/manim/",        "/faceid/"),   # same ORIGIN, different application
     ("/ppe/",          "/faceid/"),
     ("//evil.example", "/faceid/"),
+    ("/\\evil.example", "/faceid/"),   # browsers read "/\" as "//"
     ("https://evil.example", "/faceid/"),
     ("/faceidevil",    "/faceid/"),   # prefix must match a path SEGMENT
 ])
@@ -242,6 +244,7 @@ def test_next_is_confined_to_the_deployment_prefix(raw, expected, monkeypatch):
     ("/",             "/"),
     ("/users",        "/users"),
     ("//evil.example", "/"),
+    ("/\\evil.example", "/"),
 ])
 def test_next_still_works_without_a_prefix(raw, expected, monkeypatch):
     """Root deployments must keep behaving exactly as before."""
@@ -249,3 +252,129 @@ def test_next_still_works_without_a_prefix(raw, expected, monkeypatch):
     from app.api import auth as A
     monkeypatch.setattr(settings, "url_prefix", "", raising=False)
     assert A._safe_next(raw) == expected
+
+
+# ---- cross-site posts ----------------------------------------------------
+# SameSite=Lax already keeps the cookie off a form another site posts. This is
+# the second lock: a browser attaches the page's Origin (older ones its
+# Referer) to every POST, and one naming another host is refused outright.
+
+def test_a_post_from_another_origin_is_refused():
+    creds = {"username": "inomjon", "password": "123456"}
+    for headers in ({"Origin": "https://evil.example"},
+                    {"Referer": "https://evil.example/page"},
+                    {"Origin": "null"}):          # sandboxed frame / privacy redirect
+        r = client.post("/login", data=creds, headers=headers)
+        assert r.status_code == 403, headers
+        assert COOKIE_NAME not in r.cookies
+    # Signed in makes no difference: refused before the handler runs, and
+    # the write it asked for did not happen.
+    r = client.post("/users/password", data={"username": "inomjon", "password": "hijacked"},
+                    headers={**_admin_cookie(), "Origin": "https://evil.example"})
+    assert r.status_code == 403
+    assert auth_svc.authenticate("inomjon", "123456") is not None
+
+
+def test_same_site_and_proxied_posts_still_pass():
+    creds = {"username": "inomjon", "password": "123456"}
+    assert client.post("/login", data=creds, headers={"Origin": "http://testserver"}).status_code == 303
+    # Behind the edge proxy the Host header is whatever the proxy forwarded;
+    # X-Forwarded-Host names the public site the browser's Origin will carry.
+    r = client.post("/login", data=creds, headers={"Origin": "https://aiscan.airi.uz",
+                                                   "X-Forwarded-Host": "aiscan.airi.uz"})
+    assert r.status_code == 303
+    # Reads are not state changes and the check must leave them alone. (The
+    # jar is cleared first: signed in, /login is a redirect regardless.)
+    client.cookies.clear()
+    assert client.get("/login", headers={"Origin": "https://evil.example"}).status_code == 200
+
+
+def test_logout_accepts_get_and_post():
+    """The nav signs out with a form (POST); bookmarks and old links use GET."""
+    for r in (client.get("/logout"), client.post("/logout", headers=_admin_cookie())):
+        assert r.status_code == 303 and r.headers["location"].endswith("/login")
+        assert "Max-Age=0" in r.headers.get("set-cookie", "")
+
+
+# ---- the cookie itself ---------------------------------------------------
+
+def test_session_cookie_is_secure_only_behind_tls():
+    """The LAN deployment is plain http, where a Secure cookie is silently
+    never sent back and every login looks like it did not stick."""
+    r = client.post("/login", data={"username": "inomjon", "password": "123456"})
+    assert "secure" not in r.headers.get("set-cookie", "").lower()
+    r = client.post("/login", data={"username": "inomjon", "password": "123456"},
+                    headers={"X-Forwarded-Proto": "https"})
+    assert "secure" in r.headers.get("set-cookie", "").lower()
+
+
+def test_session_cookie_is_scoped_to_the_deployment_prefix(monkeypatch):
+    """On the shared host the other projects under the same origin must never
+    receive it, and a sign-out must also clear a cookie issued at "/" before
+    the change - a browser keys cookies on path."""
+    from fastapi.responses import Response
+    from app.config import settings
+    from app.api import auth as A
+    monkeypatch.setattr(settings, "url_prefix", "/faceid", raising=False)
+    resp = Response()
+    A._set_session_cookie(resp, {"uid": 1, "username": "inomjon", "is_admin": True})
+    assert "Path=/faceid;" in resp.headers["set-cookie"]
+    cleared = A.logout().headers.getlist("set-cookie")
+    assert any("Path=/faceid;" in h for h in cleared)
+    assert any("Path=/;" in h for h in cleared)
+
+
+# ---- login rate limiting -------------------------------------------------
+
+def test_five_failures_lock_the_address_out_for_a_minute(monkeypatch):
+    from app.api import auth as A
+    monkeypatch.setattr(A, "_LOGIN_FAILURES", {})
+    for _ in range(A.LOGIN_MAX_FAILURES):
+        assert client.post("/login", data={"username": "inomjon",
+                                           "password": "wrong"}).status_code == 401
+    # Even the right password: it is the ADDRESS that is locked.
+    r = client.post("/login", data={"username": "inomjon", "password": "123456"})
+    assert r.status_code == 429
+    assert "Retry-After" in r.headers
+    assert COOKIE_NAME not in r.cookies
+    # ...and only for a minute.
+    assert 0 < A._login_locked_for("testclient") <= A.LOGIN_LOCKOUT_S
+    assert A._login_locked_for("testclient", now=time.time() + A.LOGIN_LOCKOUT_S + 1) == 0
+
+
+def test_failures_outside_the_window_do_not_add_up(monkeypatch):
+    from app.api import auth as A
+    monkeypatch.setattr(A, "_LOGIN_FAILURES", {})
+    t = 1_000_000.0
+    for i in range(A.LOGIN_MAX_FAILURES - 1):
+        A._note_login_failure("10.0.0.9", now=t + i)
+    A._note_login_failure("10.0.0.9", now=t + 2 * A.LOGIN_WINDOW_S)   # a fresh window
+    assert A._login_locked_for("10.0.0.9", now=t + 2 * A.LOGIN_WINDOW_S) == 0
+
+
+def test_a_successful_login_clears_the_count(monkeypatch):
+    from app.api import auth as A
+    monkeypatch.setattr(A, "_LOGIN_FAILURES", {})
+    for _ in range(2):
+        client.post("/login", data={"username": "inomjon", "password": "wrong"})
+    assert "testclient" in A._LOGIN_FAILURES
+    assert client.post("/login", data={"username": "inomjon",
+                                       "password": "123456"}).status_code == 303
+    assert "testclient" not in A._LOGIN_FAILURES
+
+
+def test_the_client_address_is_the_proxys_last_forwarded_hop():
+    """Behind the proxy every request comes from the proxy's address; keying
+    on that would lock the whole site after five failures by anyone."""
+    from fastapi import Request
+    from app.api import auth as A
+
+    def req(headers):
+        return Request({"type": "http", "method": "POST", "path": "/login",
+                        "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+                        "query_string": b"", "server": ("testserver", 80),
+                        "client": ("10.0.0.1", 1234), "scheme": "http"})
+    assert A._client_ip(req({})) == "10.0.0.1"
+    # The proxy appends the real client LAST; anything before it was written
+    # by the client and can say whatever it likes.
+    assert A._client_ip(req({"X-Forwarded-For": "1.2.3.4, 203.0.113.7"})) == "203.0.113.7"

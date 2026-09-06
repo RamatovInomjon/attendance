@@ -81,8 +81,11 @@ class Gallery:
                     f"embeddings - they are positional and must line up")
             if np.any(f > 0):
                 self._floor = f
-        self._pen: np.ndarray | None = None
-        self._pen_for: float | None = None
+        # (threshold, penalty) as ONE tuple, swapped atomically. Two worker
+        # threads matching at different thresholds could otherwise interleave
+        # the two assignments and leave one threshold's penalty cached under
+        # the other's key.
+        self._pen_cache: tuple[float, np.ndarray] | None = None
 
     def __len__(self):
         return len(self.M)
@@ -122,10 +125,11 @@ class Gallery:
         would otherwise become a private back door into the gallery, which is
         the exact failure this machinery exists to prevent.
         """
-        if self._pen_for != threshold:
-            self._pen = np.maximum(self._floor - threshold, 0.0).astype(np.float32)
-            self._pen_for = threshold
-        return self._pen
+        cached = self._pen_cache
+        if cached is None or cached[0] != threshold:
+            cached = (threshold, np.maximum(self._floor - threshold, 0.0).astype(np.float32))
+            self._pen_cache = cached
+        return cached[1]
 
     def _per_person(self, sims: np.ndarray, threshold: float) -> np.ndarray:
         """(..., N images) similarities -> (..., P people) best-image-per-person.

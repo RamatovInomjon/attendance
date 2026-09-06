@@ -90,19 +90,30 @@ So direction is measured from the trajectory, using two independent signals:
 | **tripwire crossing** | the head centre crosses a configured line; the sign of the cross product says which way | a geometric fact |
 | **depth trend** | the head box grows as somebody approaches, shrinks as they leave | an inference |
 
-The verdict:
+The verdict is taken over the **whole track**, first frame to last, when the
+track ends — *where did this person end up, relative to where they started?*
 
-- **both signals agree** → confident. This is the normal case.
-- **crossing only** → trusted; a crossing is a fact.
-- **depth only** → accepted, but requires more travel (0.15 vs the usual 0.06).
-  Justified by observation: on every track where both signals fired they
-  agreed, while 7 of 18 tracks crossed no line at all because people walk past
-  the camera rather than through the middle of frame.
-- **neither, or too few points** → `UNKNOWN`.
+- **started on one side, ended on the other** → a crossing: ENTER or EXIT.
+  Depth is reported alongside; when it disagrees the line wins, because a
+  crossing is a fact and depth an inference.
+- **both sides visited, ended where it began** → the side it ended on, with
+  the reason `crossed and returned`. Somebody who walks to the door area and
+  comes back is inside, and saying so is what lets this whole view of the
+  walk outrank the other camera's half of it.
+- **never crossed, moved far along the corridor and grew or shrank** → the
+  depth verdict, provided the head also moved down the frame while growing
+  (or up while shrinking). Sideways travel along the far end changes a head's
+  size through perspective alone and is refused.
+- **stationary, or too few points, or no usable signal** → `UNKNOWN`.
 
 `UNKNOWN` is a deliberate refusal to guess, not a failure. A wrong direction
 writes a wrong attendance row that nothing in the data reveals; a refusal costs
 nothing, because the person is seen again on their next pass.
+
+This replaced a rolling window of the last 90 points (4.5 s) with a 5 s latch,
+under which a person who crossed and then paused lost their verdict as
+"stale" — 27 of the 41 recognised passes that produced no attendance on
+2026-09-02..04 — and a U-turn read as a crossing. See docs/DIRECTION.md.
 
 Direction needs `min_points=5` and real travel, which is why the pipeline
 processes every frame rather than every second frame — at 10 fps a brisk walker
@@ -222,11 +233,12 @@ overturn, and must never be persisted.
 
 - **Direction wins over camera role.** The role only says where the camera
   points; the trajectory says what the person did.
-- **A stale direction is no direction.** The verdict is timestamped when the
-  trajectory supports it and discarded once older than `direction_max_age_s`
-  (5 s) at the track's last sighting. Without this a person standing still kept
-  a verdict up to ten minutes old, which booked check-outs on the entrance
-  camera for people who had not moved.
+- **One walk, one decision, across both cameras.** A completed pass is held
+  by the arbiter for `cross_camera_window_s`, and while the same person is
+  still live on either camera, so both views of a walk are decided together.
+  Identity comes from the view with the most agreeing frames; direction from
+  the best direction evidence, and among equal evidence from the view that
+  ended last — the return leg of a U-turn, not the outbound half.
 - **Business day starts at 04:00** (Asia/Tashkent), so a late shift ending at
   01:00 files against the day it started.
 - **First check-in of the day is kept**, not overwritten by later entries.
@@ -247,7 +259,7 @@ overturn, and must never be persisted.
 | aligner | DFA-mobilenet, 160 px window, margin 1.30, sharp warp |
 | recognizer | AdaFace IR-101 fine-tune, threshold 0.18, margin 0.045 |
 | vote | consensus: >=65% of identified frames, >=5 agreeing |
-| direction latch | expires after 5 s without support |
+| direction | whole-track net crossing; depth from detected heads only |
 | per-frame cost | ~10 ms median, ~18 ms p90 (20% of the 50 ms budget) |
 | gallery | 268 vectors / 55 people, d′ 10.03, rank-1 100% |
 
@@ -277,6 +289,10 @@ Honest list, in rough order of how often it bites:
 5. **Direction near the frame edge.** Someone who enters and leaves on the same
    side never crosses the tripwire and may not travel far enough for a
    depth-only verdict.
+6. **A U-turn seen by neither camera whole.** If the return leg is never
+   recognised — face turned away, or the second track never named — the
+   outbound EXIT stands and the person is checked out while inside. The
+   arbiter's hold on a live track catches the common case, not this one.
 
 ---
 
@@ -330,8 +346,8 @@ From 107 live passes (2026-08-27) and replayed recordings, which agree:
 Half of all passes are 5-10 s — a normal walk through the corridor. The
 distribution is strongly right-skewed, so the mean (33 s) is misleading. The
 13% running over 60 s are not slow walkers but **people standing still in
-view**, and they are the ones that expose direction bugs: every stale-latch
-instance came from a track of 76 s or longer.
+view**, and they are the ones that exposed the rolling-window direction rule:
+every "stale" verdict came from a track of 76 s or longer.
 
 Unrecognised tracks last *longer* than recognised ones (median 18.3 s vs 6.6 s).
 Someone who walks briskly through presents a clean frontal face and is

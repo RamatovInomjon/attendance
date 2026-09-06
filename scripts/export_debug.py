@@ -84,6 +84,9 @@ def main():
             f'<span class="n">{len(imgs)} images</span></h2>'
             f'<div class="grid">{"".join(tiles)}</div></section>')
 
+    # The threshold in force is the calibrated one for this recognizer (or the
+    # override), not the generic default.
+    threshold = settings.threshold_for(settings.recognizer_model)
     page = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Recognition debug</title><style>
@@ -109,7 +112,7 @@ figcaption span{{opacity:.65}}
 </style></head><body><div class="w">
 <h1>Recognition debug</h1>
 <p class="sub">{len(events)} events on record &middot; {sum(len(v) for v in by_person.values())} images &middot;
-threshold {settings.recognition_threshold} &middot; align margin {settings.align_margin} ({settings.align_mode})<br>
+threshold {threshold} &middot; align margin {settings.align_margin} ({settings.align_mode})<br>
 teal border = the aligned 112&times;112 the recognizer actually saw</p>
 {"".join(cards) or '<section><h2>Nothing captured yet</h2></section>'}
 </div></body></html>"""

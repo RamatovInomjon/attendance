@@ -64,7 +64,7 @@
                         {% if can_correct %}
                         <form method="post" class="d-inline"
                               action="{{ PREFIX }}/attendance/event/{{ event.id }}/{{ 'unvoid' if event.voided else 'void' }}"
-                              {% if not event.voided %}onsubmit="return confirm('{{ event.employee_name }} emasmi? Shu kun qaytadan hisoblanadi.')"{% endif %}>
+                              {% if not event.voided %}onsubmit="return confirm('{{ event.employee_name|escapejs }} emasmi? Shu kun qaytadan hisoblanadi.')"{% endif %}>
                             <input type="hidden" name="next" value="{{ PREFIX }}/">
                             {% if not event.voided %}<input type="hidden" name="reason" value="bu u emas">{% endif %}
                             <button class="btn btn-link btn-sm p-0 text-decoration-none {{ 'text-secondary' if event.voided else 'text-danger' }}" type="submit">

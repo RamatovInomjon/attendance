@@ -119,7 +119,10 @@ def main() -> int:
     if ok != "ok":
         raise SystemExit("  backup failed its integrity check - refusing to delete")
 
-    con = sqlite3.connect(str(db))
+    # 30 s, matching the service's busy_timeout: the default 5 s is shorter
+    # than one busy capture thread's hold on the write lock, and the reset
+    # would fail with "database is locked" after taking its backup.
+    con = sqlite3.connect(str(db), timeout=30)
     with con:                       # one transaction: all the deletes, or none
         for t, _ in CLEAR:
             if t in have:
