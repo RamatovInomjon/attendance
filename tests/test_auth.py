@@ -289,6 +289,62 @@ def test_same_site_and_proxied_posts_still_pass():
     assert client.get("/login", headers={"Origin": "https://evil.example"}).status_code == 200
 
 
+def test_a_browser_behind_the_proxy_is_not_refused_its_own_form():
+    """The bug this rule caused, before it read Sec-Fetch-Site.
+
+    Adding a viewer account through the public URL returned "Cross-site
+    request refused". The browser posts to aiscan.airi.uz with that Origin;
+    the proxy forwards it upstream with its own Host and no X-Forwarded-Host,
+    so comparing the two called the operator's own form a stranger. The
+    browser's own Sec-Fetch-Site says what really happened, and nothing
+    between the two can rewrite it.
+    """
+    r = client.post("/users/add",
+                    data={"username": "kuzatuvchi", "password": "viewer-pw-123",
+                          "full_name": "Kuzatuvchi", "role": "viewer"},
+                    headers={**_admin_cookie(),
+                             "Origin": "https://aiscan.airi.uz",
+                             "Sec-Fetch-Site": "same-origin"})
+    assert r.status_code == 303, r.text
+    assert auth_svc.authenticate("kuzatuvchi", "viewer-pw-123") is not None
+
+
+def test_sec_fetch_site_decides_whenever_the_browser_sends_it():
+    creds = {"username": "inomjon", "password": "123456"}
+    # Refused on the browser's word, whatever the Origin claims...
+    r = client.post("/login", data=creds, headers={"Origin": "http://testserver",
+                                                   "Sec-Fetch-Site": "cross-site"})
+    assert r.status_code == 403
+    # ...and allowed on it, whatever the Host comparison would have said. A
+    # same-SITE post is allowed deliberately: the sibling apps on this host
+    # share the origin outright, so no header can tell their pages from ours.
+    for site in ("same-origin", "same-site", "none"):
+        client.cookies.clear()
+        r = client.post("/login", data=creds, headers={"Origin": "https://elsewhere.example",
+                                                       "Sec-Fetch-Site": site})
+        assert r.status_code == 303, site
+
+
+def test_an_operator_can_declare_the_public_host_for_older_browsers():
+    """No Sec-Fetch-Site (Safari before 16.4) and a proxy that rewrites Host:
+    `trusted_hosts` is the escape hatch, and it is the only one - an unlisted
+    stranger is still refused."""
+    from app.config import settings
+    creds = {"username": "inomjon", "password": "123456"}
+    before = settings.trusted_hosts
+    settings.trusted_hosts = "aiscan.airi.uz, other.example"
+    try:
+        for host in ("https://aiscan.airi.uz", "https://other.example"):
+            client.cookies.clear()
+            assert client.post("/login", data=creds,
+                               headers={"Origin": host}).status_code == 303, host
+        client.cookies.clear()
+        assert client.post("/login", data=creds,
+                           headers={"Origin": "https://evil.example"}).status_code == 403
+    finally:
+        settings.trusted_hosts = before
+
+
 def test_logout_accepts_get_and_post():
     """The nav signs out with a form (POST); bookmarks and old links use GET."""
     for r in (client.get("/logout"), client.post("/logout", headers=_admin_cookie())):

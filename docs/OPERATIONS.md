@@ -227,10 +227,17 @@ project directory.
 - **SQLite.** Fine for two cameras. Move to PostgreSQL before adding a third or
   serving reports to many users; `UtcDateTime` already behaves correctly there.
 - **Authentication is a session cookie** (`app/api/auth.py`): admin, operator
-  and viewer roles, same-origin checks on state-changing requests, a lockout
-  after repeated failed logins. Still serve it behind TLS (the cookie is only
-  marked `Secure` when the request arrived over https) and keep the port off
-  the public internet.
+  and viewer roles, a lockout after repeated failed logins, and a cross-site
+  check on every state-changing request. That check reads the browser's own
+  `Sec-Fetch-Site` header, because comparing the request's `Origin` against
+  its `Host` is wrong behind a proxy - the proxy rewrites `Host`, and the
+  operator's own form then looks like a stranger. A browser older than
+  Chrome 76 / Firefox 90 / Safari 16.4 sends no such header and falls back to
+  that comparison; set `trusted_hosts=aiscan.airi.uz` in `.env` if one has to
+  be supported. It is defence in depth behind the `SameSite=Lax` cookie, not
+  a CSRF token: a page on the same origin - the sibling apps on this host -
+  is indistinguishable from ours by any header. Serve it behind TLS (the
+  cookie is only marked `Secure` when the request arrived over https).
 - **No liveness detection.** Deliberate — these cameras are 3 m up behind a wide
   lens, where holding a photo to the lens is not practical. Revisit if a
   door-level camera is added.

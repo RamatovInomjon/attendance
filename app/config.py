@@ -544,6 +544,14 @@ class Settings(BaseSettings):
     # receives /faceid/... verbatim - so FastAPI's root_path is not enough and
     # every route, static mount, link and WebSocket URL must carry it.
     # Empty means served at the root, which is how it runs locally.
+    # Extra hostnames this deployment answers to, comma-separated. Only read
+    # when a request carries no Sec-Fetch-Site header (a browser older than
+    # Chrome 76 / Firefox 90 / Safari 16.4), where the cross-site check falls
+    # back to comparing the Origin against the Host - which a proxy rewrites.
+    # Set it to the public name if such a browser has to be supported:
+    #     trusted_hosts=aiscan.airi.uz
+    trusted_hosts: str = ""
+
     url_prefix: str = ""
     host: str = "0.0.0.0"
     port: int = 8000

@@ -97,12 +97,18 @@ def current_user(request: Request) -> dict | None:
 def _request_hosts(request: Request) -> set[str]:
     """Hostnames this request may legitimately have been addressed to.
 
-    `request.url.hostname` is the Host header. Behind the edge proxy that is
-    whatever the proxy chose to forward - often the upstream's own address -
-    so X-Forwarded-Host, when present, is accepted as well.
+    `request.url.hostname` is the Host header, X-Forwarded-Host is what a
+    proxy says the browser asked for, and `trusted_hosts` is what the operator
+    declares when neither is the public name. All three are needed because
+    none of them is reliably present: see `_cross_site`.
     """
+    from app.config import settings
     hosts = {(request.url.hostname or "").lower()}
     for h in request.headers.get("x-forwarded-host", "").split(","):
+        h = h.strip().lower()
+        if h:
+            hosts.add(urlsplit(f"//{h}").hostname or h)
+    for h in str(settings.trusted_hosts).split(","):
         h = h.strip().lower()
         if h:
             hosts.add(urlsplit(f"//{h}").hostname or h)
@@ -114,14 +120,35 @@ def _cross_site(request: Request) -> bool:
     """True for a state-changing request that another site sent.
 
     The session cookie is SameSite=Lax, which already keeps it off cross-site
-    form posts in current browsers. This is the second lock: browsers attach
-    the page's Origin (older ones its Referer) to every POST, and a value that
-    names another host is refused whatever the cookie policy did. A request
-    with neither header - curl, a script - is let through: an absent header
-    is not evidence of anything, and the cookie check still applies.
+    form posts in current browsers. This is the second lock, and it reads
+    **Sec-Fetch-Site** first: the browser computes that itself, from the page
+    that made the request, and sends it on every fetch. Nothing between the
+    browser and this process can change it.
+
+    That matters because the obvious test - does the Origin's host match the
+    host we were addressed as - is wrong behind a proxy, and this deployment
+    has one. The browser posts to `https://aiscan.airi.uz/faceid/users/add`
+    with `Origin: https://aiscan.airi.uz`, the proxy forwards it upstream with
+    `Host: 127.0.0.1:8081`, and comparing the two refuses the operator's own
+    form. Adding a viewer account failed exactly this way.
+
+    So Sec-Fetch-Site decides whenever it is present, which is every browser
+    since Chrome 76, Firefox 90 and Safari 16.4. `cross-site` is refused;
+    `same-origin`, `same-site` and `none` (typed into the address bar, or a
+    bookmark) are allowed. A same-SITE post is allowed deliberately: the
+    sibling apps on this host share the origin outright, so no header can tell
+    their pages from ours, and pretending otherwise buys nothing.
+
+    Without that header the old host comparison still runs, now including any
+    `trusted_hosts` the operator has declared. A request with no Origin and no
+    Referer either - curl, a script - is let through: an absent header is not
+    evidence of anything, and the cookie check still applies.
     """
     if request.method in ("GET", "HEAD", "OPTIONS"):
         return False
+    fetch_site = request.headers.get("sec-fetch-site", "").strip().lower()
+    if fetch_site:
+        return fetch_site == "cross-site"
     origin = request.headers.get("origin") or request.headers.get("referer")
     if not origin:
         return False
@@ -141,9 +168,15 @@ async def auth_middleware(request: Request, call_next):
     """
     path = request.url.path
     if _cross_site(request):
-        log.warning("refused cross-site %s %s (origin %r, host %r)", request.method,
-                    path, request.headers.get("origin") or request.headers.get("referer"),
-                    request.url.hostname)
+        # Every input to the decision, in one line: a refusal that turns out
+        # to be wrong is a locked-out operator, and the whole point of this
+        # log is that the next one can be diagnosed without a reproduction.
+        log.warning("refused cross-site %s %s (sec-fetch-site %r, origin %r, "
+                    "host %r, x-forwarded-host %r, trusted %s)",
+                    request.method, path, request.headers.get("sec-fetch-site"),
+                    request.headers.get("origin") or request.headers.get("referer"),
+                    request.url.hostname, request.headers.get("x-forwarded-host"),
+                    sorted(_request_hosts(request)))
         return JSONResponse({"detail": "Cross-site request refused"}, status_code=403)
     session = read_session(request.cookies.get(COOKIE_NAME))
     request.state.user = session
