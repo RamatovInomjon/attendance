@@ -36,18 +36,26 @@
     <article class="border rounded p-3 {% if e.voided %}opacity-50{% endif %}">
       <div class="d-flex flex-wrap gap-3 align-items-start">
         {% if e.stem %}
-        <button class="border-0 bg-transparent p-0" type="button" data-airi-evidence
-                data-evidence-src="{{ PREFIX }}/attendance/event/{{ e.id }}/evidence/frame"
-                data-evidence-title="{{ employee.name }} · {{ e.time }}"
-                data-evidence-subtitle="{{ e.camera }} · ball {{ '%.3f'|format(e.score) }}">
-          <img src="{{ PREFIX }}/attendance/event/{{ e.id }}/evidence/face"
-               alt="Tanilgan yuz" loading="lazy"
-               style="width:96px;height:96px;object-fit:cover;border-radius:8px">
-        </button>
+        {# Not a link any more. This used to open the full frame, which lives in
+           data/debug - only written when debug capture is on, and swept by
+           retention - so on a deployed system the modal opened onto nothing
+           long before the row itself aged out. The body crop below is served
+           from media/, which is part of the record, so it is there whenever the
+           event is. #}
+        <img src="{{ PREFIX }}/attendance/event/{{ e.id }}/evidence/face"
+             alt="Tanilgan yuz" loading="lazy"
+             style="width:96px;height:96px;object-fit:cover;border-radius:8px">
         {% endif %}
         {% if e.snapshot %}
-        <img src="{{ e.snapshot }}" alt="Gavda" loading="lazy"
-             style="width:72px;height:96px;object-fit:cover;border-radius:8px">
+        <button class="border-0 bg-transparent p-0" type="button" data-airi-evidence
+                title="Kattalashtirish uchun bosing"
+                data-evidence-src="{{ e.snapshot }}"
+                data-evidence-title="{{ employee.name }} · {{ e.time }}"
+                data-evidence-subtitle="{{ e.camera }} · ball {{ '%.3f'|format(e.score) }}"
+                aria-label="{{ e.time }} gavda kadrini kattalashtirish">
+          <img src="{{ e.snapshot }}" alt="Gavda" loading="lazy"
+               style="width:72px;height:96px;object-fit:cover;border-radius:8px">
+        </button>
         {% endif %}
         <div class="flex-grow-1 min-w-0">
           <div class="d-flex flex-wrap gap-2 align-items-center">

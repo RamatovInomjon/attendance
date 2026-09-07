@@ -300,3 +300,39 @@ def test_an_operator_may_still_label_an_unknown_without_a_direction():
     r = client.post("/attendance/unknown/999999/resolve", headers=OPERATOR,
                     data={"kind": "visitor"})
     assert r.status_code != 403
+
+
+def test_the_day_page_enlarges_the_body_crop_and_not_the_debug_frame():
+    """The full-frame link opened `data/debug`, which is written only when
+    debug capture is on and is swept by retention - so on a deployed system it
+    opened onto nothing while the event itself was still listed. The body crop
+    is served from media/, which is part of the record, so it survives as long
+    as the row does."""
+    from datetime import datetime, timezone
+    from sqlalchemy import delete
+    from app.db.models import (
+        CameraRole, DailyAttendance, Employee, RecognitionEvent)
+    from app.db.session import session_scope
+
+    ts = datetime(2026, 8, 26, 9, 0, tzinfo=timezone.utc)
+    with session_scope() as s:
+        emp = Employee(full_name="Crop Only", is_active=True)
+        s.add(emp); s.flush()
+        s.add(RecognitionEvent(
+            employee_id=emp.id, camera_id=None, role=CameraRole.IN, ts=ts,
+            business_date=ts.date(), score=0.5,
+            snapshot="snapshots/body_test.jpg"))
+        emp_id = emp.id
+    try:
+        html = client.get(f"/attendance/day/{emp_id}/2026-08-26",
+                          headers=ADMIN).text
+        assert "evidence/frame" not in html
+        at = html.index("data-evidence-src")
+        assert "body_test.jpg" in html[at:at + 160]
+    finally:
+        with session_scope() as s:
+            s.execute(delete(RecognitionEvent).where(
+                RecognitionEvent.employee_id == emp_id))
+            s.execute(delete(DailyAttendance).where(
+                DailyAttendance.employee_id == emp_id))
+            s.execute(delete(Employee).where(Employee.id == emp_id))
