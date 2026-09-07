@@ -159,6 +159,41 @@ def test_an_operator_may_look_at_the_evidence_they_are_judging():
                       headers=VIEWER).status_code == 403
 
 
+def test_a_viewer_is_not_shown_who_voided_an_event_or_why():
+    """The void note names an operator and quotes their reason - "bu u emas".
+    That is the correction trail, addressed to the people who can act on it;
+    a viewer sees the event struck through and nothing about who struck it."""
+    from datetime import datetime, timezone
+    from sqlalchemy import delete
+    from app.db.models import CameraRole, Employee, RecognitionEvent
+    from app.db.session import session_scope
+
+    ts = datetime(2026, 8, 26, 9, 0, tzinfo=timezone.utc)
+    with session_scope() as s:
+        emp = Employee(full_name="Void Trail", is_active=True)
+        s.add(emp); s.flush()
+        ev = RecognitionEvent(employee_id=emp.id, camera_id=None, ts=ts,
+                              business_date=ts.date(), role=CameraRole.IN,
+                              score=0.5, voided_at=ts, voided_by="operator",
+                              void_reason="bu u emas")
+        s.add(ev); s.flush()
+        emp_id, ev_id = emp.id, ev.id
+    try:
+        path = f"/attendance/day/{emp_id}/2026-08-26"
+        seen = client.get(path, headers=OPERATOR)
+        assert seen.status_code == 200
+        assert "Bekor qilingan" in seen.text and "bu u emas" in seen.text
+
+        hidden = client.get(path, headers=VIEWER)
+        assert hidden.status_code == 200
+        assert "Bekor qilingan" not in hidden.text
+        assert "bu u emas" not in hidden.text and "operator" not in hidden.text
+    finally:
+        with session_scope() as s:
+            s.execute(delete(RecognitionEvent).where(RecognitionEvent.id == ev_id))
+            s.execute(delete(Employee).where(Employee.id == emp_id))
+
+
 # ---- the account itself -------------------------------------------------
 
 def test_role_and_is_admin_can_never_disagree():
@@ -210,3 +245,4 @@ def test_enrolment_and_the_ops_endpoints_refuse_everyone_but_an_admin():
     # An admin gets past the gate: the 400 is the handler objecting to an
     # empty form, which is exactly the point.
     assert client.post("/api/employees/", headers=ADMIN).status_code == 400
+

@@ -60,7 +60,7 @@
                     <div class="flex-grow-1 min-w-0">
                         <strong class="d-block text-truncate {% if event.voided %}text-decoration-line-through text-muted{% endif %}">{{ event.employee_name }}</strong>
                         <span class="text-muted small">{{ event.camera|default("Kamera noma'lum") }}</span>
-                        {% if event.voided %}<span class="d-block text-danger small">Bekor qilingan{% if event.void_reason %} · {{ event.void_reason }}{% endif %}</span>{% endif %}
+                        {% if event.voided and can_correct %}<span class="d-block text-danger small">Bekor qilingan{% if event.void_reason %} · {{ event.void_reason }}{% endif %}</span>{% endif %}
                         {% if can_correct %}
                         <form method="post" class="d-inline"
                               action="{{ PREFIX }}/attendance/event/{{ event.id }}/{{ 'unvoid' if event.voided else 'void' }}"

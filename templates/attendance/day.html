@@ -61,7 +61,7 @@
             {% if e.votes %} · {{ e.votes }}{% endif %}
             {% if not e.stem %} · <span class="fst-italic">yuz kadri saqlanmagan</span>{% endif %}
           </div>
-          {% if e.voided %}
+          {% if e.voided and can_correct %}
           <div class="text-danger small mt-1">
             Bekor qilingan{% if e.voided_by %} · {{ e.voided_by }}{% endif %}{% if e.void_reason %} · {{ e.void_reason }}{% endif %}
           </div>
