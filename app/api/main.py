@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 
@@ -164,6 +164,22 @@ app.mount(f"{PREFIX}/media", StaticFiles(directory=str(settings.media_dir)), nam
 _static = settings.root / "static"
 if _static.is_dir():
     app.mount(f"{PREFIX}/static", StaticFiles(directory=str(_static)), name="static")
+
+
+
+@app.get(f"{PREFIX}/favicon.ico", include_in_schema=False)
+def favicon():
+    """The AIRI mark, served where a browser looks for it by itself.
+
+    Both page templates declare it explicitly, which is what makes it work
+    under a URL prefix - a bare /favicon.ico at the domain root belongs to
+    the proxy, not to this app. This route answers the request a browser
+    makes anyway when it has not parsed a page yet, and it is why
+    `/favicon.ico` is in the public list in app/api/auth.py.
+    """
+    return FileResponse(_static / "favicon.ico", media_type="image/x-icon",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
 
 # HTML pages (original Bootstrap templates) and the live-view WebSocket.
 # Deny by default. This must be added BEFORE the routers so that every route,
