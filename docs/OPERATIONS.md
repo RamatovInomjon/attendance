@@ -79,10 +79,16 @@ xdg-open data/debug/index.html         # every recognition, grouped by person
 ```
 
 The contact sheet outlines the aligned crops in teal so they are easy to pick
-out. Capture is capped at `debug_max_per_person` (40) per person - counted
-from what is already on disk, so a restart or a second camera does not reset
-it - and skipped when free disk drops under `save_all_min_free_gb`; set
-`debug_capture=false` to turn it off entirely.
+out. Each person keeps their newest `debug_max_per_person` (40) captures:
+the count comes from what is on disk, so a restart or a second camera does
+not reset it, and at the cap the oldest capture is deleted to make room. It
+is a rolling window on purpose - this is the picture the events page shows
+beside a recognition, so the one that must never be missing is the most
+recent. Capture is skipped when free disk drops under
+`save_all_min_free_gb`; set `debug_capture=false` to turn it off entirely.
+A folder already far over the cap shrinks by one per new capture rather than
+being trimmed at startup, because the surplus is evidence for days an
+operator may still be reviewing.
 
 ## Diagnostics
 

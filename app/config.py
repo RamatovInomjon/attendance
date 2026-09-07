@@ -490,10 +490,13 @@ class Settings(BaseSettings):
     # sidecar - so a wrong name can be inspected instead of guessed at.
     debug_capture: bool = True
     debug_capture_unknown: bool = True     # also keep gate-passing non-matches
-    # Capped, not uncapped. 0 means unbounded, which is right for a debugging
-    # session and wrong for an install that runs for months - the directory
-    # grows without limit and it is full of face crops. Set 0 explicitly for a
-    # capture run.
+    # How many captures each person KEEPS. A rolling window: at the cap the
+    # oldest is deleted to make room, so the folder is bounded and the newest
+    # recognition always has evidence. Keeping the first N instead bounds it
+    # just as well and leaves every later recognition with no picture on the
+    # events page, which is where a wrong check-out is judged. 0 means
+    # unbounded, which is right for a capture run and wrong for an install
+    # that runs for months - the directory is full of face crops.
     debug_max_per_person: int = 40
     debug_dir: Path = ROOT / "data" / "debug"
 

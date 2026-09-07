@@ -8,6 +8,11 @@ writes four things into `data/debug/<person>/`:
     <ts>_<score>_aligned.jpg  the 112x112 the recognizer actually saw
     <ts>_<score>.json         scores, margin, pose, gate, camera, track
 
+The newest `debug_max_per_person` captures of each person are kept and the
+oldest is dropped to make room, because this is the evidence the events page
+shows beside a recognition: a bound that kept the FIRST N would leave every
+later recognition with no picture to judge it by.
+
 The aligned crop is the one that matters: if a name is wrong, that image shows
 whether the pipeline mis-framed the face or the gallery genuinely contains a
 lookalike.  Guessing from the annotated frame alone is not enough.
@@ -18,8 +23,9 @@ import json
 import logging
 import shutil
 import threading
-from collections import defaultdict
+from collections import deque
 from datetime import datetime
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -37,11 +43,13 @@ class DebugCapture:
         self._trace_starts: dict = {}
         self.root = root or settings.debug_dir
         self.max_per_person = max_per_person or settings.debug_max_per_person
-        # Seeded from disk on first use, per person - see _on_disk. An
-        # in-memory count starting at zero made the cap per INSTANCE, and there
-        # is one instance per camera worker, per process start: 242 sidecars
-        # for one person against a cap of 40.
-        self._counts: dict[str, int] = defaultdict(int)
+        # The captures each person currently has on disk, oldest first, and a
+        # monotonic sequence for naming. Both seeded from the directory on
+        # first use - see _seed. An in-memory count starting at zero made the
+        # cap per INSTANCE, and there is one instance per camera worker, per
+        # process start: 242 sidecars for one person against a cap of 40.
+        self._stems: dict[str, deque] = {}
+        self._seq: dict[str, int] = {}
         self._lock = threading.Lock()
         # Resolved once, like the pipeline does: the threshold in force is the
         # calibrated one for this recognizer (plus any override), not the
@@ -54,13 +62,36 @@ class DebugCapture:
         keep = "".join(c if (c.isalnum() or c in " _-") else "_" for c in name).strip()
         return keep.replace(" ", "_") or "unknown"
 
-    def _on_disk(self, slug: str) -> int:
-        """Sidecars already in this person's folder, so the cap survives a
-        restart and is shared between cameras. One cheap glob, once per slug."""
+    def _seed(self, slug: str) -> None:
+        """Read this person's folder once: which captures exist, and how far
+        the naming sequence has got.
+
+        Only the top level is listed. `frame()` writes into `<person>/frames/`
+        and `_traces/`, so a trace is never mistaken for a capture and never
+        evicted as one.
+        """
         try:
-            return sum(1 for _ in (self.root / slug).glob("*.json"))
+            stems = sorted(p.stem for p in (self.root / slug).glob("*.json"))
         except OSError:
-            return 0
+            stems = []
+        self._stems[slug] = deque(stems)
+        # Names must keep increasing even as old ones are evicted, or two
+        # captures of the same person in the same second could collide.
+        seq = 0
+        for stem in stems:
+            tail = stem.rsplit("_", 1)[-1]
+            if tail.isdigit():
+                seq = max(seq, int(tail))
+        self._seq[slug] = seq
+
+    def _retire(self, slug: str, stem: str) -> None:
+        """Delete one capture: the sidecar and its three images."""
+        d = self.root / slug
+        for suffix in (".json", "_face.jpg", "_aligned.jpg", "_frame.jpg"):
+            try:
+                Path(d / f"{stem}{suffix}").unlink(missing_ok=True)
+            except OSError:
+                log.debug("could not retire %s%s", stem, suffix)
 
     def _disk_full(self) -> bool:
         """The same guard `frame()` has: a full disk must fail the audit
@@ -81,18 +112,32 @@ class DebugCapture:
             return None
         slug = self._slug(name)
         with self._lock:
-            if slug not in self._counts:
-                self._counts[slug] = self._on_disk(slug)
-            # max_per_person == 0 means uncapped, for runs where every pass matters.
-            if self.max_per_person and self._counts[slug] >= self.max_per_person:
-                return None
-            self._counts[slug] += 1
-            n = self._counts[slug]
+            if slug not in self._stems:
+                self._seed(slug)
+            stems = self._stems[slug]
+            # A ROLLING window, not the first N. The cap is here to bound the
+            # folder; the folder is the evidence the events page shows beside
+            # each recognition, and "the first 40 this person ever produced"
+            # bounds it by making every LATER recognition evidence-free. That
+            # is what happened: the cap started counting from disk, two people
+            # were already past it, and their new events showed no face at all
+            # while the page said the frame had not been saved. Whatever is
+            # dropped, it must not be the recognition somebody is looking at
+            # today. max_per_person == 0 means uncapped.
+            victim = None
+            if self.max_per_person and len(stems) >= self.max_per_person:
+                victim = stems.popleft()
+            n = self._seq[slug] = self._seq.get(slug, 0) + 1
+            stem = f"{ts.astimezone(settings.tz):%Y%m%d_%H%M%S}_{score:.3f}_{camera}_{n:03d}"
+            stems.append(stem)
+
+        # Outside the lock: the other camera's worker must not wait on file I/O.
+        if victim is not None:
+            self._retire(slug, victim)
 
         try:
             d = self.root / slug
             d.mkdir(parents=True, exist_ok=True)
-            stem = f"{ts.astimezone(settings.tz):%Y%m%d_%H%M%S}_{score:.3f}_{camera}_{n:03d}"
 
             x1, y1, x2, y2 = [int(v) for v in box]
 
@@ -221,5 +266,7 @@ class DebugCapture:
             log.exception("per-frame debug write failed for %s", name)
 
     def summary(self) -> dict:
+        """Captures held per person - what is on disk, not what this process
+        happened to write."""
         with self._lock:
-            return dict(self._counts)
+            return {slug: len(stems) for slug, stems in self._stems.items()}

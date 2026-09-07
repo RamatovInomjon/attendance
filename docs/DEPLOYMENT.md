@@ -139,7 +139,7 @@ site is not a debugging session:
 |---|---|---|
 | `record_clips` | `False` | records a video clip per person-pass |
 | `save_all_frames` | `False` | writes every gate-passing frame |
-| `debug_max_per_person` | `40` | caps per-person evidence images (`0` = unbounded) |
+| `debug_max_per_person` | `40` | newest per-person evidence images kept; the oldest is dropped at the cap (`0` = unbounded) |
 
 One day of two cameras produced **1,156 clips / 3.2 GB** of video and 15,724
 images — all of it footage of identified people. On a customer site that is a

@@ -1,10 +1,15 @@
-"""The per-person capture cap must mean what it says.
+"""The per-person capture cap must bound the folder without losing the newest.
 
 `debug_max_per_person` is 40, and data/debug/Inomjon_Ramatov held 242 sidecars.
 The count lived in memory, per DebugCapture instance - and there is one
 instance per camera worker, per process start - so the real cap was
-40 x cameras x restarts. Seeding it from what is on disk is what makes it one
-number.
+40 x cameras x restarts. Seeding it from what is on disk makes it one number.
+
+Seeding alone then broke the thing the folder is for. Two people were already
+past the cap, so their next recognition wrote nothing, and the events page -
+which shows the capture beside each recognition, and is where a wrong
+check-out is judged - had no face to show and said the frame was not saved.
+So the window rolls: the oldest capture goes, the newest is always kept.
 """
 from __future__ import annotations
 
@@ -44,17 +49,49 @@ def test_the_cap_counts_what_is_already_on_disk(tmp_path, plenty_of_disk):
         (folder / f"20260831_080000_0.500_Entrance_{i + 1:03d}.json").write_text("{}")
 
     first = DebugCapture(enabled=True, root=tmp_path, max_per_person=5)
-    stems = [_capture(first, n) for n in range(1, 5)]
-    assert [bool(s) for s in stems] == [True, True, False, False], \
-        "three on disk plus two new ones is the cap"
+    assert all(_capture(first, n) for n in range(1, 5)), "every capture is written"
     assert first.summary()["Cap_Person"] == 5
-    assert len(list(folder.glob("*.json"))) == 5
+    assert len(list(folder.glob("*.json"))) == 5, "three on disk plus two is the cap"
 
     # A second instance - the other camera, or the process after a restart -
     # starts from the five on disk, not from zero.
     second = DebugCapture(enabled=True, root=tmp_path, max_per_person=5)
-    assert _capture(second, 9) is None
+    assert _capture(second, 9)
     assert len(list(folder.glob("*.json"))) == 5
+
+
+def test_the_window_rolls_so_the_newest_recognition_always_has_evidence(
+        tmp_path, plenty_of_disk):
+    """The bug on the events page: a person past the cap wrote nothing, so
+    every later recognition had no face to show."""
+    folder = tmp_path / "Cap_Person"
+    folder.mkdir()
+    for i in range(5):
+        for suffix in (".json", "_face.jpg", "_aligned.jpg", "_frame.jpg"):
+            (folder / f"20260831_08000{i}_0.500_Entrance_{i + 1:03d}{suffix}").write_text("x")
+
+    dc = DebugCapture(enabled=True, root=tmp_path, max_per_person=5)
+    stem = _capture(dc, 1)
+    assert stem, "a person at the cap still gets their capture"
+    assert (folder / f"{stem}.json").exists()
+    assert len(list(folder.glob("*.json"))) == 5, "and the folder stays bounded"
+
+    # The OLDEST went, with all four of its files, and nothing newer did.
+    assert not list(folder.glob("20260831_080000_*")), "oldest capture retired whole"
+    assert (folder / "20260831_080004_0.500_Entrance_005.json").exists()
+
+
+def test_names_keep_increasing_even_as_old_captures_are_evicted(tmp_path, plenty_of_disk):
+    """The sequence is seeded from the highest on disk, not from the count, so
+    an evicted name is never handed out twice - two captures of one person in
+    the same second would otherwise write to the same files."""
+    folder = tmp_path / "Cap_Person"
+    folder.mkdir()
+    (folder / "20260831_080000_0.500_Entrance_007.json").write_text("{}")
+
+    dc = DebugCapture(enabled=True, root=tmp_path, max_per_person=2)
+    assert _capture(dc, 1).endswith("_008")
+    assert _capture(dc, 2).endswith("_009")
 
 
 def test_the_sidecar_records_the_threshold_actually_in_force(tmp_path, plenty_of_disk):

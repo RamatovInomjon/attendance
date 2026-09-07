@@ -268,7 +268,7 @@ overturn, and must never be persisted.
 Clip recording and per-frame saving are **debug tools, off by default**. They
 built the replay corpus that made the detector A/B, the direction comparison
 and the fp16 validation measurable with the cameras switched off - but a
-release keeps only one best-shot image per recognition, capped at 40 per
+release keeps only one best-shot image per recognition, the newest 40 per
 person, as attendance evidence.
 
 ## Where it can still fail
