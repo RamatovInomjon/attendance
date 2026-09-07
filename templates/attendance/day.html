@@ -55,6 +55,14 @@
             <span class="status-chip {% if e.transition == 'CHECK_IN' %}status-chip--success{% elif e.transition == 'CHECK_OUT' %}status-chip--warning{% else %}{% endif %}">{{ e.transition or e.role }}</span>
             <span class="text-muted small">{{ e.camera }} · {{ e.direction }}</span>
           </div>
+          {% if e.manual %}
+          {# A typed-in pass, not a camera reading. Its score is 0.000 because
+             nothing was recognised, and a reader who does not know that would
+             take this row for the worst match in the day. #}
+          <div class="small mt-1">
+            <span class="status-chip status-chip--warning">Qo'lda kiritilgan</span>
+          </div>
+          {% endif %}
           <div class="small text-muted mt-1">
             ball <strong>{{ "%.3f"|format(e.score) }}</strong> ·
             farq <strong>{{ "%.3f"|format(e.margin) }}</strong>

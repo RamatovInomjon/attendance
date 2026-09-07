@@ -246,3 +246,57 @@ def test_enrolment_and_the_ops_endpoints_refuse_everyone_but_an_admin():
     # empty form, which is exactly the point.
     assert client.post("/api/employees/", headers=ADMIN).status_code == 400
 
+
+def test_only_an_admin_may_write_attendance_from_an_unknown():
+    """Labelling a face and authoring a pass are different powers. An operator
+    keeps the first - naming a miss is their job - and is refused the second,
+    because a check-in typed from a dropdown is the one correction that adds a
+    record rather than removing one."""
+    from datetime import datetime, timezone
+    from sqlalchemy import delete, select
+    from app.db.models import (
+        DailyAttendance, Employee, RecognitionEvent, UnknownSighting)
+    from app.db.session import session_scope
+    from app.services.attendance import business_date
+
+    ts = datetime(2026, 8, 26, 9, 0, tzinfo=timezone.utc)
+    with session_scope() as s:
+        emp = Employee(full_name="Promote Gate", is_active=True)
+        s.add(emp); s.flush()
+        u = UnknownSighting(camera_id=None, track_id=3, first_seen=ts,
+                            last_seen=ts, business_date=business_date(ts))
+        s.add(u); s.flush()
+        emp_id, sid = emp.id, u.id
+    try:
+        data = {"employee_id": str(emp_id), "direction": "ENTER"}
+        r = client.post(f"/attendance/unknown/{sid}/resolve", headers=OPERATOR,
+                        data=data)
+        assert r.status_code == 303
+        assert "error=" in r.headers.get("location", "")
+        with session_scope() as s:
+            assert s.get(UnknownSighting, sid).promoted_event_id is None
+
+        r = client.post(f"/attendance/unknown/{sid}/resolve", headers=ADMIN,
+                        data=data)
+        assert r.status_code == 303
+        assert "error=" not in r.headers.get("location", "")
+        with session_scope() as s:
+            assert s.get(UnknownSighting, sid).promoted_event_id is not None
+    finally:
+        with session_scope() as s:
+            s.execute(delete(RecognitionEvent).where(
+                RecognitionEvent.employee_id == emp_id))
+            # The promotion rebuilds the day, which CREATES this row. Left
+            # behind it is a person still inside the building on a stale date,
+            # and the start-up sweep in test_runtime_sweep.py finds it.
+            s.execute(delete(DailyAttendance).where(
+                DailyAttendance.employee_id == emp_id))
+            s.execute(delete(UnknownSighting).where(UnknownSighting.id == sid))
+            s.execute(delete(Employee).where(Employee.id == emp_id))
+
+
+def test_an_operator_may_still_label_an_unknown_without_a_direction():
+    """The gate is on the direction, not on the whole form."""
+    r = client.post("/attendance/unknown/999999/resolve", headers=OPERATOR,
+                    data={"kind": "visitor"})
+    assert r.status_code != 403

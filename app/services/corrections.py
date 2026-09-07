@@ -28,6 +28,20 @@ effect by rebuilding the day from the events that still stand; resolving an
 unknown records who it was and offers its face to the gallery, and deliberately
 does NOT invent a check-in. A UI that can author attendance from a dropdown is
 a UI that can be wrong in a way nobody can see.
+
+THE ONE EXCEPTION, AND WHY IT IS NARROW
+---------------------------------------
+`promote_sighting` DOES write attendance, because the rule above left a real
+person with no remedy: when the recognizer misses somebody entirely, they have
+no event, so there is nothing to void and nothing to rebuild from, and the day
+is simply wrong. Labelling the miss told the calibration set about it and left
+the human's timesheet broken.
+
+What keeps it from being the dropdown this module warns about is that it
+refuses to guess. The admin must state the DIRECTION - the one fact an unknown
+sighting genuinely lacks - and the row is written with `source="manual"` and
+`score=0.0`, so it is distinguishable forever, excluded from every threshold
+measured here, and voidable through the same path as any other event.
 """
 from __future__ import annotations
 
@@ -40,7 +54,8 @@ from app.config import settings
 from pathlib import Path
 
 from app.db.models import (
-    Camera, Employee, FaceEmbedding, RecognitionEvent, UnknownSighting,
+    Camera, CameraRole, Employee, FaceEmbedding, RecognitionEvent,
+    UnknownSighting,
 )
 from app.services.attendance import AttendanceService
 from app.services.augment import TAG
@@ -264,6 +279,115 @@ def resolve_sighting(sighting_id: int, *, kind: str, employee_id: int | None,
             "offerable": bool(has_vector and kind == "employee")}
 
 
+PROMOTABLE_DIRECTIONS = ("ENTER", "EXIT")
+
+
+def promote_sighting(sighting_id: int, *, employee_id: int, direction: str,
+                     by: str) -> dict:
+    """Name an unknown face AND state which way it was walking, as attendance.
+
+    The deliberate gap this fills: the recognizer missing somebody entirely.
+    `resolve_sighting` labels that miss but writes no attendance, so the person
+    who really did come to work still has no check-in and nothing in the console
+    could give them one.
+
+    What makes this safe enough to exist is that it does NOT guess the missing
+    half. An unknown sighting has a time and a camera but no direction verdict -
+    the pipeline never decided ENTER or EXIT for it - and inventing one would be
+    fabricating the record. So the admin supplies the direction explicitly, and
+    the row is stamped `source="manual"` with the score left at 0.0, because no
+    recognition happened and pretending otherwise would corrupt every threshold
+    measured from this table.
+
+    The day is then REBUILT rather than nudged, exactly as voiding does. That
+    matters for more than tidiness: a manual check-in inserted before an
+    existing sighting has to turn that sighting's CHECK_IN into a RE_SIGHTING,
+    which only a replay in timestamp order gets right. It also means the manual
+    event is not special afterwards - it stands or falls in future rebuilds like
+    any other row, and voiding it removes its effect through the existing path.
+    """
+    from app.db.session import session_scope
+    from app.services.attendance import business_date
+
+    direction = (direction or "").strip().upper()
+    if direction not in PROMOTABLE_DIRECTIONS:
+        return {"ok": False,
+                "error": f"direction must be one of {PROMOTABLE_DIRECTIONS}"}
+    if not employee_id:
+        return {"ok": False, "error": "naming an employee needs an employee"}
+
+    with session_scope() as s:
+        u = s.get(UnknownSighting, int(sighting_id))
+        if u is None:
+            return {"ok": False, "error": "no such sighting"}
+
+        name = s.execute(select(Employee.full_name)
+                         .where(Employee.id == int(employee_id))).scalar()
+        if name is None:
+            return {"ok": False, "error": "no such employee"}
+
+        # Already promoted, and that event still stands. Refusing keeps one walk
+        # from becoming two transitions. A VOIDED promotion is not a block: the
+        # admin has already said that one was wrong, and this is the correction.
+        if u.promoted_event_id is not None:
+            prior = s.get(RecognitionEvent, u.promoted_event_id)
+            if prior is not None and prior.voided_at is None:
+                return {"ok": False,
+                        "error": "this sighting is already in attendance; "
+                                 "void that event first"}
+
+        ts = u.last_seen or u.first_seen
+        if ts is None:
+            return {"ok": False, "error": "sighting has no timestamp"}
+        bdate = business_date(ts)
+
+        # `role` is NOT NULL and says only where the camera points. It carries
+        # no weight here - `_effective_role` lets an explicit direction override
+        # it - but it should still be the truth about the camera when we know it.
+        role = CameraRole.BOTH
+        if u.camera_id is not None:
+            cam_role = s.execute(select(Camera.role)
+                                 .where(Camera.id == u.camera_id)).scalar()
+            if cam_role is not None:
+                role = cam_role
+
+        ev = RecognitionEvent(
+            employee_id=int(employee_id), camera_id=u.camera_id, role=role,
+            ts=ts, business_date=bdate,
+            score=0.0, margin=0.0,               # no recognition happened
+            track_id=u.track_id if u.track_id is not None else -1,
+            face_px=0, votes="manual", snapshot=u.snapshot, accepted=True,
+            transition="",                       # rebuild computes the real one
+            direction=direction,
+            direction_reason=f"manual: {(by or '')[:80]}"[:96],
+            source="manual",
+        )
+        s.add(ev)
+        s.flush()
+
+        u.promoted_event_id = ev.id
+        u.resolved_employee_id = int(employee_id)
+        u.resolved_kind = "employee"
+        u.resolved_by = (by or "")[:64]
+        u.resolved_at = datetime.now(timezone.utc)
+
+        replayed = AttendanceService().rebuild(s, int(employee_id), bdate)
+        # Read everything needed for the return value INSIDE the session. After
+        # the commit these are detached instances, and touching an expired
+        # attribute then raises rather than lazily reloading.
+        event_id = ev.id
+        transition = ev.transition
+        has_vector = u.vector is not None
+
+    log.info("correction: sighting %s promoted to %s for %s (%s) by %s, "
+             "%d events replayed", sighting_id, direction, name, transition,
+             by, replayed)
+    return {"ok": True, "name": name, "direction": direction,
+            "transition": transition, "event_id": event_id,
+            "business_date": bdate.isoformat(), "replayed": replayed,
+            "offerable": bool(has_vector)}
+
+
 def labelled_probes() -> dict:
     """The ground truth the corrections have produced so far.
 
@@ -283,10 +407,17 @@ def labelled_probes() -> dict:
             select(UnknownSighting.vector, UnknownSighting.resolved_employee_id)
             .where(UnknownSighting.resolved_kind == "employee",
                    UnknownSighting.vector.is_not(None))).all()
+        # `source != "manual"` matters more than it looks. A voided event is
+        # read here as a CONFIRMED FALSE ACCEPT and used with its score. A
+        # manual promotion that an admin later voided is neither: nothing was
+        # recognized, so its 0.0 is not a similarity, and counting it would put
+        # a phantom false accept at score zero into every FAR curve drawn from
+        # this table.
         voided = s.execute(
             select(RecognitionEvent.employee_id, RecognitionEvent.score,
                    RecognitionEvent.snapshot)
-            .where(RecognitionEvent.voided_at.is_not(None))).all()
+            .where(RecognitionEvent.voided_at.is_not(None),
+                   RecognitionEvent.source != "manual")).all()
 
     def _stack(blobs):
         if not blobs:

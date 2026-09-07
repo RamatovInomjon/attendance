@@ -93,6 +93,24 @@
                         <button class="btn btn-outline-secondary btn-sm" type="submit"
                                 name="kind" value="unsure">Aniq emas</button>
                     </div>
+                    {% if can_admin %}
+                    {# Naming the face records a miss; it does not give the person
+                       their day back. These two do - and they ask for the one
+                       thing the sighting cannot supply, which way they walked. #}
+                    <div class="border-top pt-1 mt-1">
+                        <span class="d-block text-muted mb-1" style="font-size:11px">
+                            Davomatga yozish &mdash; yo'nalishni tanlang:
+                        </span>
+                        <div class="d-flex gap-1">
+                            <button class="btn btn-success btn-sm flex-grow-1" type="submit"
+                                    name="direction" value="ENTER"
+                                    onclick="return confirm('Tanlangan xodim KIRDI deb davomatga yozilsinmi? Kun qaytadan hisoblanadi.')">Kirdi (IN)</button>
+                            <button class="btn btn-warning btn-sm flex-grow-1" type="submit"
+                                    name="direction" value="EXIT"
+                                    onclick="return confirm('Tanlangan xodim CHIQDI deb davomatga yozilsinmi? Kun qaytadan hisoblanadi.')">Chiqdi (OUT)</button>
+                        </div>
+                    </div>
+                    {% endif %}
                     {% if not attempt.has_vector %}
                     <span class="text-muted" style="font-size:11px">
                         Bu kuzatuvda yuz vektori saqlanmagan &mdash; belgilash mumkin,

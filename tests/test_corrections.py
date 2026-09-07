@@ -786,3 +786,132 @@ def test_labelled_sightings_are_attributed_by_the_admin_not_the_pipeline():
     assert attributed(missed) == x, "resolved as X: X's own face, not an impostor for X"
     assert attributed(visitor) == -1, "a confirmed visitor is an impostor for everybody"
     assert attributed(plain) == y, "unlabelled: the pipeline's guess stands"
+
+
+# ---- promoting an unknown into attendance ---------------------------------
+
+def _missed_pass(cam=CAM_IN, ts=None, track=7):
+    """One unknown track, as the pipeline would have left it."""
+    with session_scope() as s:
+        u = UnknownSighting(camera_id=cam, track_id=track,
+                            first_seen=ts or _at(9, 0), last_seen=ts or _at(9, 0),
+                            business_date=business_date(ts or _at(9, 0)),
+                            frames=12, best_score=0.41)
+        s.add(u); s.flush()
+        return u.id
+
+
+def test_promoting_an_unknown_writes_the_attendance_the_miss_cost():
+    """The whole point. Naming the face records the miss; naming it AND saying
+    which way they walked is what gives the person their day back."""
+    emp = _emp("Missed Entirely")
+    sid = _missed_pass(ts=_at(9, 0))
+
+    assert _daily(emp) is None          # the recognizer never saw them
+
+    out = corrections.promote_sighting(sid, employee_id=emp, direction="ENTER",
+                                       by="admin")
+    assert out["ok"], out
+    assert out["transition"] == "CHECK_IN"
+
+    day = _daily(emp)
+    assert day is not None
+    assert day.check_in_time == _at(9, 0)
+    assert day.presence == PresenceStatus.INSIDE
+
+
+def test_a_promoted_event_says_it_was_typed_in_not_seen():
+    """`score` is 0.0 because no recognition happened. Without `source` there is
+    nothing to stop that 0.0 being read back as a real measurement."""
+    emp = _emp("Manual Marked")
+    sid = _missed_pass(ts=_at(9, 0))
+    corrections.promote_sighting(sid, employee_id=emp, direction="ENTER",
+                                 by="admin")
+    with session_scope() as s:
+        ev = s.execute(select(RecognitionEvent).where(
+            RecognitionEvent.employee_id == emp)).scalar_one()
+        assert ev.source == "manual"
+        assert ev.score == 0.0
+        assert ev.direction == "ENTER"
+        assert "admin" in (ev.direction_reason or "")
+
+
+def test_the_direction_is_required_and_not_guessed():
+    """An unknown sighting has a time and a camera but no direction verdict.
+    Defaulting one would be inventing the fact the admin is there to supply."""
+    emp = _emp("No Direction")
+    sid = _missed_pass()
+    for bad in ("", "MAYBE", "IN", None):
+        out = corrections.promote_sighting(sid, employee_id=emp, direction=bad,
+                                           by="admin")
+        assert not out["ok"]
+    assert _daily(emp) is None
+
+
+def test_the_same_sighting_cannot_be_promoted_twice():
+    """One walk is one transition. Twice would be two check-ins from one pass."""
+    emp = _emp("Double Promote")
+    sid = _missed_pass(ts=_at(9, 0))
+    assert corrections.promote_sighting(sid, employee_id=emp, direction="ENTER",
+                                        by="admin")["ok"]
+    again = corrections.promote_sighting(sid, employee_id=emp, direction="ENTER",
+                                         by="admin")
+    assert not again["ok"] and "already" in again["error"]
+
+
+def test_voiding_a_promotion_frees_the_sighting_and_undoes_the_day():
+    """The admin's correction is correctable. Voiding takes the manual event out
+    of the day through the ordinary path, and having said it was wrong they must
+    be able to promote it again with the other direction."""
+    emp = _emp("Wrong Way")
+    sid = _missed_pass(ts=_at(9, 0))
+    first = corrections.promote_sighting(sid, employee_id=emp, direction="ENTER",
+                                         by="admin")
+    corrections.void_event(first["event_id"], by="admin", reason="wrong way")
+    assert _daily(emp).check_in_time is None
+
+    second = corrections.promote_sighting(sid, employee_id=emp, direction="EXIT",
+                                          by="admin")
+    assert second["ok"], second
+    assert _daily(emp).check_out_time == _at(9, 0)
+
+
+def test_a_manual_check_in_before_a_real_one_takes_over_the_day():
+    """The reason this rebuilds rather than nudges. The recognizer caught them
+    at 13:00 and called it the check-in; the pass it MISSED was at 09:00. Once
+    that is recorded the 13:00 event has to stop being the arrival."""
+    emp = _emp("Late First Sighting")
+    _pass(emp, CAM_IN, CameraRole.IN, _at(13, 0), ENTER)
+    assert _daily(emp).check_in_time == _at(13, 0)
+
+    sid = _missed_pass(ts=_at(9, 0))
+    corrections.promote_sighting(sid, employee_id=emp, direction="ENTER",
+                                 by="admin")
+
+    day = _daily(emp)
+    assert day.check_in_time == _at(9, 0)
+    with session_scope() as s:
+        later = s.execute(select(RecognitionEvent).where(
+            RecognitionEvent.employee_id == emp,
+            RecognitionEvent.ts == _at(13, 0))).scalar_one()
+        assert later.transition == "RE_SIGHTING"
+
+
+def test_promoting_records_the_label_too():
+    """It is still a confirmed miss, and the calibration set still wants it."""
+    emp = _emp("Labelled Too")
+    sid = _missed_pass()
+    corrections.promote_sighting(sid, employee_id=emp, direction="ENTER",
+                                 by="admin")
+    with session_scope() as s:
+        u = s.get(UnknownSighting, sid)
+        assert u.resolved_kind == "employee"
+        assert u.resolved_employee_id == emp
+        assert u.promoted_event_id is not None
+
+
+def test_an_unknown_employee_is_refused():
+    sid = _missed_pass()
+    out = corrections.promote_sighting(sid, employee_id=999999,
+                                       direction="ENTER", by="admin")
+    assert not out["ok"]

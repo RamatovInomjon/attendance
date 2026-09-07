@@ -47,10 +47,14 @@ ADDITIONS = {
         # Admin corrections. NULL means "standing", which is every existing row.
         ("voided_at", "DATETIME"), ("voided_by", "VARCHAR(64)"),
         ("void_reason", "VARCHAR(160)"),
+        # 'live' for every existing row, which is what they all are: the manual
+        # promotion did not exist when they were written.
+        ("source", "VARCHAR(16) DEFAULT 'live'"),
     ],
     "unknown_sighting": [
         ("resolved_employee_id", "INTEGER"), ("resolved_kind", "VARCHAR(16)"),
         ("resolved_by", "VARCHAR(64)"), ("resolved_at", "DATETIME"),
+        ("promoted_event_id", "INTEGER"),
     ],
     # NULL, not a default: an enrolment photograph has no floor of its own and
     # is judged against the global threshold. Only augmented corridor crops

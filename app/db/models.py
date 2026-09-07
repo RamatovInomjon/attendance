@@ -177,6 +177,14 @@ class RecognitionEvent(Base):
     voided_at = Column(UtcDateTime(), nullable=True)
     voided_by = Column(String(64), nullable=True)
     void_reason = Column(String(160), nullable=True)
+    # Where this row came from. "live" is a camera reading; "manual" is an admin
+    # naming an unknown face and stating which way they were walking. Both count
+    # towards attendance - that is the point of the manual one - but they are
+    # NOT the same kind of evidence, and a column is the only way a later reader
+    # can tell them apart. Threshold calibration must exclude "manual": its
+    # score is 0.0 because no recognition happened, and feeding that to a FAR
+    # measurement would poison it.
+    source = Column(String(16), default="live", nullable=False)
 
     __table_args__ = (
         Index("ix_event_emp_date", "employee_id", "business_date"),
@@ -247,12 +255,22 @@ class UnknownSighting(Base):
     # weight: "visitor" - a confirmed non-employee - is the single most useful
     # label this system can produce, because impostor probes are what every
     # threshold here has been guessed without. "employee" names them and offers
-    # the stored vector to the gallery; neither writes attendance.
+    # the stored vector to the gallery. Naming alone still writes no attendance;
+    # only an admin who ALSO states the direction promotes the sighting into an
+    # event - see `promoted_event_id` below.
     resolved_employee_id = Column(Integer, ForeignKey("employee.id", ondelete="SET NULL"),
                                   nullable=True)
     resolved_kind = Column(String(16), nullable=True)   # employee | visitor | unsure
     resolved_by = Column(String(64), nullable=True)
     resolved_at = Column(UtcDateTime(), nullable=True)
+    # The attendance event an admin promoted this sighting into, if any. Naming
+    # the face still writes nothing on its own; stating the DIRECTION as well is
+    # what authors a pass, and this column is the link back. It exists to stop
+    # the same sighting being promoted twice - two check-ins from one walk - and
+    # to let the day page point at the row a correction created.
+    promoted_event_id = Column(Integer, ForeignKey("recognition_event.id",
+                                                   ondelete="SET NULL"),
+                               nullable=True)
 
 
 class ReidPass(Base):

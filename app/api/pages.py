@@ -786,7 +786,8 @@ def attendance_unknown(request: Request, show: str = "open", msg: str = "",
     return render("attendance/unknown.html", request=request, current_view="attendance:unknown",
                   unknown_attempts=attempts, page_obj=Page(attempts), is_paginated=False,
                   employees=sorted(names.items(), key=lambda kv: kv[1]),
-                  can_correct=bool(me), show=show, msg=msg, error=error)
+                  can_correct=bool(me), can_admin=bool(_admin_only(request)),
+                  show=show, msg=msg, error=error)
 
 
 def _capture_index() -> dict[str, str]:
@@ -857,6 +858,7 @@ def attendance_day(request: Request, employee_id: int, day: str, msg: str = "",
                 "transition": e.transition or "", "direction": e.direction or "",
                 "score": e.score or 0.0, "margin": e.margin or 0.0,
                 "votes": e.votes or "", "voided": e.voided_at is not None,
+                "manual": (e.source or "live") == "manual",
                 "void_reason": e.void_reason or "", "voided_by": e.voided_by or "",
                 "snapshot": media_path(e.snapshot) if e.snapshot else None,
                 "stem": stem,
@@ -972,19 +974,50 @@ async def unknown_resolve(request: Request, sighting_id: int):
         return JSONResponse({"detail": "Not permitted"}, status_code=403)
     form = await request.form()
     emp = str(form.get("employee_id") or "").strip()
+    back = _back(request, form, "/attendance/unknown")
+    direction = str(form.get("direction") or "").strip().upper()
+
+    # Stating the direction is what turns a label into attendance, so it is
+    # gated harder than labelling: authoring a pass is a strictly larger power
+    # than naming a face, and an operator naming a face still cannot invent one.
+    if direction:
+        from app.services import auth as auth_svc
+        if not auth_svc.can_admin(me):
+            return RedirectResponse(
+                f"{back}?error={_quote('Davomatga yozish uchun administrator huquqi kerak')}",
+                status_code=303)
+        out = await run_in_threadpool(
+            corrections.promote_sighting, sighting_id,
+            employee_id=int(emp) if emp.isdigit() else 0,
+            direction=direction, by=str(me.get("u") or ""))
+        if not out.get("ok"):
+            return RedirectResponse(f"{back}?error={_quote(out.get('error', ''))}",
+                                    status_code=303)
+        moved = {"CHECK_IN": "kelish", "CHECK_OUT": "ketish"}.get(
+            out["transition"], out["transition"] or "qayd")
+        note = (f"{out['name']} - {out['direction']} sifatida davomatga "
+                f"yozildi ({moved}). Qo'lda kiritilgan deb belgilangan; "
+                f"xato bo'lsa, kun sahifasidan bekor qiling.")
+        return RedirectResponse(f"{back}?msg={_quote(note)}", status_code=303)
+
     out = await run_in_threadpool(
         corrections.resolve_sighting,
         sighting_id, kind=str(form.get("kind") or ""),
         employee_id=int(emp) if emp.isdigit() else None,
         by=str(me.get("u") or ""))
-    back = _back(request, form, "/attendance/unknown")
     if not out.get("ok"):
         return RedirectResponse(f"{back}?error={_quote(out.get('error', ''))}",
                                 status_code=303)
-    if out.get("offerable"):
-        note = (f"{out['name']} deb belgilandi. Yuzni galereyaga qo'shish uchun "
-                f"Galereya sahifasiga o'ting - u yerda bir xil chegara va bir "
-                f"xil tekshiruvdan o'tadi.")
+    if out["kind"] == "employee":
+        # Say the part the operator cannot see. Naming the face looks like it
+        # finished the job - the row turns green with the person's name on it -
+        # and the one thing it does NOT do is the thing they came here for.
+        note = (f"{out['name']} deb belgilandi. Diqqat: davomat o'zgarmadi - "
+                f"belgilash kelish-ketish yozuvini yaratmaydi.")
+        if out.get("offerable"):
+            note += (" Yuzni galereyaga qo'shish uchun Galereya sahifasiga "
+                     "o'ting - u yerda bir xil chegara va bir xil tekshiruvdan "
+                     "o'tadi.")
     elif out["kind"] == "visitor":
         note = ("Xodim emas deb belgilandi. Bu chegaralarni to'g'ri sozlash "
                 "uchun eng qimmatli ma'lumot.")
