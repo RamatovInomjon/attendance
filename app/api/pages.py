@@ -623,6 +623,7 @@ async def employee_enroll(request: Request):
 
 @router.get("/employees/{employee_id}", response_class=HTMLResponse)
 def employee_detail(request: Request, employee_id: int):
+    from app.services import augment as augment_svc
     with session_scope() as s:
         e = s.get(Employee, employee_id)
         if not e:
@@ -634,9 +635,36 @@ def employee_detail(request: Request, employee_id: int):
         n_emb = s.execute(
             select(func.count(FaceEmbedding.id)).where(FaceEmbedding.employee_id == employee_id)
         ).scalar() or 0
-        vm = EmployeeVM.of(e, enrollment_count=n_emb)
+        has_photo = n_emb > 0 and augment_svc.profile_image(employee_id) is not None
+        vm = EmployeeVM.of(
+            e, enrollment_count=n_emb,
+            image=_p(f"/employees/{employee_id}/photo") if has_photo else None)
     return render("employees/detail.html", request=request, current_view="employees:list", employee=vm,
                   attendance_history=hist, records=hist, embedding_count=n_emb)
+
+
+@router.get("/employees/{employee_id}/photo")
+def employee_photo(request: Request, employee_id: int):
+    """The registered photograph shown on one person's profile.
+
+    `face_id_users` is deliberately NOT under the public media mount, so this
+    cannot be a static URL: it is served here, behind the session the rest of
+    the page already needs, and containment-checked in `profile_image` because
+    the id is caller input.
+
+    Gated at "signed in", not at admin, unlike /gallery/enrolment. That route
+    exists to browse the biometric gallery by embedding id; this one answers
+    "what does the person on this profile look like" for a page every signed-in
+    role can already open, and it can only ever return the one photograph
+    belonging to the employee named in the path.
+    """
+    from app.services import augment
+    p = augment.profile_image(employee_id)
+    if p is None:
+        return JSONResponse({"detail": "not found"}, status_code=404)
+    # Private, not public: it is one person's face behind a session cookie, and
+    # a shared cache would serve it to whoever asked next.
+    return FileResponse(str(p), headers={"Cache-Control": "private, max-age=300"})
 
 
 # --------------------------------------------------------------- attendance --

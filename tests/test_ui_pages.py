@@ -2183,3 +2183,123 @@ assert.equal(FakeImage.instances.filter((i) => String(i.src).includes('/video/')
 """
     result = subprocess.run(["node", "-e", contract], cwd=root, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+# ---- the registered photograph on a profile -------------------------------
+
+PNG_1PX = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
+    "890000000a49444154789c63000100000500010d0a2db40000000049454e44ae"
+    "426082")
+
+
+@pytest.fixture
+def enrolled(tmp_path, monkeypatch):
+    """An employee with a registered photograph on disk, cleaned up after.
+
+    `gallery_dir` is redirected at tmp_path so the test never reads - or is
+    satisfied by - the real face_id_users export.
+    """
+    from app.config import settings
+    from app.db.session import session_scope
+    from sqlalchemy import delete
+    monkeypatch.setattr(settings, "gallery_dir", tmp_path)
+    made = []
+
+    def make(name="Portrait Person", folder="900_Portrait",
+             filename="image_01.png", *, on_disk=True, source=None):
+        if on_disk:
+            (tmp_path / folder).mkdir(parents=True, exist_ok=True)
+            (tmp_path / folder / filename).write_bytes(PNG_1PX)
+        with session_scope() as s:
+            e = Employee(full_name=name, folder=folder, is_active=True)
+            s.add(e); s.flush()
+            if source is not False:
+                s.add(FaceEmbedding(employee_id=e.id,
+                                    source_file=source or filename,
+                                    vector=b"\x00" * 2048, dim=512))
+            made.append(e.id)
+            return e.id
+
+    yield make
+
+    with session_scope() as s:
+        if made:
+            s.execute(delete(FaceEmbedding).where(
+                FaceEmbedding.employee_id.in_(made)))
+            s.execute(delete(Employee).where(Employee.id.in_(made)))
+
+
+def test_a_profile_shows_the_photograph_the_person_was_registered_with(
+        client, enrolled):
+    emp_id = enrolled()
+
+    page = client.get(f"/employees/{emp_id}")
+    assert page.status_code == 200
+    assert f"/employees/{emp_id}/photo" in page.text
+    assert "Profil rasmi mavjud emas" not in page.text
+
+    shot = client.get(f"/employees/{emp_id}/photo")
+    assert shot.status_code == 200
+    assert shot.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_clicking_the_photograph_opens_the_evidence_view(client, enrolled):
+    """The photo must be a control wired to the same modal as the IN/OUT
+    evidence buttons beside it - and wired ONCE. This page binds every
+    [data-evidence-src] in its own script, so carrying the global
+    `data-airi-evidence` marker as well would open the modal twice per click."""
+    emp_id = enrolled(name="Clickable", folder="901_Clickable")
+
+    html = client.get(f"/employees/{emp_id}").text
+    at = html.index(f"/employees/{emp_id}/photo")
+    button = html[at - 300:at + 300]
+    assert "data-evidence-src" in button
+    assert "<button" in button
+    assert "data-airi-evidence" not in html
+
+
+def test_a_person_with_no_photograph_still_renders(client, enrolled):
+    """The placeholder is the correct answer, not a broken image."""
+    emp_id = enrolled(name="No Photo", folder="904_None", on_disk=False,
+                      source=False)
+
+    page = client.get(f"/employees/{emp_id}")
+    assert page.status_code == 200
+    assert "Profil rasmi mavjud emas" in page.text
+    assert f"/employees/{emp_id}/photo" not in page.text
+    assert client.get(f"/employees/{emp_id}/photo").status_code == 404
+
+
+def test_a_corridor_crop_is_never_shown_as_somebody_portrait(client, enrolled):
+    """An augmented `live:` row recognises well and looks nothing like a
+    portrait, and its source_file is a capture key, not a path."""
+    from app.services import augment
+    emp_id = enrolled(name="Only Corridor", folder="902_Corridor",
+                      on_disk=False, source=f"{augment.TAG}somekey")
+
+    assert augment.profile_image(emp_id) is None
+    assert client.get(f"/employees/{emp_id}/photo").status_code == 404
+
+
+def test_the_photograph_route_cannot_be_walked_out_of_the_gallery(
+        client, enrolled, tmp_path):
+    """`folder` and `source_file` come from the database, but the resolved path
+    is still checked: a row saying '..' must not read the filesystem."""
+    from app.services import augment
+    (tmp_path.parent / "secret.txt").write_text("not a face")
+    emp_id = enrolled(name="Traversal", folder="..", on_disk=False,
+                      source="secret.txt")
+
+    assert augment.profile_image(emp_id) is None
+    assert client.get(f"/employees/{emp_id}/photo").status_code == 404
+
+
+def test_every_signed_in_role_may_see_the_profile_photograph(
+        viewer_client, operator_client, enrolled):
+    """It follows the profile page, which every role can already open. Gating it
+    at admin would leave a broken image on a page they are meant to read."""
+    emp_id = enrolled(name="Seen By All", folder="903_All")
+
+    for c in (viewer_client, operator_client):
+        assert c.get(f"/employees/{emp_id}/photo").status_code == 200

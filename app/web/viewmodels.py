@@ -42,11 +42,15 @@ class EmployeeVM:
     enrollment_state: str = "not_enrolled"
 
     @classmethod
-    def of(cls, e, enrollment_count: int = 0):
+    def of(cls, e, enrollment_count: int = 0, image: str | None = None):
+        # `image` is passed in rather than resolved here: finding it touches the
+        # filesystem, and this classmethod is called once per row on the
+        # employee list and the dashboard. Only the profile page, which renders
+        # one person, pays for it.
         return cls(
             id=e.id, employee_id=e.external_id or "", full_name=e.full_name,
             department=e.department or "", position=e.position or "",
-            phone_number=e.phone or "", email="", image=None,
+            phone_number=e.phone or "", email="", image=image,
             is_active=bool(e.is_active), created_at=_local(e.created_at),
             enrollment_count=enrollment_count,
             enrollment_state="enrolled" if enrollment_count else "not_enrolled",

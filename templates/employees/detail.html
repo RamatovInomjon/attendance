@@ -5,7 +5,23 @@
     <div class="col-12 col-lg-4">
         <div class="card card-shadow airi-card text-center p-4">
             {% if employee.image %}
-                <img src="{{ employee.image }}" class="employee-detail__photo mb-3" width="120" height="120" alt="{{ employee.full_name }}" loading="lazy">
+                {# `data-evidence-src` ALONE, like the IN/OUT buttons below it.
+                   This page binds the modal in its own extra_js block, which
+                   matches every [data-evidence-src]. Adding the global marker
+                   `data-airi-evidence` would ALSO match the delegated handler
+                   in static/js/main.js, so one click would open the modal
+                   twice. Templates here use one mechanism or the other -
+                   attendance/unknown.html uses the global one and ships no
+                   script of its own. #}
+                <button class="border-0 bg-transparent p-0 mb-3" type="button"
+                        title="Kattalashtirish uchun bosing"
+                        data-evidence-src="{{ employee.image }}"
+                        data-evidence-title="{{ employee.full_name }}"
+                        data-evidence-subtitle="Ro'yxatdan o'tgan surat"
+                        aria-label="{{ employee.full_name }} suratini kattalashtirish">
+                    <img src="{{ employee.image }}" class="employee-detail__photo" width="120" height="120"
+                         alt="{{ employee.full_name }}" loading="lazy">
+                </button>
             {% else %}
                 <div class="employee-detail__photo employee-detail__photo--empty mx-auto mb-3" aria-label="Profil rasmi mavjud emas">
                     <i class="bi bi-person" aria-hidden="true"></i>

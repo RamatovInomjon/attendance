@@ -559,6 +559,39 @@ def enrolment_image(embedding_id: int) -> Path | None:
     return p if p.is_file() and p.is_relative_to(root) else None
 
 
+def profile_image(employee_id: int) -> Path | None:
+    """The registered photograph to show on one person's profile.
+
+    Same resolution and the same containment check as `enrolment_image`, keyed
+    by EMPLOYEE rather than by embedding, because the profile page knows who it
+    is showing and must not have to enumerate embedding ids to find a face.
+
+    Corridor crops are excluded. An augmented `live:` row is a grab from the
+    camera - correct to recognise against, wrong to present as somebody's
+    portrait - and its `source_file` is a capture key, not a path under
+    `gallery_dir`, so resolving one here would fail the containment check
+    anyway. Lowest id wins, which is `image_01.png` for every folder exported so
+    far and is at least stable between page loads.
+    """
+    from sqlalchemy import select
+    from app.db.models import Employee, FaceEmbedding
+    from app.db.session import session_scope
+
+    with session_scope() as s:
+        row = s.execute(
+            select(FaceEmbedding.source_file, Employee.folder)
+            .join(Employee, Employee.id == FaceEmbedding.employee_id)
+            .where(FaceEmbedding.employee_id == int(employee_id),
+                   FaceEmbedding.source_file.is_not(None),
+                   FaceEmbedding.source_file.not_like(f"{TAG}%"))
+            .order_by(FaceEmbedding.id)).first()
+    if not row or not row[0] or not row[1]:
+        return None
+    root = settings.gallery_dir.resolve()
+    p = (root / row[1] / row[0]).resolve()
+    return p if p.is_file() and p.is_relative_to(root) else None
+
+
 def remove_enrolment(ids: list[int]) -> dict:
     """Delete enrolment embeddings, refusing to un-enrol anybody by accident.
 
