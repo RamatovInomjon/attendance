@@ -95,6 +95,26 @@ media/
 # Biometric / personal data. The face_id_users export README states it
 # "contains personal and biometric data" - it must never enter version control.
 face_id_users/
+# Any staging copy of it is the same biometric data, and this repository
+# is public. A bare `git add .` must not be able to reach one.
+face_id_users_tmp/
+face_id_users_*/
+# ...and any archive of it. A zip of the export is the export.
+face_id_users*.zip
+face_id_users*.tar*
+
+# The research package the ReID work came from. It is kept in the working tree
+# because app/config.py cites its measurements by filename, and it is NOT
+# committed because `integration/docs/KOZ_TEKSHIRUVI.md` is a visual-inspection
+# report that names employees beside physical descriptions of them - "white
+# shirt, dark trousers, same build and hairline" - which is personal data about
+# identifiable people derived from surveillance, in a public repository.
+#
+# Nothing in it is needed to run or deploy: the model that is needed ships as
+# models/reid_osnet_x0_75_256x128_e512_fp16.onnx, and docs/REID_INTEGRATION.md
+# carries every number this deployment relies on. Move it out of band (the
+# phd/dissertatsiya2 tree it came from) rather than committing a redacted copy.
+integration/
 
 # The SAME DATA IN VECTOR FORM. `bench/validate_gallery.py` writes a cache of
 # every enrolment embedding - 268 x 512 floats over 54 named people, with the
@@ -155,4 +175,11 @@ license*.key
 # NOTHING ELSE is exempted. The face recognizer, the aligner, the head detector,
 # every `.enc`, every `.pt` and `models/_archive/` stay ignored - those are
 # either customer-encrypted or the fp32 masters that exist nowhere else.
+#
+# The ResNet101 file is exempted as well as the OSNet one it was replaced by,
+# and stays exempted for now: a deployment that has not yet pulled the new
+# weights still runs it, and un-publishing a model the server is using would
+# break the next `git pull` rather than tidy anything. Remove it once every
+# host reports the OSNet model in /api/health.
+!models/reid_osnet_x0_75_256x128_e512_fp16.onnx
 !models/reid_resnet101_ibn_256x128_e2048_fp16.onnx

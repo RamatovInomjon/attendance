@@ -137,6 +137,7 @@ class AttendanceService:
         face_px: int = 0, votes: str = "", snapshot: str | None = None,
         direction: str = "UNKNOWN", direction_reason: str = "",
         require_direction: bool = True, apply_state: bool = True,
+        source: str = "live",
     ) -> Decision:
         """Apply one completed pass.
 
@@ -144,6 +145,15 @@ class AttendanceService:
         state. That is what the losing half of a cross-camera pair gets: both
         cameras really did see the person, so the evidence is kept, but one walk
         may only produce one transition. See app/services/arbiter.py.
+
+        `source` names the RULE that produced the identity, not the camera.
+        "live" is the per-frame consensus vote; "tracklet" is the second-chance
+        match against a template built from the whole pass, which is a weaker
+        and differently-distributed kind of evidence (97.4% precision measured,
+        against a live path whose errors are rarer still). Threshold
+        calibration must be able to separate them, and after the fact a column
+        is the only thing that can - which is the same argument that put
+        "manual" here in the first place.
         """
         bdate = business_date(ts)
 
@@ -159,7 +169,7 @@ class AttendanceService:
                 business_date=bdate, score=score, margin=margin, track_id=track_id,
                 face_px=face_px, votes=votes, snapshot=snapshot, accepted=True,
                 transition="DEBOUNCED", direction=direction,
-                direction_reason=direction_reason[:96],
+                direction_reason=direction_reason[:96], source=source,
             ))
             return Decision("DEBOUNCED")
 
@@ -171,7 +181,7 @@ class AttendanceService:
                 business_date=bdate, score=score, margin=margin, track_id=track_id,
                 face_px=face_px, votes=votes, snapshot=snapshot, accepted=True,
                 transition="DUPLICATE_VIEW", direction=direction,
-                direction_reason=direction_reason[:96],
+                direction_reason=direction_reason[:96], source=source,
             ))
             return Decision("DUPLICATE_VIEW", daily.id)
 
@@ -188,7 +198,7 @@ class AttendanceService:
             business_date=bdate, score=score, margin=margin, track_id=track_id,
             face_px=face_px, votes=votes, snapshot=snapshot, accepted=True,
             transition=transition, direction=direction,
-            direction_reason=direction_reason[:96],
+            direction_reason=direction_reason[:96], source=source,
         ))
         return Decision(transition, daily.id)
 

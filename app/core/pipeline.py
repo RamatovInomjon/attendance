@@ -92,6 +92,28 @@ class TrackState:
     nearest_id: int | None = None
     best_vector: np.ndarray | None = None
     best_seen: float = 0.0
+    # RUNNING QUALITY-WEIGHTED SUM OF EVERY EMBEDDING THIS TRACK PRODUCED.
+    #
+    # The vote judges each frame separately and then needs
+    # `vote_min_recognitions` of them to agree, so a pass that yields three
+    # good frames names nobody however clearly each one scores. The evidence
+    # was there; the rule could not reach it. One template over the whole pass
+    # can, and it is measured to recover 23-30% more employee passes per day
+    # at 97.4% precision (integration/docs/HISOBOT_YUZ_TANA.md, section 4).
+    #
+    # A SUM, not a list: at 512 floats per frame a loiterer would otherwise
+    # accumulate megabytes on the capture thread, and nothing downstream wants
+    # the individual frames back.
+    #
+    # The weight is `aligner_score * sqrt(ipd)`. The research normalises IPD
+    # within the pass first; that divides every weight by one per-pass
+    # constant, which cancels when the template is renormalised to unit length
+    # at the end - so this is the same formula, expressed in a form that can be
+    # accumulated one frame at a time.
+    face_sum: np.ndarray | None = None
+    face_wsum: float = 0.0
+    face_frames: int = 0
+    best_ipd: float = 0.0
     # Two frames are tracked, and they are usually different frames.
     # score-best: why the match happened - kept for diagnosis.
     best_native: np.ndarray | None = None
@@ -158,6 +180,18 @@ class CompletedTrack:
     crop: np.ndarray | None = None
     vector: np.ndarray | None = None
     nearest_employee_id: int | None = None
+    # The whole pass as ONE face query, L2-normalised. `vector` above is the
+    # single best-SCORING frame and is kept for diagnosis; this is built from
+    # every frame that cleared the gates, weighted by how much face each one
+    # actually showed. It is what the second-chance matcher in
+    # app/services/worker.py asks the gallery about, and what the pseudo-person
+    # gallery stores for an unregistered person.
+    face_template: np.ndarray | None = None
+    face_frames: int = 0
+    # Best inter-pupil distance seen in the pass, in source pixels. The measure
+    # of whether this template is worth trusting at all: below ~20 px a face
+    # embedding links the wrong people rather than linking weakly.
+    best_ipd: float = 0.0
 
 
 @dataclass
@@ -198,6 +232,20 @@ class FrameResult:
     candidates: list[FrameCandidate] = field(default_factory=list)
     body_crops: list[BodyCrop] = field(default_factory=list)
     timings: dict = field(default_factory=dict)
+
+
+def _unit(v: np.ndarray | None) -> np.ndarray | None:
+    """L2-normalise a weighted sum back into a query vector, or pass on None.
+
+    The norm is what makes the sum comparable with the gallery at all, and it
+    is where the per-pass weight constant cancels - see `TrackState.face_sum`.
+    A degenerate sum (every weight zero, or two embeddings that cancelled) has
+    no direction to normalise and is dropped rather than scaled up into noise.
+    """
+    if v is None:
+        return None
+    n = float(np.linalg.norm(v))
+    return (v / n).astype(np.float32) if n > 1e-6 else None
 
 
 def _whole_body(person_box: np.ndarray, frame_w: int, frame_h: int,
@@ -499,6 +547,8 @@ class CameraPipeline:
                 score_crop=(t.vote.quality_snapshot if t.vote.quality_snapshot is not None
                             else t.best_crop),
                 vector=t.best_vector, nearest_employee_id=t.nearest_id,
+                face_template=_unit(t.face_sum), face_frames=t.face_frames,
+                best_ipd=t.best_ipd,
             ))
         return out
 
@@ -821,6 +871,17 @@ class CameraPipeline:
                 for (st, f), q, emb, m in zip(keep, quals, embs, matches):
                     st.embedded += 1
                     st.best_face_px = max(st.best_face_px, int(q.face_px))
+                    # Into the tracklet template, regardless of what this frame
+                    # matched. The template is a better QUERY, not a second
+                    # vote: excluding the frames that matched nobody would
+                    # rebuild the same evidence the live rule already has.
+                    w = float(q.aligner_score) * float(np.sqrt(max(q.ipd, 1e-6)))
+                    if w > 0.0:
+                        st.face_sum = (emb * w if st.face_sum is None
+                                       else st.face_sum + emb * w)
+                        st.face_wsum += w
+                        st.face_frames += 1
+                    st.best_ipd = max(st.best_ipd, float(q.ipd))
                     if settings.save_all_frames or self._tracing():
                         x1, y1, x2, y2 = [int(v) for v in st.face_box]
                         res.candidates.append(FrameCandidate(

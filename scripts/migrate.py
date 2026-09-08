@@ -51,6 +51,15 @@ ADDITIONS = {
         # promotion did not exist when they were written.
         ("source", "VARCHAR(16) DEFAULT 'live'"),
     ],
+    # The FACE side of a body pass, plus where the pass was grouped. Existing
+    # rows keep NULL/0: they were written before the template existed, and a
+    # zero face_dim is what tells every reader not to interpret the blob.
+    "reid_pass": [
+        ("face_vector", "BLOB"), ("face_dim", "INTEGER DEFAULT 0"),
+        ("face_ipd", "FLOAT DEFAULT 0"), ("face_frames", "INTEGER DEFAULT 0"),
+        ("pseudo_person_id", "INTEGER"), ("pseudo_score", "FLOAT DEFAULT 0"),
+        ("pseudo_by", "VARCHAR(8) DEFAULT ''"),
+    ],
     "unknown_sighting": [
         ("resolved_employee_id", "INTEGER"), ("resolved_kind", "VARCHAR(16)"),
         ("resolved_by", "VARCHAR(64)"), ("resolved_at", "DATETIME"),
@@ -79,6 +88,12 @@ INDEXES_WANTED = [
     ("ix_event_emp_cam_ts", "recognition_event", "employee_id, camera_id, ts"),
     # /attendance/unknown orders by last_seen; that was a full table scan.
     ("ix_unknown_sighting_last_seen", "unknown_sighting", "last_seen"),
+    # The pseudo-person candidate scan, which runs inside the ReID worker's
+    # write transaction once per unnamed pass: everybody seen in the last
+    # `pseudo_active_days`, newest first.
+    ("ix_pseudo_last_seen", "pseudo_person", "last_seen"),
+    # "show me this pseudo-person's other passes", from the review page.
+    ("ix_reid_pass_pseudo", "reid_pass", "pseudo_person_id"),
 ]
 
 # Indexes that cost a write on every insert and serve no query: strict prefixes

@@ -91,6 +91,12 @@ class CameraWorker:
         self.passes_total = 0
         self.passes_recognized = 0
         self.passes_unknown = 0
+        # Of `passes_recognized`, how many the live vote missed and the
+        # whole-pass template recovered. Exposed because it is the one number
+        # that says whether the second chance is earning its place: if it is
+        # zero the rule is inert, and if it approaches the live count something
+        # is wrong with the live gates rather than right with this.
+        self.passes_recovered = 0
         self.passes_by_direction = {"ENTER": 0, "EXIT": 0, "UNKNOWN": 0}
         # A crash inside the per-frame path is silent from the outside: frames
         # keep flowing, timings look fine, and recognition simply stops. One
@@ -179,6 +185,58 @@ class CameraWorker:
             log.exception("[%s] body snapshot write failed", self.name)
             return None
 
+    def _second_chance(self, ct) -> tuple[int, float, float] | None:
+        """One more look at a pass the live vote could not name.
+
+        THE LIVE RULE THROWS AWAY EVIDENCE IT ALREADY HAS. Every frame is
+        matched on its own and then `vote_min_recognitions` of them must agree,
+        so a pass yielding three good frames names nobody however clearly each
+        one scores. Those embeddings were computed on the capture thread and
+        then discarded; combining them into one quality-weighted template and
+        asking the SAME gallery once more costs a 512-wide matmul.
+
+        MEASURED ON THIS RULE - not on the research prototype, which relaxed the
+        live quality gates and therefore answered a different question. Running
+        the real pipeline over 191 recorded clips of one day
+        (`bench/tracklet_recheck_eval.py --stride 4 --sweep`, 66 passes):
+
+            agreement where the live vote named somebody : 22/22 (100%)
+            disagreements over thresholds 0.20 -> 0.40   : 0 everywhere
+            recovered from the 38 unnamed passes         : 2  (+7%)
+
+        Safe, and worth having. NOT the +23...30% the research reports for a
+        gate-relaxed version of the same idea - see app/config.py for why the
+        two numbers differ and what it would take to close the gap.
+
+        WHY THE THRESHOLD EQUALS THE LIVE ONE RATHER THAN EXCEEDING IT. This is
+        a second chance, not a lowered bar: `tracklet_face_threshold` is the
+        live per-frame threshold exactly, so this can never accept a similarity
+        the live matcher would reject. Everything it adds is the aggregation
+        over the whole pass and the runner-up margin.
+
+        It used to be 0.30, on the reasoning that a whole-pass template is a
+        stronger query and could clear a higher bar. Production said otherwise:
+        most of the enrolment gallery is WEBCAM photography, a CCTV query
+        scores ~0.2 lower against those rows than against a CCTV one, and 0.30
+        sat on the median of exactly the population this rule exists to
+        recover. See app/config.py for the distributions.
+
+        Returns (employee_id, score, margin), or None to leave the pass unknown.
+        """
+        thr = float(settings.tracklet_face_threshold)
+        if thr <= 0.0 or ct.face_template is None:
+            return None
+        if ct.face_frames < settings.tracklet_min_face_frames:
+            # One frame's template IS that frame, and the live matcher has
+            # already judged it and said no. Re-asking the same question at a
+            # different threshold is not new evidence.
+            return None
+        m = self.pipeline.gallery.match(ct.face_template, thr,
+                                        settings.tracklet_face_margin)
+        if m.employee_id is None:
+            return None
+        return int(m.employee_id), float(m.score), float(m.margin)
+
     def _persist_completed(self, res: FrameResult):
         """One attendance decision per PERSON-PASS - not per completed track.
 
@@ -213,6 +271,28 @@ class CameraWorker:
             self.passes_by_direction[ct.direction] = \
                 self.passes_by_direction.get(ct.direction, 0) + 1
             ts = datetime.fromtimestamp(frame_ts, tz=timezone.utc)
+
+            source = "live"
+            if ct.employee_id is None:
+                # Before writing this off as an unknown: the whole pass as one
+                # query, against the same gallery. See `_second_chance`.
+                again = None
+                try:
+                    again = self._second_chance(ct)
+                except Exception:
+                    log.exception("[%s] tracklet re-match failed", self.name)
+                if again is not None:
+                    emp, score, margin = again
+                    ct.employee_id, ct.name = emp, self.pipeline.gallery.name(emp)
+                    ct.best_score, ct.best_margin = score, margin
+                    source = "tracklet"
+                    self.passes_recovered += 1
+                    log.info("[%s] RECOVERED %-20s score=%.3f margin=%.3f "
+                             "faces=%d ipd=%.0f dir=%s (the live vote saw %d "
+                             "embedded frame(s) and named nobody)",
+                             self.name, ct.name[:20], score, margin,
+                             ct.face_frames, ct.best_ipd, ct.direction,
+                             ct.embedded_frames)
 
             if ct.employee_id is None:
                 self.passes_unknown += 1
@@ -270,7 +350,7 @@ class CameraWorker:
             self.arbiter.submit(PendingPass(
                 employee_id=ct.employee_id, camera_id=self.camera_id,
                 role=self.role, ts=ts, monotonic=now_mono, track=ct,
-                snapshot=snap, camera_name=self.name))
+                snapshot=snap, camera_name=self.name, source=source))
 
         # ---- phase 2: whatever is now decided, in one short transaction ----
         groups = self.arbiter.due(now_mono)
@@ -315,7 +395,7 @@ class CameraWorker:
             snapshot=p.snapshot, direction=direction,
             direction_reason=direction_reason,
             require_direction=self.direction_cfg.configured,
-            apply_state=winner,
+            apply_state=winner, source=p.source,
         )
         entry = {
             "ts": p.ts.astimezone(settings.tz).strftime("%H:%M:%S"),
@@ -485,6 +565,7 @@ class CameraWorker:
             "passes": {
                 "total": self.passes_total,
                 "recognized": self.passes_recognized,
+                "recovered": self.passes_recovered,
                 "unknown": self.passes_unknown,
                 "by_direction": dict(self.passes_by_direction),
             },

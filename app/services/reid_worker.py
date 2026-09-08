@@ -30,9 +30,19 @@ from Entrance on the same business date. A hit gives a labelled cross-camera
 identity: the same person, two cameras, no name. That pair is exactly what the
 next round of ReID training and testing consumes.
 
-It writes NO attendance, ever. On its own test set this model misses ~31% of
-genuine cross-camera queries at a 10% false-positive rate; that is fine for
-collecting data and nowhere near good enough to name somebody.
+GROUPING THE PEOPLE WHO ARE NOT ENROLLED
+----------------------------------------
+An unnamed pass is also handed to `app/services/pseudo_gallery.py`, which
+attaches it to a stable pseudo-identity built from its FACE and BODY features -
+so the same visitor's passes end up in one place instead of being N unrelated
+unknowns. Face leads and works across days; body is the fallback and only
+within one, because clothing changes. See that module for the measurements.
+
+It writes NO attendance, ever - not from the cross-camera link and not from the
+pseudo-person grouping. Naming an unknown by body mislabels 10.9% of confirmed
+visitors at the matching threshold, and at this corridor's base rate (~45
+recoverable employees among ~1100 unknown tracks a day) that produces more
+wrong attendance rows than right ones at every threshold measured.
 """
 from __future__ import annotations
 
@@ -116,6 +126,9 @@ class ReidWorker:
         self._thread: threading.Thread | None = None
         self._open: dict[tuple, _Pass] = {}
         self.reid = None
+        # Built on this thread, used only from it, so it needs no lock.
+        from app.services.pseudo_gallery import PseudoGallery
+        self.pseudo = PseudoGallery() if settings.pseudo_person else None
 
         self.crops_seen = 0
         self.crops_dropped = 0
@@ -312,6 +325,15 @@ class ReidWorker:
         sharp = [sharpness_of(c) for c in crops]
         feat = aggregate(embs, scores, sharp)
 
+        # The FACE side of the same pass, carried on the completed track: one
+        # quality-weighted template over every frame that cleared the gates.
+        # It is what makes grouping an unregistered person possible at all -
+        # body alone regroups 3.5-7.6% of pairs - and it is what breaks a
+        # cross-camera tie the body cannot.
+        face = getattr(ct, "face_template", None) if ct is not None else None
+        face_ipd = float(getattr(ct, "best_ipd", 0.0) or 0.0) if ct else 0.0
+        face_n = int(getattr(ct, "face_frames", 0) or 0) if ct else 0
+
         with session_scope() as s:
             row = ReidPass(
                 camera_id=p.camera_id, camera_name=p.camera_name,
@@ -324,13 +346,25 @@ class ReidWorker:
                 folder=str(folder), crops=kept,
                 vector=feat.astype("float32").tobytes(), dim=int(feat.shape[0]),
                 model_name=self.reid.model_name,
+                face_vector=(face.astype("float32").tobytes()
+                             if face is not None else None),
+                face_dim=int(face.shape[0]) if face is not None else 0,
+                face_ipd=face_ipd, face_frames=face_n,
             )
             s.add(row)
             s.flush()
             hit = None
-            if not named and kept >= settings.reid_min_crops:
-                hit = self._match(s, row, feat)
+            enough = kept >= settings.reid_min_crops
+            if not named and enough:
+                hit = self._match(s, row, feat, face)
+            # A tracklet feature built from one blurred crop is not worth a
+            # cross-camera claim, and it is not worth a body LINK either - the
+            # same argument, against a far larger candidate set. Such a pass is
+            # still grouped, but only by its face.
+            group = self._group(s, row, feat if enough else None,
+                                face, face_ipd, ct, named)
             pass_id, folder_str = row.id, row.folder
+            pseudo_code = group.code if group is not None else None
 
         (out / "_pass.json").write_text(json.dumps({
             "camera": p.camera_name, "track_id": p.track_id,
@@ -343,6 +377,9 @@ class ReidWorker:
             "pass_id": pass_id,
             "matched_pass_id": hit[0] if hit else None,
             "match_score": round(hit[1], 4) if hit else None,
+            "face_ipd": round(face_ipd, 1),
+            "face_frames": face_n,
+            "pseudo_person": pseudo_code,
         }, indent=2, ensure_ascii=False))
 
         self.passes_written += 1
@@ -351,7 +388,33 @@ class ReidWorker:
             log.info("[reid] %s t%d matched pass %d  score=%.3f margin=%.3f",
                      p.camera_name, p.track_id, hit[0], hit[1], hit[2])
 
-    def _match(self, s, row, feat):
+    def _group(self, s, row, body, face, face_ipd, ct, named):
+        """Attach this pass to a pseudo-identity, so one visitor is one person.
+
+        Named passes come here too, with `create=False`: an employee is not a
+        new visitor and must not mint a pseudo-identity, but their face may
+        match a pseudo-person assembled from their OWN earlier passes - the
+        ones the face path missed - and that is the only way such a group ever
+        gets a name. A pass whose face was good enough to match the enrolment
+        gallery is named upstream and never reaches here as an unknown.
+        """
+        if self.pseudo is None:
+            return None
+        try:
+            return self.pseudo.place(
+                s, row, face=face, body=body, face_ipd=face_ipd,
+                body_model=self.reid.model_name,
+                registry_match=((ct.employee_id, float(ct.best_score), ct.name)
+                                if named else None),
+                create=not named)
+        except Exception:
+            # Grouping is bookkeeping. It must never cost a pass its row, its
+            # crops or its cross-camera match, which are already written.
+            self.errors += 1
+            log.exception("reid: pseudo-person grouping failed")
+            return None
+
+    def _match(self, s, row, feat, face=None):
         """Score this pass against unmatched passes from the OTHER camera.
 
         Two rules, both required, mirroring `Gallery.match`: the top score must
@@ -359,6 +422,33 @@ class ReidWorker:
         impostor distributions overlap heavily here - the research project
         measures wrong_sim_p90 at 0.664 against right_sim_p10 at 0.521 - so a
         high score on its own is weak evidence.
+
+        THE MARGIN RULE IS EXPENSIVE, AND FACE IS WHAT CAN PAY FOR IT. Measured
+        on this corridor's 281-pass corpus (bench/reid_match_eval.py), the
+        margin costs more than half the correct matches - 55 accepts fall to 29
+        - while the wrong count is zero either way. Those are not impostors
+        being caught; they are passes where two candidates' CLOTHING scored
+        alike and the body had nothing left to say.
+
+        So when the body is undecided, the FACE is asked, and only then:
+
+            top body < threshold                 -> no match, as before
+            top beats runner-up by the margin    -> match, exactly as before
+            otherwise, and only if both have a comparable face:
+                the face must clear `pseudo_face_threshold` AND beat the
+                runner-up's face by `reid_match_margin` -> match
+
+        Why this shape rather than blending the two scores into one number: the
+        research fusion (global-z blend, w = 0.6, FNIR@10% 11.59 -> 5.93) was
+        measured under the ENROLMENT protocol, where the decision is a
+        threshold on the blended score. This rule is a pairwise link with a
+        runner-up margin, and a z-normalised blend is not on the scale
+        `reid_match_threshold` was calibrated against. Blending here changed
+        the RANKING without a calibrated bar to judge it by, which in practice
+        only converted accepts into rejections - a stricter matcher wearing
+        fusion's name. A tie-break adds recall exactly where the body axis has
+        run out of information, and leaves the calibrated accept decision -
+        every candidate must still clear the body threshold - untouched.
         """
         from sqlalchemy import select
         from app.db.models import ReidPass
@@ -384,17 +474,61 @@ class ReidWorker:
         top = float(sims[order[0]])
         second = float(sims[order[1]]) if len(order) > 1 else -1.0
         margin = top - second
-        if top < settings.reid_match_threshold or margin < settings.reid_match_margin:
+        if top < settings.reid_match_threshold:
             return None
 
-        other = rows[int(order[0])]
-        row.matched_pass_id, row.match_score, row.match_margin = other.id, top, margin
-        other.matched_pass_id, other.match_score, other.match_margin = row.id, top, margin
-        return (other.id, top, margin)
+        won, how = int(order[0]), "body"
+        if margin < settings.reid_match_margin:
+            won = self._face_tiebreak(rows, order, sims, face)
+            if won < 0:
+                return None
+            how = "face"
+
+        other = rows[won]
+        score = float(sims[won])
+        row.matched_pass_id, row.match_score, row.match_margin = other.id, score, margin
+        other.matched_pass_id, other.match_score, other.match_margin = row.id, score, margin
+        return (other.id, score, margin)
+
+    def _face_tiebreak(self, rows, order, sims, face) -> int:
+        """Index of the winner when the BODY could not separate the field.
+
+        Only candidates that clear the body threshold on their own take part,
+        so this can never admit a pass the calibrated accept rule rejected - it
+        only chooses between passes that rule already considers plausible.
+
+        `pseudo_face_threshold` is the bar because it is the one that was
+        measured for exactly this question: is this pass's face the same PERSON
+        as that pass's face (90-98% pair precision over three days and ~4200
+        passes). The enrolment threshold answers a different question - is this
+        face the person in that studio photograph - and does not transfer.
+        """
+        if face is None or not settings.reid_match_face_tiebreak:
+            return -1
+        eligible = [i for i in order
+                    if float(sims[i]) >= settings.reid_match_threshold
+                    and rows[i].face_vector and rows[i].face_dim == len(face)]
+        if len(eligible) < 2:
+            # One candidate with a face and one without is not a tie the face
+            # can break: "no face" is not a low score, it is no evidence, and
+            # ranking it against a real one would invent a comparison.
+            return -1
+        F = np.stack([np.frombuffer(rows[i].face_vector, dtype=np.float32)
+                      for i in eligible])
+        F /= np.linalg.norm(F, axis=1, keepdims=True) + 1e-12
+        fs = F @ np.asarray(face, np.float32)
+        o = np.argsort(-fs)
+        best, runner = float(fs[o[0]]), float(fs[o[1]])
+        if best < settings.pseudo_face_threshold:
+            return -1
+        if (best - runner) < settings.reid_match_margin:
+            return -1
+        return int(eligible[int(o[0])])
 
     def stats(self) -> dict:
         return {"enabled": self.enabled, "queued": self.q.qsize(),
                 "crops_seen": self.crops_seen, "crops_dropped": self.crops_dropped,
                 "passes": self.passes_written, "matches": self.matches_found,
                 "errors": self.errors, "last_error": self.last_error,
+                "pseudo": self.pseudo.stats() if self.pseudo else None,
                 "model": Path(str(self.model_path)).name if self.model_path else None}

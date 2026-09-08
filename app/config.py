@@ -86,18 +86,46 @@ class Settings(BaseSettings):
     recognizer_model: str = "adaface_ir101_finetune_fp16.onnx"
 
     # ---- person re-identification ---------------------------------------
-    # Body ReID, used to collect training data and to link one unrecognised
-    # person across the two cameras. NEVER to write attendance: on its own
-    # cross-camera test set the deployed checkpoint misses ~31% of genuine
-    # queries at a 10% false-positive identification rate.
+    # Body ReID: it links one unrecognised person across the two cameras, and
+    # it is one half of the pseudo-person grouping below. NEVER an identity for
+    # attendance on its own - measured on this corpus, naming an unknown by
+    # body alone mislabels 10.9% of confirmed VISITORS at the matching
+    # threshold, and no threshold makes the wrong count meaningfully smaller
+    # than the right one (integration/docs/HISOBOT_YUZ_TANA.md, section 5).
     #
-    # Exported by scripts/export_reid.py from the research checkpoint that won
-    # phd/dissertatsiya2's cross-camera evaluation (gallery = Entrance, query =
-    # Exit, 200 splits): mAP 92.24, Rank-1 93.49, FNIR@10% 31.10.
+    # E11: OSNet-x0.75, 512-d, exported from the checkpoint that won
+    # phd/dissertatsiya2's enrolment-protocol evaluation. It REPLACED
+    # `reid_resnet101_ibn_256x128_e2048_fp16.onnx`, which turned out to have
+    # been exported from an E1-era checkpoint - 6.5 FNIR points worse than the
+    # ResNet checkpoints it was supposed to carry, confirmed by MD5 and by a
+    # 0.31-0.47 cosine between the ONNX and the PyTorch weights.
+    #
+    #                    old (R101-IBN)   new (OSNet-x0.75)
+    #   file size             85 MB          2.7 MB   (31x)
+    #   compute             6.52 GFLOPs      0.60     (10.9x)
+    #   embedding             2048            512
+    #   FNIR@10% (20260902)  18.22          11.74
+    #
+    # MEASURED ON THIS CORRIDOR, 2026-09-08, same 281-pass corpus and the same
+    # protocol as the threshold below (bench/reid_match_eval.py):
+    #
+    #                    old            new
+    #   genuine median   0.700          0.787
+    #   impostor MAX     0.585          0.512
+    #   at 0.677/0.05    15 correct     29 correct, both 0 wrong
+    #
+    # So the operating point did not have to move to keep the same precision -
+    # recall very nearly doubled at it, and the worst impostor fell further
+    # below it. See the threshold note for why it was kept anyway.
     #
     # Empty disables the whole ReID path - the pipeline then behaves exactly as
     # it did before, which is what a deployment without the model should get.
-    reid_model: str = "reid_resnet101_ibn_256x128_e2048_fp16.onnx"
+    #
+    # WARNING: `reid_pass.vector` from the old model is in a different space.
+    # `_match` and the pseudo gallery both filter on `model_name`, so the two
+    # never mix - but passes stored before the swap cannot match passes stored
+    # after it. The changeover belongs on a day boundary.
+    reid_model: str = "reid_osnet_x0_75_256x128_e512_fp16.onnx"
 
     # How often a body crop is kept per person-pass, and the ceiling per pass.
     # 2 s over a median 9.8 s pass is ~5 crops; the cap stops somebody standing
@@ -145,6 +173,20 @@ class Settings(BaseSettings):
     # entrance. In production most unknowns will not, so the impostor rate will
     # be far higher than this sample suggests. Kept conservative until measured
     # against a realistic mix.
+    #
+    # RE-MEASURED 2026-09-08 for the OSNet model, same corpus and protocol:
+    #
+    #   genuine  median 0.787  min 0.486
+    #   impostor MAX    0.512          <- fell from 0.585
+    #   at 0.6769 + margin 0.05:  29 correct, 0 wrong of 69 queries
+    #
+    # The number is UNCHANGED on purpose. A threshold is not transferable
+    # between models and had to be re-derived - but re-deriving it landed in
+    # the same place, because the new model widened the gap on both sides
+    # rather than shifting the scale. Recall at this point went 15 -> 29 for
+    # free. The one thing that did change is the headroom: 0.6769 now sits 0.16
+    # above the worst impostor instead of 0.09, so the same conservatism buys
+    # more than it did.
     reid_match_threshold: float = 0.6769
     # The runner-up must be beaten by this much, for the reason the face
     # matcher has the same rule: the genuine and impostor distributions overlap
@@ -155,6 +197,380 @@ class Settings(BaseSettings):
     # built from one blurred crop is not worth a cross-camera claim.
     reid_min_crops: int = 2
     reid_retention_days: int = 30
+    # Let the FACE break a cross-camera tie the body could not
+    # (`reid_worker._match`).
+    #
+    # MEASURED, this corridor, 281 passes (bench/reid_match_eval.py --sweep):
+    # the runner-up margin costs more than half the correct matches - 55
+    # accepts fall to 29 at 0.6769 - while the wrong count is zero either way.
+    # Those are not impostors being caught. They are passes where two people's
+    # CLOTHING scored alike and the body axis had nothing left to say.
+    #
+    # So when the body is undecided, and only then, the face is asked: among
+    # the candidates that already clear `reid_match_threshold` on body, one
+    # must clear `pseudo_face_threshold` on face and beat the runner-up's face
+    # by `reid_match_margin`. The calibrated accept decision is untouched -
+    # every candidate still has to clear the body bar - so this can only ever
+    # recover a match the margin threw away, never admit a new kind.
+    #
+    # NOT a blended score. The research fusion (global-z blend, w = 0.6,
+    # FNIR@10% 11.59 -> 5.93 over three days, p < 1e-38) was measured under the
+    # ENROLMENT protocol, where the decision is a threshold on the blend. This
+    # is a pairwise link with a runner-up margin, and a z-normalised blend is
+    # not on the scale `reid_match_threshold` was calibrated against. Tried:
+    # blending changed the ranking with no calibrated bar to judge it by, and
+    # since a flipped winner almost never also clears the body margin, it
+    # converted accepts into rejections instead of improving them - a stricter
+    # matcher wearing fusion's name.
+    #
+    # false disables it and restores body-only matching.
+    reid_match_face_tiebreak: bool = True
+
+    # ---- second-chance face recognition, at TRACKLET level ---------------
+    # The live vote judges every FRAME on its own and then requires
+    # `vote_min_recognitions` of them to agree. A pass that yields three good
+    # frames therefore names nobody however clearly each of them scores - the
+    # evidence exists, the rule simply cannot reach it.
+    #
+    # So when a pass ends unnamed, its embedded frames are combined into ONE
+    # quality-weighted template and matched against the same gallery once more.
+    # No new model, no new gallery, no new inference: the embeddings were
+    # already computed on the capture thread and are being thrown away.
+    #
+    # TWO MEASUREMENTS, AND THEY ARE NOT THE SAME MEASUREMENT.
+    #
+    # The research figure (integration/docs/HISOBOT_YUZ_TANA.md, section 4) is
+    # +23...30% more employee passes per day at 97.4% precision. It was made on
+    # stored 320-px body crops with the live quality gates RELAXED, so it says
+    # what a whole-pass template could recover - not what this rule recovers.
+    # THIS rule combines only the frames that already PASSED the gates.
+    #
+    # MEASURED ON THE DEPLOYED RULE, 2026-09-08, by running the real pipeline
+    # over 191 recorded clips of 2026-08-26 (bench/tracklet_recheck_eval.py,
+    # --stride 4, 66 completed passes):
+    #
+    #   agreement with the live vote where it named somebody : 22/22 (100%)
+    #   disagreements, sweeping the threshold 0.20 -> 0.40   : 0 at every point
+    #   recovered from the 38 unnamed passes                 : 2  (+7%)
+    #
+    # So: safe, and worth having, but +7% rather than +23%, on a small sample
+    # of one day. The difference is the gates - `min_aligner_score` rejects
+    # frames before they are ever embedded, so the template never sees them.
+    # Embedding gated frames is the next lever and it is NOT free: it adds work
+    # to a capture thread with a 50 ms budget, so it needs measuring before it
+    # is attempted. Do not quote the research number for this rule.
+    #
+    # Dropping to 0.20 raises recovery 2 -> 5 with still zero disagreements.
+    # Not taken: 0.20 is BELOW the live threshold, which throws away the
+    # stricter-than-live argument below for three passes on one day.
+    #
+    # RECALIBRATED 2026-09-08 ON PRODUCTION: 0.30 -> 0.21.
+    #
+    # 0.30 was chosen on the reasoning that a whole-pass template is a stronger
+    # query than one frame, so it could be held to a HIGHER bar than the live
+    # 0.215. The reasoning was sound and the number was wrong, because it
+    # ignored which gallery the query is compared against.
+    #
+    # THE GALLERY IS TWO POPULATIONS. 270 of its 328 rows are webcam/ID
+    # enrolment photographs; 58 are corridor CCTV crops added by
+    # `app/services/augment.py`, covering 34 of 56 people. Measured over 371
+    # labelled CCTV passes from this corridor:
+    #
+    #                              p10     median    p90
+    #   CCTV query vs WEBCAM row   0.139   0.310    0.505
+    #   CCTV query vs CCTV row     0.256   0.518    0.750
+    #
+    # A CCTV gallery row is worth +0.208 of median similarity. So 0.30 sat
+    # almost exactly ON the median of the webcam-only distribution and threw
+    # away half of those passes by construction - and the 22 people who have
+    # no CCTV row are precisely the ones the second chance exists to recover.
+    #
+    # LOWERING IT COSTS NOTHING MEASURABLE, because `augment_live_floor` pins
+    # the CCTV rows at 0.35 whatever this number is (Gallery._penalty shifts a
+    # row down by its own floor minus the threshold). Dropping the global value
+    # therefore loosens ONLY the webcam rows - exactly the population that needs
+    # it. Measured on 371 labelled passes:
+    #
+    #     thr    recall   precision   webcam-only recall
+    #     0.18   85.7%      98.5%          75.0%
+    #     0.21   83.0%      98.4%          66.7%    <- deployed point
+    #     0.30   79.2%      98.3%          50.0%    <- previous
+    #     0.36   77.9%      99.0%          41.7%
+    #
+    # (the sweep steps in 0.03; 0.215 sits inside the 0.21 row)
+    #
+    # ...and over six days of real unnamed passes (bench/group_calibrate.py,
+    # 9348 passes; "novel" = the named person appears nowhere else in
+    # production's whole day, the shape a false accept takes):
+    #
+    #     thr    known agree/wrong   unknown recovered   corroborated  novel
+    #     0.18       757 / 8              136                128         8
+    #     0.21       732 / 8              116                111         5
+    #     0.30       672 / 7              103                 99         4
+    #
+    # ===================================================================
+    # CORRECTION, 2026-09-08, SAME DAY: this was moved 0.30 -> 0.215 on the
+    # recall evidence below and then MOVED BACK, because the recall evidence
+    # was read at the wrong base rate. The tables are kept in full: they are
+    # correct, and they are what a threshold looks like when it is chosen from
+    # the wrong denominator.
+    #
+    # WHAT WAS MISSING: A FALSE ACCEPT RATE. "Wrong" in the tables below is one
+    # ENROLLED person matched as another; "novel" is a recovered name whose
+    # person appears nowhere else that day. Neither is FAR. FAR is a person who
+    # is NOT in the gallery being given a name, and it is the error that
+    # corrupts attendance.
+    #
+    # MEASURED with leave-one-person-out over 902 labelled CCTV passes: each
+    # probe's own person is deleted from the gallery, so any name returned is a
+    # true false accept (bench/tracklet_far_eval.py).
+    #
+    #     thr      FPIR    genuine recall
+    #     0.18    2.66%        83.9%
+    #     0.215   1.22%        80.6%
+    #     0.24    1.11%        78.0%
+    #     0.27    0.89%        76.2%
+    #     0.30    0.78%        74.5%
+    #
+    # THE PROBE SET IS BALANCED AND PRODUCTION IS NOT. That table has one
+    # impostor per genuine probe. This corridor has about FIFTEEN: over six
+    # days, 1609 unnamed passes carry a usable face and only ~100 of them are a
+    # recoverable employee. The recall gain applies to the small pool and the
+    # FPIR gain to the large one, so the trade inverts:
+    #
+    #     from 0.30    extra genuine   extra false   genuine per false
+    #      -> 0.27         +3.2           +1.8             1.8
+    #      -> 0.24         +3.7           +5.3             0.7
+    #      -> 0.215        +2.9           +7.1             0.4
+    #      -> 0.18         +2.8          +30.2             0.1
+    #
+    # Genuine recoveries SATURATE around 94 whatever the threshold; below 0.27
+    # the only thing a lower bar buys is wrong attendance rows. This is the
+    # same base-rate argument app/services/pseudo_gallery.py makes for never
+    # naming anybody by body, and it was not applied here until FAR was
+    # actually measured.
+    #
+    # 0.30 rather than 0.27: 0.27 is defensible at 1.8 genuine per false, but
+    # only if a wrong row costs less than 1.8 missed ones. Everything else in
+    # this system is built on a false accept costing FAR more than a miss - a
+    # miss is seen again on the next pass, a wrong name is not revealed by
+    # anything in the data - so the ratio has to be much larger than that to be
+    # worth taking.
+    #
+    # THE REAL FIX FOR THE DOMAIN GAP IS NOT THIS NUMBER. It is giving the
+    # people who have only webcam enrolment photographs a CCTV gallery row -
+    # `scripts/augment_gallery.py`. Those rows carry their own 0.35 floor, so
+    # they raise recall for exactly the people who need it WITHOUT loosening
+    # anything for anybody else, which is the property this threshold does not
+    # have.
+    # ===================================================================
+    #
+    # The argument for 0.215, kept because it is where the reasoning went wrong:
+    # 0.215 rather than 0.18: it is EXACTLY the live per-frame bar for this
+    # recognizer (`recognizer_thresholds["adaface_ir101_finetune_fp16.onnx"]`),
+    # so the second chance never accepts a similarity the live matcher would
+    # reject. All it adds is whole-pass aggregation and the runner-up margin -
+    # a claim that needs no calibration of its own to defend, which matters for
+    # a rule that writes attendance. 0.18 is measured, is better on recall
+    # (+20 recovered passes over six days for +3 novel names), and is there to
+    # take; it just cannot be justified without leaning on this corpus alone.
+    #
+    # IF THE RECOGNIZER CHANGES, THIS MOVES WITH IT. It is written as a literal
+    # rather than read from `threshold_for()` so that a model swap cannot
+    # silently re-point it - the same reason `recognizer_thresholds` is a table
+    # and not a formula - but it is not independent, and a new recognizer needs
+    # both re-derived together.
+    #
+    # Precision was 98-100% in EVERY bucket of face size and evidence volume at
+    # 0.18, including passes with an inter-pupil distance under 20 px. The only
+    # errors, five of them, were passes whose crops contain TWO PEOPLE walking
+    # together - inspected by eye - and they score 0.42-0.54, so they are
+    # present at every threshold and are a track-purity problem, not this one.
+    #
+    # Empty/0.0 disables the second chance entirely.
+    tracklet_face_threshold: float = 0.30
+    # The runner-up PERSON must be beaten by this much, exactly as in the live
+    # matcher and for the same reason - a top score alone does not distinguish
+    # "this person" from "somebody who resembles two people equally".
+    tracklet_face_margin: float = 0.05
+    # A template built from a single frame is that frame, and the live path has
+    # already judged it. Two is the smallest number that makes this a different
+    # question from the one already answered.
+    tracklet_min_face_frames: int = 2
+
+    # ---- pseudo-person grouping (unregistered people) --------------------
+    # A person who is not enrolled still walks past repeatedly. Without this
+    # every one of their passes is an independent "unknown" and the system
+    # cannot say whether it saw one visitor five times or five visitors once.
+    #
+    # So an unnamed pass is attached to a stable pseudo-identity (P-000123)
+    # built from its FACE and BODY features, and the next pass of the same
+    # person joins the same one.
+    #
+    # VALIDATED ON PRODUCTION, held-out days Thu 09-03, Sun 09-06, Mon 09-07,
+    # each setting run ONCE, labelled passes scored inside the day's real crowd
+    # (bench/group_distractor_eval.py):
+    #
+    #                  precision  recall    F1    count error  pseudo-people
+    #   0.35 / 0.75      88.0%    51.0%   64.3%      +103%         2963
+    #   0.30 / 0.60      84.6%    70.7%   76.1%       +55%         1860
+    #
+    # Over those three days: 4949 unknown passes become 1860 pseudo-people
+    # instead of 2963 - 62% fewer rows for an operator to review rather than
+    # 40% - and the distinct-person count is roughly twice as accurate.
+    #
+    # The research figures below are kept because they are what the design came
+    # from; the numbers above are what this deployment measured.
+    #
+    # MEASURED over three days and ~4200 unnamed passes
+    # (integration/docs/INTEGRATSIYA.md, section 3.3):
+    #
+    #   mode          pair precision  pair recall  pseudo-people  count error
+    #   body alone        91-94%        3.5-7.6%     563/803/607    126-198%
+    #   face alone        90-98%        23-31%      999/1240/1037     9-23%
+    #   face + body       90-98%        29-32%       499/695/520      8-26%
+    #
+    # Which is why BOTH are used and why FACE LEADS. Body alone cannot regroup
+    # anybody: two strangers in similar clothing out-score one person seen
+    # twice. Face is clothing-independent and works across days; body's whole
+    # contribution is linking the passes that have no usable face at all, and
+    # it halves the number of pseudo-people by doing so.
+    #
+    # Honest limit: recall is ~30%, so one person's passes still split into
+    # about three groups. The cause is not the model - only 23-28% of passes
+    # contain a face with an inter-pupil distance of 20 px or more. That is a
+    # camera-geometry ceiling, and it is why this is good enough for counting
+    # distinct visitors and NOT good enough for attendance.
+    pseudo_person: bool = True
+    # Attaching a pass to an existing pseudo-person by FACE.
+    #
+    # ===================================================================
+    # CORRECTION, 2026-09-08, SAME DAY: moved 0.35 -> 0.30 and then BACK.
+    # The calibration below is real but it was run on the wrong features, and
+    # the record of that is more useful than a clean-looking number.
+    #
+    # IT WAS CALIBRATED ON STORED 320-px BODY CROPS. Production does not build
+    # face templates from those: `CameraWorker` builds them from the FULL 4K
+    # frame on the capture thread. Replaying real footage through the real
+    # pipeline (bench/replay_prod_day.py) showed how far apart those are:
+    #
+    #     usable face (ipd >= 20) in stored 320-px crops :  23.5% of passes
+    #     usable face in real 4K frames                  :  72%   of passes
+    #
+    # Three times the coverage and much higher quality, so the similarity
+    # distributions the threshold sits in are not the same distributions. A
+    # threshold fitted to degraded features lands too LOW, and it did.
+    #
+    # ON 4K FEATURES the grouping sweep is flat in precision across face
+    # 0.30-0.40 (82.6-83.3%) and the count accuracy improves as the threshold
+    # rises. That comparison is circular with respect to the face threshold -
+    # the truth is face clusters at 0.45 - so it cannot SELECT the value, and
+    # it cannot confirm 0.30 either. With the evidence for 0.30 undermined and
+    # nothing production-quality to replace it, this goes back to the
+    # research-validated 0.35. Grouping writes no attendance, so the cost of
+    # being conservative here is a slightly higher visitor count, not a wrong
+    # timesheet.
+    #
+    # TO SETTLE IT PROPERLY: the replay needs to keep the face templates of the
+    # passes it NAMES, which carry real identities and 4K quality at once. That
+    # is the one measurement that would be both production-representative and
+    # non-circular, and it does not exist yet.
+    # ===================================================================
+    #
+    # The calibration that argued for 0.30, kept for the record:
+    # RECALIBRATED 2026-09-08 ON PRODUCTION: 0.35 -> 0.30.
+    #
+    # This threshold and `tracklet_face_threshold` are NOT on the same scale
+    # and must never be tuned together. That one compares a CCTV pass against a
+    # gallery of mostly WEBCAM photographs; this one compares a CCTV pass
+    # against another CCTV pass, and same-domain pairs score about 0.2 higher
+    # (see the note on tracklet_face_threshold). A single number for both would
+    # be too strict for one and too loose for the other.
+    #
+    # HOW IT WAS MEASURED, and why the obvious measurement is worthless. The
+    # tempting truth for grouping unknowns is "connected components of face
+    # similarity >= 0.45", which is what the research used. Scored that way,
+    # this rule is graded against a relabelling of its own output: at a
+    # grouping threshold of 0.45 its precision is 100% BY CONSTRUCTION, and
+    # every step toward 0.45 looks like progress. Swept on it, the grid asks
+    # for 0.43. Swept on real identities it asks for 0.30. Only one of those is
+    # measuring anything.
+    #
+    # So the grid was searched on `data/persons/known/`, where the label is the
+    # identity the face path assigned at the time and owes nothing to this
+    # rule - and with the whole day's real crowd loaded into the gallery as
+    # distractors, because 200 labelled passes over 30 people is not the
+    # population a threshold meets in production (bench/group_distractor_eval.py).
+    #
+    # Calibration days Wed 09-02, Fri 09-04, Sat 09-05 - two weekdays and one
+    # weekend day, because this corridor's weekend is a DIFFERENT population
+    # (the face path names 12% of passes on a weekday and 2.4% on a Sunday).
+    pseudo_face_threshold: float = 0.35
+    # ...and by BODY, which is the fallback for a pass with no usable face.
+    #
+    # ===================================================================
+    # CORRECTION, 2026-09-08, SAME DAY: moved 0.75 -> 0.60 and then BACK, on
+    # evidence that is NOT circular and is therefore the one to believe.
+    #
+    # The truth used for grouping is built from FACES only, so comparing two
+    # BODY thresholds at a fixed face threshold measures the body rule against
+    # a yardstick it had no part in making. Run on real 4K features
+    # (bench/replay_prod_day.py, 160 unnamed passes, 46 face-truth people):
+    #
+    #     face   body   pseudo-people   pair precision
+    #     0.30   0.60        50             71.6%
+    #     0.30   0.75        67             82.8%
+    #     0.35   0.60        56             75.3%
+    #     0.35   0.75        75             82.6%
+    #
+    # Body 0.60 costs ELEVEN POINTS of precision at the same recall - it merges
+    # strangers who happen to be dressed alike, which is the exact failure the
+    # research says body similarity is prone to. The sweep that recommended
+    # 0.60 ran on stored 320-px crops, where only 23.5% of passes carry a
+    # usable face against 72% on 4K, so body was carrying far more of the
+    # grouping than it ever does in production and its errors were hidden
+    # behind a face-poor population.
+    # ===================================================================
+    #
+    # The calibration that argued for 0.60, kept for the record:
+    # RECALIBRATED 2026-09-08 ON PRODUCTION: 0.75 -> 0.60.
+    #
+    # 0.75 was carried over from the research corpus on the argument that this
+    # matches against every pseudo-person alive today rather than one other
+    # camera's handful, so the impostor pool is larger. The argument is right
+    # and 0.75 was still far too strict: with the day's real crowd as
+    # distractors, F1 peaks at 0.60 and precision only starts falling below it.
+    #
+    #   face 0.30, distractor-aware, calibration days:
+    #     body   precision  recall    F1     count error
+    #     0.45     79.7%    83.8%   81.5%       +17%
+    #     0.50     81.5%    83.9%   82.5%       +19%
+    #     0.55     84.4%    80.0%   82.0%       +26%
+    #     0.60     88.8%    80.0%   84.2%       +33%   <- peak
+    #     0.65     89.3%    77.6%   83.0%       +50%
+    #     0.75     89.2%    72.3%   79.8%       +74%
+    #
+    # Every setting still OVER-splits (positive count error), so this is not a
+    # trade of counting accuracy against safety - 0.60 is better on both.
+    pseudo_body_threshold: float = 0.75
+    pseudo_body_margin: float = 0.05
+    # "A usable face" - inter-pupil distance in pixels on the source frame.
+    # Below this the face embedding is a source of WRONG links rather than a
+    # weak one, so it is discarded and the pass falls through to body.
+    pseudo_face_ipd_min: float = 20.0
+    # Templates kept per pseudo-person, per modality: a ring buffer, newest
+    # wins. One averaged template blurs a person seen in two outfits; keeping
+    # every template makes the store grow without bound.
+    pseudo_templates_k: int = 5
+    # A pseudo-person's BODY templates are discarded when the business date
+    # rolls over, because clothing changes overnight and a stale body template
+    # links two different people wearing the same coat. Face templates are
+    # kept: a face is the same face tomorrow.
+    pseudo_body_same_day_only: bool = True
+    # How far back the pseudo gallery looks for candidates. A visitor who has
+    # not appeared in this many days starts a new pseudo-identity rather than
+    # keeping the matching cost growing forever.
+    pseudo_active_days: int = 30
     # Body crops live under data/, NOT media/. media/ is a public StaticFiles
     # mount, and these are images of unidentified people.
     persons_dir: Path = ROOT / "data" / "persons"

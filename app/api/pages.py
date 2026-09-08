@@ -23,7 +23,8 @@ from starlette.formparsers import FormParser, MultiPartException, MultiPartParse
 
 from app.config import settings
 from app.db.models import (
-    Camera, DailyAttendance, Employee, FaceEmbedding, PresenceStatus, RecognitionEvent, UnknownSighting,
+    Camera, DailyAttendance, Employee, FaceEmbedding, PresenceStatus,
+    PseudoPerson, RecognitionEvent, ReidPass, UnknownSighting,
 )
 from app.db.session import session_scope
 from app.runtime import runtime
@@ -780,6 +781,56 @@ def attendance_history(request: Request):
     return attendance_list(request)
 
 
+def _pseudo_for(s, sightings) -> dict[int, dict]:
+    """Which pseudo-person each unknown sighting belongs to, if any.
+
+    THE JOIN IS BY (camera, track, day) AND NOT BY ANYTHING BETTER, because
+    there is nothing better: `unknown_sighting` and `reid_pass` are written by
+    two different threads from the same completed track and share no key. That
+    pair is unique within a business date except across a `tracker.reset()`,
+    which restarts the counter - so the candidate whose `last_seen` is nearest
+    wins, and a candidate more than a few minutes away is not used at all. A
+    wrong group shown next to a face is worse than no group.
+
+    Returns {sighting_id: {code, n_passes, employee_id, name, by}}.
+    """
+    if not sightings:
+        return {}
+    keys = {(u.camera_id, u.track_id) for u in sightings}
+    days = {u.business_date for u in sightings}
+    rows = s.execute(
+        select(ReidPass, PseudoPerson)
+        .join(PseudoPerson, PseudoPerson.id == ReidPass.pseudo_person_id)
+        .where(ReidPass.business_date.in_(days),
+               ReidPass.camera_id.in_({c for c, _t in keys}),
+               ReidPass.track_id.in_({t for _c, t in keys}))
+    ).all()
+    if not rows:
+        return {}
+    by_key: dict[tuple, list] = {}
+    for r, pp in rows:
+        by_key.setdefault((r.camera_id, r.track_id), []).append((r, pp))
+
+    names = dict(s.execute(
+        select(Employee.id, Employee.full_name).where(
+            Employee.id.in_({pp.employee_id for _r, pp in rows
+                             if pp.employee_id is not None} or {-1}))).all())
+    out: dict[int, dict] = {}
+    for u in sightings:
+        cand = by_key.get((u.camera_id, u.track_id))
+        if not cand:
+            continue
+        r, pp = min(cand, key=lambda x: abs(
+            (x[0].last_seen - u.last_seen).total_seconds()))
+        if abs((r.last_seen - u.last_seen).total_seconds()) > 180:
+            continue
+        out[u.id] = {"code": pp.code, "n_passes": pp.n_passes or 0,
+                     "employee_id": pp.employee_id,
+                     "name": names.get(pp.employee_id or -1, ""),
+                     "by": r.pseudo_by or ""}
+    return out
+
+
 @router.get("/attendance/unknown", response_class=HTMLResponse)
 def attendance_unknown(request: Request, show: str = "open", msg: str = "",
                        error: str = ""):
@@ -799,6 +850,7 @@ def attendance_unknown(request: Request, show: str = "open", msg: str = "",
             select(Employee.id, Employee.full_name)
             .where(Employee.is_active.is_(True))
             .order_by(Employee.full_name)).all())
+        groups = _pseudo_for(s, rows)
         attempts = [{
             "id": u.id, "camera_id": u.camera_id, "attempt_count": u.frames,
             "first_seen": u.first_seen.astimezone(settings.tz),
@@ -809,6 +861,12 @@ def attendance_unknown(request: Request, show: str = "open", msg: str = "",
             "resolved_name": names.get(u.resolved_employee_id or -1, ""),
             "resolved_by": u.resolved_by or "",
             "has_vector": u.vector is not None,
+            # Which pseudo-person this face was grouped into, so a reviewer
+            # sees "this is the fourth time we have seen this person" instead
+            # of one anonymous card among a hundred. It is a HINT and is
+            # labelled as one: the grouping recalls about 30% of a person's
+            # passes, so a card with no group is not evidence of a first visit.
+            "pseudo": groups.get(u.id),
             "latest_record": {"snapshot": {"url": media_path(u.snapshot) if u.snapshot else None}},
         } for u in rows]
     return render("attendance/unknown.html", request=request, current_view="attendance:unknown",

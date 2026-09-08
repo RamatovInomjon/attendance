@@ -58,21 +58,33 @@ def build(ckpt_path: Path):
             raise SystemExit(f"  checkpoint is missing {key!r}; not a ReIDNet export")
     arch, h, w = ck["arch"], int(ck["height"]), int(ck["width"])
     emb, ncls = int(ck.get("embed_dim", 512)), int(ck["num_classes"])
+    sd = ck["model"]
+
+    # WHICH TRAINING HEAD, inferred from the weights when the checkpoint does
+    # not say. The head takes no part in inference - the exported graph reads
+    # the BNNeck feature - but it must be CONSTRUCTIBLE, or its `head.*` keys
+    # come back "unexpected" and the strict check below refuses a checkpoint
+    # that is perfectly fine. That is exactly what happened to the OSNet model:
+    # the vendored definition predated circle and AdaFace, so it had to be
+    # exported out of band by the research tree.
+    head = ck.get("head") or ("adaface" if "head.batch_mean" in sd
+                              else "circle" if "head.weight" in sd
+                              else "softmax")
 
     # pretrained=False as well as init="none": the osnet branch would otherwise
     # try to fetch ImageNet weights it is about to overwrite.
     net = ReIDNet(arch, num_classes=ncls, embed_dim=emb, init="none",
-                  pretrained=False)
-    missing, unexpected = net.load_state_dict(ck["model"], strict=False)
+                  pretrained=False, head=head)
+    missing, unexpected = net.load_state_dict(sd, strict=False)
     if missing or unexpected:
         raise SystemExit(
-            f"  state_dict does not fit the rebuilt graph:\n"
+            f"  state_dict does not fit the rebuilt graph (head={head}):\n"
             f"    missing:    {list(missing)[:6]}\n"
             f"    unexpected: {list(unexpected)[:6]}\n"
             f"  the vendored model definition is out of step with the checkpoint.")
     net.eval()
     return net, {"arch": arch, "height": h, "width": w,
-                 "embed_dim": emb, "epoch": ck.get("epoch")}
+                 "embed_dim": emb, "head": head, "epoch": ck.get("epoch")}
 
 
 def preprocess(crops_bgr, h: int, w: int) -> np.ndarray:

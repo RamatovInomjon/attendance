@@ -7,8 +7,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # osnet.py va resnet_ibn_a.py deep-person-reid dan ko'chirilgan (vendor/ ichida)
-from vendor.osnet import osnet_x0_25, osnet_x0_5, osnet_x0_75, osnet_x1_0
+from vendor.osnet import (osnet_x0_25, osnet_x0_5, osnet_x0_75, osnet_x1_0,
+                          osnet_ibn_x1_0, ChannelGate)
 from vendor.resnet_ibn_a import resnet50_ibn_a, resnet101_ibn_a
+from boshlar import BOSHLAR
 
 
 # --------------------------------------------------------------------------- #
@@ -91,13 +93,25 @@ class ReIDNet(nn.Module):
         "osnet_x0_5": osnet_x0_5,
         "osnet_x0_75": osnet_x0_75,
         "osnet_x1_0": osnet_x1_0,
+        # OSNet + InstanceNorm. IBN aynan DOMEN UMUMLASHTIRISH uchun
+        # (Pan va b., ECCV 2018): ochiq manbada o'qitib, o'z kameralarimizda
+        # ishlatish -- bizning asosiy muammomiz.
+        "osnet_ibn_x1_0": osnet_ibn_x1_0,
         "resnet50_ibn": resnet50_ibn_a,
         "resnet101_ibn": resnet101_ibn_a,
+        # ResNet101-IBN + OSNet ning ChannelGate i (SE uslubidagi e'tibor).
+        # Bloklar ichiga TEGILMAYDI, darvozalar bosqichlar ORASIGA
+        # qo'yiladi -- shu sababli barcha oldindan o'qitilgan vaznlar
+        # o'z joyida qoladi (o'lchangan: init 10 punktgacha ta'sir qiladi).
+        "resnet101_ibn_se": resnet101_ibn_a,
     }
+
+    # `_se` variantlari vazn fayllarini asosiy arxitektura nomi bilan qidiradi
+    ASOS = {"resnet101_ibn_se": "resnet101_ibn"}
 
     def __init__(self, arch: str, num_classes: int, last_stride: int = 1,
                  pretrained: bool = True, embed_dim: int = 0,
-                 init: str = "imagenet"):
+                 init: str = "imagenet", head: str = "softmax"):
         """embed_dim > 0 bo'lsa, barcha arxitekturalar UMUMIY o'lchamli
         embeddingga proyeksiya qilinadi. Bu sig'im o'qini embedding
         o'lchamidan ajratadi -- aks holda taqqoslash nazorat ostida bo'lmaydi
@@ -107,6 +121,7 @@ class ReIDNet(nn.Module):
             raise ValueError(f"noma'lum arxitektura: {arch}")
         fn = self.ARCH[arch]
         self.arch = arch
+        asos = self.ASOS.get(arch, arch)      # vazn fayli uchun
 
         if arch.startswith("osnet"):
             net = fn(num_classes=1000, pretrained=pretrained, loss="triplet")
@@ -116,14 +131,27 @@ class ReIDNet(nn.Module):
             )
         else:
             net = fn(num_classes=1000, loss="triplet", pretrained=False)
-            self.init_report = load_backbone_weights(net, arch, init)
+            self.init_report = load_backbone_weights(net, asos, init)
             if last_stride == 1:      # ReID uchun oxirgi bosqich qadamini 1 ga tushirish
                 net.layer4[0].conv2.stride = (1, 1)
                 net.layer4[0].downsample[0].stride = (1, 1)
-            self.backbone = nn.Sequential(
-                net.conv1, net.bn1, net.relu, net.maxpool,
-                net.layer1, net.layer2, net.layer3, net.layer4,
-            )
+            qatlamlar = [net.conv1, net.bn1, net.relu, net.maxpool,
+                         net.layer1, net.layer2, net.layer3, net.layer4]
+            if arch.endswith("_se"):
+                # Darvoza har bosqichdan KEYIN qo'yiladi va boshlanishida
+                # AYNIYATGA yaqin bo'ladi: fc2 vazni nol, siljishi +4 ->
+                # sigmoid(4)=0.982. Shunda oldindan o'qitilgan tarmoq
+                # xatti-harakati buzilmaydi, darvoza esa o'qish davomida
+                # undan uzoqlashishi mumkin.
+                kan = [256, 512, 1024, 2048]
+                yangi = qatlamlar[:4]
+                for i, l in enumerate(qatlamlar[4:]):
+                    g = ChannelGate(kan[i])
+                    nn.init.zeros_(g.fc2.weight); nn.init.constant_(g.fc2.bias, 4.0)
+                    yangi += [l, g]
+                qatlamlar = yangi
+                self.init_report += " | +4 ChannelGate (ayniyatga yaqin)"
+            self.backbone = nn.Sequential(*qatlamlar)
 
         self.gap = nn.AdaptiveAvgPool2d(1)
         # chiqish o'lchamini sinov tenzori bilan aniqlaymiz
@@ -145,15 +173,27 @@ class ReIDNet(nn.Module):
         self.bottleneck = nn.BatchNorm1d(feat_dim)
         self.bottleneck.bias.requires_grad_(False)      # BNNeck: siljishsiz
         self.bottleneck.apply(_weights_init_kaiming)
-        self.classifier = nn.Linear(feat_dim, num_classes, bias=False)
-        self.classifier.apply(_weights_init_kaiming)
+        # `softmax` -- hozirgi tuzilish AYNAN saqlanadi, aks holda mavjud
+        # 27 ta nazorat nuqtasi `classifier.weight` kalitisiz yuklanmaydi.
+        # Boshqa boshlar o'z parametrlarini `self.head` ichida saqlaydi.
+        self.head_nomi = head
+        if head == "softmax":
+            self.classifier = nn.Linear(feat_dim, num_classes, bias=False)
+            self.classifier.apply(_weights_init_kaiming)
+            self.head = None
+        else:
+            self.head = BOSHLAR[head](feat_dim, num_classes)
+            self.classifier = None
 
     def forward(self, x: torch.Tensor):
         f = self.reduce(self.gap(self.backbone(x)).flatten(1))  # triplet uchun (BN dan oldin)
         fb = self.bottleneck(f)                     # inferens/tasniflash uchun
         if not self.training:
             return F.normalize(fb, dim=1)
-        return f, self.classifier(fb)
+        # DIQQAT: o'qitishda endi (f, fb) qaytadi, logits emas. Sabab:
+        # Circle va AdaFace marginlari YORLIQQA bog'liq, shuning uchun
+        # logitsni bosh o'zi hisoblashi kerak.
+        return f, fb
 
 
 # --------------------------------------------------------------------------- #

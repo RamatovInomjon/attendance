@@ -59,7 +59,32 @@
                     <div><dt>Birinchi ko'rilgan</dt><dd>{% if attempt.first_seen %}{{ attempt.first_seen|date("d M Y") }} {{ attempt.first_seen|time("H:i:s") }}{% else %}Mavjud emas{% endif %}</dd></div>
                     <div><dt>Oxirgi ko'rilgan</dt><dd>{% if attempt.last_seen %}{{ attempt.last_seen|date("d M Y") }} {{ attempt.last_seen|time("H:i:s") }}{% else %}Mavjud emas{% endif %}</dd></div>
                     <div><dt>Kadrlar soni</dt><dd>{{ attempt.attempt_count|default(0) }} ta</dd></div>
+                    {% if attempt.pseudo %}
+                    <div>
+                      <dt>Guruh</dt>
+                      <dd>
+                        <span class="status-chip">{{ attempt.pseudo.code }}</span>
+                        {% if attempt.pseudo.n_passes > 1 %}
+                        <span class="text-muted">· {{ attempt.pseudo.n_passes }} ta o'tish</span>
+                        {% endif %}
+                        {% if attempt.pseudo.name %}
+                        <span class="status-chip status-chip--success">{{ attempt.pseudo.name }}</span>
+                        {% endif %}
+                      </dd>
+                    </div>
+                    {% endif %}
                 </dl>
+                {% if attempt.pseudo %}
+                {# Taxminiy guruh: yuz va tana xususiyatlari bo'yicha bir odamga
+                   biriktirilgan o'tishlar. O'lchangan qaytarish ~30 % - ya'ni
+                   guruh ko'rsatilmagani "birinchi marta ko'rildi" degani EMAS,
+                   va guruh davomatga hech narsa yozmaydi. #}
+                <p class="text-muted small mb-0">
+                  Yuz/tana bo'yicha taxminiy guruh
+                  ({{ 'yuz' if attempt.pseudo.by == 'face' else ('tana' if attempt.pseudo.by == 'body' else 'yangi') }}).
+                  Davomatga yozilmaydi.
+                </p>
+                {% endif %}
                 <button class="btn btn-outline-primary btn-sm" type="button" data-airi-evidence
                     data-evidence-src="{{ snapshot or '' }}" data-evidence-title="Noma'lum #{{ attempt.id }}"
                     data-evidence-subtitle="Umumiy dalil ko'rinishi">Dalilni ko'rish</button>

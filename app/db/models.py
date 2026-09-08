@@ -311,11 +311,34 @@ class ReidPass(Base):
     vector = Column(LargeBinary, nullable=True)  # tracklet feature, float32
     dim = Column(Integer, default=0)
     model_name = Column(String(128), default="")
+    # The FACE template of the same pass: one quality-weighted vector over
+    # every frame that cleared the gates, in the recognizer's space, not the
+    # ReID model's. Stored beside the body feature because the two together are
+    # what group an unregistered person - face across days, body within one -
+    # and because cross-camera matching fuses them (`reid_worker._match`).
+    #
+    # NULL for a pass with no usable face, which is 27% of them.
+    face_vector = Column(LargeBinary, nullable=True)
+    face_dim = Column(Integer, default=0)
+    # Inter-pupil distance of the best frame, source pixels. Below
+    # `pseudo_face_ipd_min` the face vector is kept for the record but is NOT
+    # used to link anything: a small face links the WRONG people rather than
+    # linking weakly.
+    face_ipd = Column(Float, default=0.0)
+    face_frames = Column(Integer, default=0)
     # Cross-camera link. Both halves of a matched pair point at each other, so
     # either row answers "where else was this person seen".
     matched_pass_id = Column(Integer, nullable=True, index=True)
     match_score = Column(Float, default=0.0)
     match_margin = Column(Float, default=0.0)
+    # Which pseudo-identity this pass was grouped into, if any. See
+    # `PseudoPerson`. NULL for a named pass - an employee already has an
+    # identity - and for an unnamed pass the grouping declined to place.
+    pseudo_person_id = Column(Integer, ForeignKey("pseudo_person.id",
+                                                  ondelete="SET NULL"),
+                              nullable=True, index=True)
+    pseudo_score = Column(Float, default=0.0)
+    pseudo_by = Column(String(8), default="")     # face | body | new
     created_at = Column(UtcDateTime(), default=utcnow)
 
     __table_args__ = (
@@ -324,6 +347,82 @@ class ReidPass(Base):
               "matched_pass_id"),
         UniqueConstraint("camera_id", "track_id", "first_seen",
                          name="uq_reid_pass_key"),
+    )
+
+
+class PseudoPerson(Base):
+    """A person the system keeps track of without knowing who they are.
+
+    Somebody who is not enrolled still walks past this corridor repeatedly.
+    Without this every one of their passes is an independent "unknown", and the
+    system cannot tell one visitor seen five times from five visitors seen
+    once - which is the difference between a visitor count and a pass count.
+
+    So each unnamed pass is attached to a stable pseudo-identity (`P-000123`),
+    and the next pass of the same person joins the same one. Two features are
+    used, and the order matters:
+
+    * **FACE leads.** It is independent of clothing and therefore works across
+      days. Measured over three days and ~4200 unnamed passes: pair precision
+      90-98%, recall 23-31%.
+    * **BODY backs it up**, and ONLY within a business date. Clothing changes
+      overnight, so a body template from yesterday links whoever is wearing a
+      similar coat today. Body alone regroups almost nothing (recall 3.5-7.6%,
+      and a 126-198% error in the distinct-person count) - two strangers
+      dressed alike out-score one person seen twice. What body contributes is
+      linking the passes that have no usable face at all, and that halves the
+      number of pseudo-people (999 -> 499 on one day).
+
+    See integration/docs/INTEGRATSIYA.md section 3 for the full measurement.
+
+    A PSEUDO-PERSON NEVER BECOMES AN EMPLOYEE BY BODY. `employee_id` is filled
+    in only when a FACE template matches the enrolment gallery, because the
+    base rate here is brutal: of roughly 1100 unknown tracks a day only ~45 are
+    a recoverable employee, so a body rule at 5% error on visitors still writes
+    more wrong attendance rows than right ones. Measured, at every threshold
+    tried (integration/docs/HISOBOT_YUZ_TANA.md, section 5).
+
+    Templates are RING BUFFERS rather than a running mean: averaging blurs a
+    person seen in two outfits or two lighting conditions into something that
+    resembles everybody slightly, which is the same failure the ReID tracklet
+    aggregation's quality weighting exists to avoid.
+    """
+    __tablename__ = "pseudo_person"
+
+    id = Column(Integer, primary_key=True)
+    code = Column(String(16), unique=True, index=True)      # 'P-000123'
+    # Filled in when a face template matches the enrolment gallery. Naming a
+    # pseudo-person does NOT write attendance - the passes it already collected
+    # were not observed with an identity, and authoring history from a later
+    # inference is exactly the fabrication app/services/corrections.py refuses.
+    # It relabels the group so an operator can see what happened.
+    employee_id = Column(Integer, ForeignKey("employee.id", ondelete="SET NULL"),
+                         nullable=True, index=True)
+    named_score = Column(Float, default=0.0)
+    named_at = Column(UtcDateTime(), nullable=True)
+    first_seen = Column(UtcDateTime(), default=utcnow)
+    last_seen = Column(UtcDateTime(), default=utcnow, index=True)
+    n_passes = Column(Integer, default=0)
+    # K x D float32, concatenated. The dimension is stored beside each so a
+    # model change is detectable rather than silently reinterpreted - the same
+    # reason `reid_pass.model_name` exists.
+    face_templates = Column(LargeBinary, nullable=True)
+    face_dim = Column(Integer, default=0)
+    body_templates = Column(LargeBinary, nullable=True)
+    body_dim = Column(Integer, default=0)
+    # The ReID model the body templates came from. Body features from two
+    # models compare SUCCESSFULLY - same norm, same range, plausible cosines -
+    # and are meaningless. A pseudo-person whose body model no longer matches
+    # is matched on face alone until it collects new body templates.
+    body_model = Column(String(128), default="")
+    # The business date the body templates were collected on. Older than today
+    # and they are ignored: see the class note on clothing.
+    body_date = Column(Date, nullable=True)
+    created_at = Column(UtcDateTime(), default=utcnow)
+
+    __table_args__ = (
+        # The candidate scan: recently-seen pseudo-people, newest first.
+        Index("ix_pseudo_last_seen", "last_seen"),
     )
 
 

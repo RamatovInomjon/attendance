@@ -64,11 +64,24 @@ class PendingPass:
     track: Any                  # CompletedTrack
     snapshot: str | None
     camera_name: str = ""
+    # Which rule named this pass: "live" for the per-frame consensus vote,
+    # "tracklet" for the second-chance whole-pass template. See `strength`.
+    source: str = "live"
 
     @property
     def strength(self) -> tuple:
-        """More agreeing frames first, then the better score."""
-        return (int(self.track.embedded_frames), float(self.track.best_score))
+        """Live consensus first, then more agreeing frames, then better score.
+
+        The source term leads because the two rules are not the same quality of
+        evidence and comparing their frame counts would pretend they are. A
+        live commit means `vote_min_recognitions` frames independently agreed;
+        a tracklet recovery means one combined query cleared a threshold. When
+        one camera has each of a person's two views, the live one is the pass
+        whose snapshot and score should be the group's - and, more importantly,
+        it is the one whose direction evidence is worth more.
+        """
+        return (0 if self.source == "tracklet" else 1,
+                int(self.track.embedded_frames), float(self.track.best_score))
 
     @property
     def verdict(self) -> str | None:

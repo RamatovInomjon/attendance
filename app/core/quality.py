@@ -33,6 +33,17 @@ class Quality:
     score: float          # combined, higher is better
     ok: bool
     reason: str = ""
+    # Inter-pupil distance in SOURCE pixels, from the two eye landmarks. Not a
+    # gate and not part of `score`: it is carried because it is the sharpest
+    # available measure of how much face there actually was, and the
+    # tracklet-level template weights frames by it (app/core/pipeline.py).
+    #
+    # face_px is the DETECTOR BOX and cannot stand in for it - a box grows with
+    # hair, a hood and a turned head while the usable face shrinks. Measured on
+    # this corridor, only 23-28% of passes contain a frame with ipd >= 20, and
+    # that fraction - not the model - is what caps how often an unregistered
+    # person's passes can be regrouped.
+    ipd: float = 0.0
 
 
 def estimate_pose(landmarks: np.ndarray) -> tuple[float, float, float]:
@@ -88,6 +99,7 @@ def assess(
     face_px = float(max(box[2] - box[0], box[3] - box[1]))
     sharp = sharpness_of(aligned_chw)
     yaw, pitch, roll = estimate_pose(landmarks)
+    ipd = float(np.linalg.norm(landmarks[1][:2] - landmarks[0][:2]))
 
     reason = ""
     if face_px < min_face_px:
@@ -108,4 +120,4 @@ def assess(
     combined = size_t * (0.35 + 0.65 * sharp_t) * (0.25 + 0.75 * front_t) * max(aligner_score, 0.0)
 
     return Quality(face_px, sharp, yaw, pitch, roll, aligner_score,
-                   combined, reason == "", reason)
+                   combined, reason == "", reason, ipd)
