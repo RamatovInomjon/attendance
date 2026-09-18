@@ -262,3 +262,56 @@ class TestFilters:
                    presence=PresenceStatus.OUTSIDE)
         with session_scope() as s:
             assert timesheet.totals(s, OTHER, OTHER) == []
+
+
+class TestCappingThePhotosDoesNotCapTheHours:
+    def test_passes_start_narrows_only_the_evidence_strip(self, person):
+        """The drill-down caps thumbnails at a month. Capping the DAYS too would
+        recompute the hours over a shorter period than the filter asked for, so
+        the page would disagree with the Tabel list while telling the reader
+        only the images had been limited."""
+        old, recent = date(2026, 3, 1), date(2026, 5, 11)
+        with session_scope() as s:
+            _daily(s, person, old, worked_seconds=8 * 3600, status="PRESENT",
+                   presence=PresenceStatus.OUTSIDE)
+            _daily(s, person, recent, worked_seconds=8 * 3600, status="PRESENT",
+                   presence=PresenceStatus.OUTSIDE)
+            _event(s, person, _utc(old, 9), "CHECK_IN", business_date=old)
+            _event(s, person, _utc(recent, 9), "CHECK_IN", business_date=recent)
+
+        with session_scope() as s:
+            days = timesheet.day_rows_with_passes(
+                s, person, old, recent, passes_start=recent)
+            by_date = {d.date: d for d in days}
+            # Both days are still reported, with their hours...
+            assert set(by_date) == {old, recent}
+            assert by_date[old].worked_hours == 8.0
+            # ...but only the recent one carries photographs.
+            assert by_date[recent].passes and not by_date[old].passes
+
+            # And the totals cover the whole range, photos or not.
+            (t,) = timesheet.totals(s, old, recent)
+            assert t.days_attended == 2
+            assert t.worked_hours == 16.0
+
+    def test_totals_can_be_narrowed_to_one_employee(self, person):
+        with session_scope() as s:
+            other = Employee(full_name="Someone Else", department="HR")
+            s.add(other)
+            s.flush()
+            other_id = other.id
+            _daily(s, person, DAY, worked_seconds=3600, status="PRESENT",
+                   presence=PresenceStatus.OUTSIDE)
+            _daily(s, other_id, DAY, worked_seconds=7200, status="PRESENT",
+                   presence=PresenceStatus.OUTSIDE)
+        try:
+            with session_scope() as s:
+                assert len(timesheet.totals(s, DAY, DAY)) == 2
+                only = timesheet.totals(s, DAY, DAY, employee_id=person)
+                assert [t.employee_id for t in only] == [person]
+                assert only[0].worked_hours == 1.0
+        finally:
+            with session_scope() as s:
+                s.execute(delete(DailyAttendance).where(
+                    DailyAttendance.employee_id == other_id))
+                s.execute(delete(Employee).where(Employee.id == other_id))

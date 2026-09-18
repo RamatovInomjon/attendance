@@ -497,6 +497,7 @@ class Enroller:
                     ))
                     rep.embedded += 1
                 rep.people += 1
+                log.info("enrolled %-28s %d images", folder.name, len(rows))
 
             s.flush()
             has_face = select(FaceEmbedding.employee_id).distinct()
@@ -507,7 +508,6 @@ class Enroller:
             for i, n in rep.orphans:
                 log.warning("enrol: %s (employee %d) has no embedding after the "
                             "rebuild - re-enrol them or give them a photo folder", n, i)
-                log.info("enrolled %-28s %d images", folder.name, len(rows))
 
         return rep
 

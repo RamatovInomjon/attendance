@@ -214,8 +214,8 @@ def _employee_filter(statement, query: str | None, department: str | None):
 
 
 def totals(s, start: date, end: date, *, query: str | None = None,
-           department: str | None = None, now: datetime | None = None
-           ) -> list[PersonTotals]:
+           department: str | None = None, now: datetime | None = None,
+           employee_id: int | None = None) -> list[PersonTotals]:
     """One row per employee who has any attendance in the range.
 
     Absent people are not invented here. A person with no row in the range has
@@ -231,6 +231,10 @@ def totals(s, start: date, end: date, *, query: str | None = None,
         .where(DailyAttendance.business_date.between(start, end)),
         query, department,
     )
+    # One person's page asks for one person. Without this it joined the whole
+    # roster and ran an unrestricted grouped event count, then kept one row.
+    if employee_id is not None:
+        statement = statement.where(DailyAttendance.employee_id == employee_id)
     rows = s.execute(statement).all()
     counts = _pass_counts(s, start, end,
                           {d.employee_id for d, _ in rows} or None)
@@ -322,10 +326,19 @@ def passes(s, employee_id: int, start: date, end: date) -> dict:
 
 
 def day_rows_with_passes(s, employee_id: int, start: date, end: date, *,
-                         now: datetime | None = None) -> list[DayVM]:
-    """`day_rows`, each carrying its evidence strip."""
+                         now: datetime | None = None,
+                         passes_start: date | None = None) -> list[DayVM]:
+    """`day_rows`, each carrying its evidence strip.
+
+    `passes_start` narrows the PHOTOGRAPHS only. A pass is an image per row and
+    roughly eight a day, so a year-long range would put thousands of thumbnails
+    on one page - but capping the days as well would silently recompute the
+    hours over a shorter period than the one the filter asks for, and the page
+    would then disagree with the Tabel list for the same range while telling
+    the reader only the photos had been limited.
+    """
     days = day_rows(s, employee_id, start, end, now=now)
-    by_date = passes(s, employee_id, start, end)
+    by_date = passes(s, employee_id, passes_start or start, end)
     for d in days:
         d.passes = by_date.get(d.date, [])
     return days

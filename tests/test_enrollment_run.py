@@ -219,3 +219,41 @@ def test_a_person_seen_for_the_first_time_still_falls_back_to_the_folder(
             select(Employee).where(Employee.external_id == ext)).scalar_one()
         assert emp.full_name == ext
         assert emp.department == ""
+
+
+def test_the_rebuild_logs_one_line_per_folder_and_survives_an_empty_gallery(
+        monkeypatch, tmp_path, sessions, caplog):
+    """The per-folder line belongs to the folder loop, not the orphan loop.
+
+    It had drifted one loop down, where `folder` and `rows` are whatever the
+    last iteration left behind. Two failures: every real "enrolled X" line is
+    lost and the last folder's is repeated once per orphan (observed on gpu6 as
+    `enrolled 054_Inomjon` three times), and with an EMPTY gallery directory
+    plus an active employee both names are unbound, so the rebuild dies with
+    UnboundLocalError inside the write transaction.
+    """
+    import logging
+
+    with session_scope() as s:
+        s.add(Employee(external_id="EXT-ORPHAN", full_name="Orphan One",
+                       is_active=True))
+
+    # Separate roots: a gallery dir is SCANNED for folders, so an empty dir
+    # nested inside the other one would be enrolled as a person of its own.
+    empty = tmp_path / "empty_root"
+    empty.mkdir()
+    real = tmp_path / "real_root"
+    real.mkdir()
+    with caplog.at_level(logging.INFO):
+        rep = _enroller(monkeypatch, sessions).run(gallery_dir=empty)
+    assert any("Orphan One" in r.getMessage() for r in caplog.records), \
+        "the orphan must still be reported"
+    assert rep.people == 0
+
+    # And with real folders, one line each, naming the folder it enrolled.
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        _enroller(monkeypatch, sessions).run(gallery_dir=_gallery(real))
+    enrolled = [r for r in caplog.records if "enrolled" in str(r.msg)]
+    assert len(enrolled) == 1, f"one line per folder, got {len(enrolled)}"
+    assert enrolled[0].args[0] == f"001_{EXT}"

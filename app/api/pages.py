@@ -849,13 +849,18 @@ def timesheet_person(request: Request, employee_id: int,
 
     start, end, range_notice = _timesheet_range(start_date, end_date)
     # The evidence strip is an image per pass - roughly eight a day - so a
-    # year-long range would put thousands of thumbnails on one page. The table
-    # above keeps the full range; this drill-down keeps a month of it.
+    # year-long range would put thousands of thumbnails on one page. Only the
+    # PHOTOGRAPHS are capped: moving `start` here as well would recompute the
+    # hours over a shorter period than the filter asks for, so this page would
+    # report different totals from the Tabel list for the same range while the
+    # notice claimed only the images had been limited.
     cap_notice = ""
+    passes_start = start
     if (end - start).days > MAX_ATTENDANCE_HTML_DAYS:
-        start = end - timedelta(days=MAX_ATTENDANCE_HTML_DAYS)
+        passes_start = end - timedelta(days=MAX_ATTENDANCE_HTML_DAYS)
         cap_notice = (f"Dalil rasmlari ko'pi bilan {MAX_ATTENDANCE_HTML_DAYS} kun "
-                      f"uchun ko'rsatiladi: {start.isoformat()} — {end.isoformat()}.")
+                      f"uchun ko'rsatiladi: {passes_start.isoformat()} — "
+                      f"{end.isoformat()}. Soatlar butun oraliq bo'yicha.")
 
     with session_scope() as s:
         emp = s.get(Employee, employee_id)
@@ -865,9 +870,10 @@ def timesheet_person(request: Request, employee_id: int,
                   "department": emp.department or "",
                   "position": emp.position or "",
                   "external_id": emp.external_id or ""}
-        days = ts.day_rows_with_passes(s, employee_id, start, end)
-        totals = ts.totals(s, start, end, query=None, department=None)
-    mine = next((t for t in totals if t.employee_id == employee_id), None)
+        days = ts.day_rows_with_passes(s, employee_id, start, end,
+                                       passes_start=passes_start)
+        totals = ts.totals(s, start, end, employee_id=employee_id)
+    mine = totals[0] if totals else None
 
     return render(
         "attendance/timesheet_person.html", request=request,
