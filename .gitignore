@@ -176,10 +176,8 @@ license*.key
 # every `.enc`, every `.pt` and `models/_archive/` stay ignored - those are
 # either customer-encrypted or the fp32 masters that exist nowhere else.
 #
-# The ResNet101 file is exempted as well as the OSNet one it was replaced by,
-# and stays exempted for now: a deployment that has not yet pulled the new
-# weights still runs it, and un-publishing a model the server is using would
-# break the next `git pull` rather than tidy anything. Remove it once every
-# host reports the OSNet model in /api/health.
+# The ResNet101 ReID model it replaced was exempted here until every host had
+# pulled the OSNet weights; gpu6 has (2026-09-15, commit a83061a), so it is no
+# longer published. The server's copy is deleted by the pull that removes it -
+# nothing reads it: matching filters on `reid_pass.model_name`.
 !models/reid_osnet_x0_75_256x128_e512_fp16.onnx
-!models/reid_resnet101_ibn_256x128_e2048_fp16.onnx

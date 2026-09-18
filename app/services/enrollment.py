@@ -290,11 +290,19 @@ class EnrollReport:
     no_face: list[str] = field(default_factory=list)
     no_align: list[str] = field(default_factory=list)
     outliers: list[tuple[str, float]] = field(default_factory=list)
+    # Active employees with NO embedding after the rebuild. The wipe removes
+    # every non-corridor row and the rebuild only restores what has a folder
+    # of photographs; anyone enrolled another way and never given a folder is
+    # silently unrecognisable from then on - which is what happened to the
+    # three people enrolled through the browser before captures were saved.
+    orphans: list[tuple[int, str]] = field(default_factory=list)
 
     def summary(self) -> str:
         return (f"{self.people} people, {self.embedded}/{self.images_seen} images embedded; "
                 f"{len(self.no_face)} no-face, {len(self.no_align)} no-align, "
-                f"{len(self.outliers)} outliers")
+                f"{len(self.outliers)} outliers"
+                + (f"; {len(self.orphans)} employee(s) LEFT WITHOUT A FACE"
+                   if self.orphans else ""))
 
 
 class Enroller:
@@ -472,6 +480,16 @@ class Enroller:
                     ))
                     rep.embedded += 1
                 rep.people += 1
+
+            s.flush()
+            has_face = select(FaceEmbedding.employee_id).distinct()
+            rep.orphans = [(int(i), n) for i, n in s.execute(
+                select(Employee.id, Employee.full_name)
+                .where(Employee.is_active.is_(True), Employee.id.not_in(has_face))
+                .order_by(Employee.id)).all()]
+            for i, n in rep.orphans:
+                log.warning("enrol: %s (employee %d) has no embedding after the "
+                            "rebuild - re-enrol them or give them a photo folder", n, i)
                 log.info("enrolled %-28s %d images", folder.name, len(rows))
 
         return rep
@@ -551,40 +569,75 @@ def enroll_employee_captures(
         )
 
     external_id = f"WEB-{uuid.uuid4().hex[:12].upper()}"
-    with session_scope() as session:
-        employee = Employee(
-            external_id=external_id,
-            full_name=name,
-            department=department.strip(),
-            position=position.strip(),
-            phone=phone_number.strip(),
-            is_active=True,
-        )
-        session.add(employee)
-        session.flush()
-        session.add_all([
-            FaceEmbedding(
-                employee_id=employee.id,
-                source_file=source_file,
-                vector=item.vector.tobytes(),
-                dim=int(item.vector.shape[0]),
-                model_name=settings.recognizer_model,
-                quality=item.quality,
+    # The captures are SAVED, as a photo folder like every other enrolment.
+    # They used to exist only as vectors: the first recognizer swap wiped
+    # those with the rest of the gallery and `scripts/enroll.py` had nothing
+    # to rebuild them from, so three people became unrecognisable without a
+    # word in any log. Written before the transaction, removed if it fails.
+    folder = settings.gallery_dir / external_id
+    # File names carry the client's own capture name, so a rejection message
+    # and a saved photograph can be matched by eye; the index keeps two
+    # captures called "001.jpg" from different sources apart. The embedding
+    # row keeps the client's name unchanged - it is what the enrolment API
+    # reports back - and `augment.enrolment_image` finds the file by stem.
+    saved: list[tuple[str, np.ndarray]] = []
+    for k, (source_file, item) in enumerate(embedded, start=1):
+        image = next(c.image_bgr for c in captures if c.source_file == source_file)
+        saved.append((f"{k:02d}_{Path(source_file).stem}.png", image))
+    folder.mkdir(parents=True, exist_ok=True)
+    try:
+        for fname, image in saved:
+            if not cv2.imwrite(str(folder / fname), image):
+                raise OSError(f"could not write {folder / fname}")
+        (folder / "metadata.json").write_text(json.dumps({
+            "user_id": external_id, "full_name": name,
+            "department": department.strip(), "position": position.strip(),
+            "phone": phone_number.strip(),
+        }, ensure_ascii=False, indent=2))
+        with session_scope() as session:
+            employee = Employee(
+                external_id=external_id,
+                full_name=name,
+                department=department.strip(),
+                position=position.strip(),
+                phone=phone_number.strip(),
+                folder=external_id,
+                is_active=True,
             )
-            for source_file, item in embedded
-        ])
-        session.flush()
-        result = EnrollmentResult(
-            employee_id=int(employee.id),
-            external_id=external_id,
-            embeddings=len(embedded),
-            rejected=tuple(rejected),
-        )
+            session.add(employee)
+            session.flush()
+            session.add_all([
+                FaceEmbedding(
+                    employee_id=employee.id,
+                    source_file=source_file,
+                    vector=item.vector.tobytes(),
+                    dim=int(item.vector.shape[0]),
+                    model_name=settings.recognizer_model,
+                    quality=item.quality,
+                )
+                for source_file, item in embedded
+            ])
+            session.flush()
+            result = EnrollmentResult(
+                employee_id=int(employee.id),
+                external_id=external_id,
+                embeddings=len(embedded),
+                rejected=tuple(rejected),
+            )
+    except Exception:
+        import shutil
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+
     return result
 
 
 def _model_key(name) -> str:
     """Identity of a recognizer for gallery-compatibility purposes.
+
+    Now `app.config.recognizer_key`, kept under this name for its callers: the
+    same rule has to stamp and check every table that stores a face vector,
+    not only the gallery.
 
     Two things are deliberately NOT part of it:
 
@@ -599,15 +652,8 @@ def _model_key(name) -> str:
     What it MUST separate is genuinely different architectures, whose
     embeddings are not comparable at all.
     """
-    n = Path(str(name or "")).name
-    n = n.replace(".enc", "")
-    for suffix in (".onnx", ".pt"):
-        if n.endswith(suffix):
-            n = n[: -len(suffix)]
-    for prec in ("_fp16", "_fp32", "_int8"):
-        if n.endswith(prec):
-            n = n[: -len(prec)]
-    return n
+    from app.config import recognizer_key
+    return recognizer_key(name)
 
 
 def load_gallery(strict: bool = True) -> Gallery:

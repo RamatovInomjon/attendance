@@ -16,6 +16,27 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def recognizer_key(name) -> str:
+    """Identity of a recognizer for embedding-compatibility purposes.
+
+    Two things are deliberately NOT part of it: `.enc` (the same weights,
+    encrypted) and the precision suffix (`_fp16`/`_fp32` of one export produce
+    the same embeddings to well inside the noise floor - d-prime 10.0271 vs
+    10.0283 on the gallery). What it MUST separate is genuinely different
+    weights, whose embeddings are not comparable at all. Every table that
+    stores a face vector stamps it with this, and every reader compares it.
+    """
+    n = Path(str(name or "")).name
+    n = n.replace(".enc", "")
+    for suffix in (".onnx", ".pt"):
+        if n.endswith(suffix):
+            n = n[: -len(suffix)]
+    for prec in ("_fp16", "_fp32", "_int8"):
+        if n.endswith(prec):
+            n = n[: -len(prec)]
+    return n
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=str(ROOT / ".env"), env_file_encoding="utf-8", extra="ignore"
@@ -83,7 +104,16 @@ class Settings(BaseSettings):
     #     refuses a gallery built by a different recognizer;
     #   * the encrypted model must exist for a licensed deployment
     #     (`scripts/encrypt_models.py`), or the release cannot load it.
-    recognizer_model: str = "adaface_ir101_finetune_fp16.onnx"
+    #
+    # SWAPPED 2026-09-16 to the S3/v2s/sr10 IR-101 (initialised from the same
+    # WebFace12M IR-101, trained on the ID-photo corpus). Measured on a full day
+    # of native-4K corridor passes (bench/fair_ab.py, 143 pixel-labelled passes,
+    # 34 people) against the previous fine-tune, at equal pair false-accept
+    # rate: TAR 0.935 vs 0.912 at 1e-3, 0.879 vs 0.848 at 1e-4, and it named
+    # every one of the 143 passes correctly where the old one missed 5. Drop-in
+    # at the pipeline's own alignment. Same size and speed after fp16
+    # conversion. models/README.md has the full table.
+    recognizer_model: str = "ir101S3v2s_sr10final_fp16.onnx"
 
     # ---- person re-identification ---------------------------------------
     # Body ReID: it links one unrecognised person across the two cameras, and
@@ -758,10 +788,43 @@ class Settings(BaseSettings):
     # hand and forgotten is exactly how the deployed 0.18 came to sit below the
     # worst impostor this corridor actually produces. 0 = use the calibration.
     recognition_threshold_override: float = 0.0
+    # The recognizer the override was tuned for. An override is a number on
+    # ONE model's scale: 0.22 keeps the first IR-101 under a pair false-accept
+    # rate of ~1e-4 on this corridor, and the same 0.22 on the S3 IR-101 -
+    # whose scores run ~0.04 higher - admits several times as many wrong names.
+    # A model swap that left an old override in .env would apply it silently,
+    # so an override is honoured only when it names the model it belongs to:
+    #
+    #     recognition_threshold_override=0.26
+    #     recognition_threshold_override_model=ir101S3v2s_sr10final_fp16.onnx
+    #
+    # Unbound or bound to another model, it is ignored with an error in the
+    # log and the calibrated table value is used instead.
+    recognition_threshold_override_model: str = ""
 
     recognizer_thresholds: dict = {
         "adaface_ir101_finetune_fp16.onnx": 0.215,
         "adaface_ir101_finetune.onnx": 0.215,
+        # CALIBRATED 2026-09-16 with bench/calibrate_from_corpus.py on the full
+        # 2026-09-07 recording (2,593 labelled genuine frames of 34 people,
+        # 23k unnamed corridor faces, labels by pixels - no recognizer chose
+        # them). The operating point was carried over as a RATE: production ran
+        # the previous model at 0.22, which on this corridor is a pair
+        # false-accept rate of 3.6e-5; this model reaches that same rate at
+        # 0.281, where it identifies 84.7% of frames against the old 81.3%,
+        # with the same 0.19% of genuine frames naming somebody else.
+        #
+        #   rule                            thr    TAR   wrong-name/frame
+        #   same pair-FAR as production   0.281  0.847        0.0019   <- this
+        #   pair-FAR 1e-4                 0.262  0.879        0.0054
+        #   pair-FAR 1e-3                 0.219  0.935        0.0501
+        #   max impostor + 0.01           0.316  0.784        0.0000
+        #
+        # Its scores run ~0.06 higher than the previous model's, which is why
+        # the old 0.22 must not be applied to it - see
+        # recognition_threshold_override_model.
+        "ir101S3v2s_sr10final_fp16.onnx": 0.28,
+        "ir101S3v2s_sr10final.onnx": 0.28,
     }
 
     # -- augmentation: per-crop acceptance floors ----------------------------
@@ -807,7 +870,17 @@ class Settings(BaseSettings):
     # missing the lookalike who simply did not walk past that day.
     #
     # Re-measure with bench/far_live_rows.py. It is a policy, not a constant.
-    augment_live_floor: float = 0.35
+    #
+    # 2026-09-16, recognizer swap: the table above was measured on the previous
+    # model's scale. This model's scores run higher (threshold 0.22 -> 0.28,
+    # genuine median 0.335 -> 0.420), so the floor was carried over at the same
+    # position between the threshold and the typical genuine corridor score
+    # (bench/calibrate_from_corpus.py): 0.35 sat 1.13 gaps up on the old scale,
+    # which is 0.438 on this one. A starting point, not a measurement: there
+    # are no corridor crops in the new gallery yet, so nothing to measure the
+    # floor against until admins add some and unknown sightings accumulate.
+    # Re-measure with bench/far_live_rows.py after the first week.
+    augment_live_floor: float = 0.44
     # Still used, but only to REFUSE a crop: one whose worst corridor impostor
     # plus this margin exceeds the floor above is a known lookalike and is not
     # offered at all, rather than being given a bespoke floor of its own.
@@ -833,6 +906,16 @@ class Settings(BaseSettings):
     # is what the pipeline had at 10 fps with the old 12/30 defaults.
     track_frame_rate: int = 20
     track_buffer: int = 36
+    # A track follows a PERSON box, and the head inside it is whichever
+    # detected head sits highest in that box. Two people walking together
+    # overlap, and the head the box owns can flip to the other person's - seen
+    # in production as event 988, committed as one man with a saved crop of the
+    # woman beside him, and on the 2026-09-07 recording as a 150-frame track
+    # that is one person for five frames and another for the rest. One
+    # person's head overlaps its previous frame at IoU 0.7-0.97; every flip
+    # examined sat below 0.3. Below this the track's identity evidence and
+    # trajectory restart, because they now describe somebody else. 0 disables.
+    track_head_jump_iou: float = 0.3
     track_max_age_s: float = 3.0
 
     # ---- stream ---------------------------------------------------------
@@ -990,14 +1073,26 @@ class Settings(BaseSettings):
         rebuild the compiled core - which on the server is not possible at all.
         """
         import logging
+        log = logging.getLogger(__name__)
+        current = model_name or self.recognizer_model
         if self.recognition_threshold_override > 0:
-            logging.getLogger(__name__).warning(
-                "recognition_threshold_override=%.3f is in force; the value "
-                "calibrated for this recognizer is being ignored. Remember to "
-                "clear it once tuning is done.",
-                self.recognition_threshold_override)
-            return float(self.recognition_threshold_override)
-        name = Path(str(model_name or self.recognizer_model)).name
+            bound = self.recognition_threshold_override_model
+            if bound and recognizer_key(bound) == recognizer_key(current):
+                log.warning(
+                    "recognition_threshold_override=%.3f is in force; the value "
+                    "calibrated for this recognizer is being ignored. Remember to "
+                    "clear it once tuning is done.",
+                    self.recognition_threshold_override)
+                return float(self.recognition_threshold_override)
+            log.error(
+                "recognition_threshold_override=%.3f IGNORED: it is bound to %r "
+                "and the recognizer is %r. A threshold is a number on one "
+                "model's scale. Set recognition_threshold_override_model to "
+                "this recognizer if the value was tuned for it, or remove the "
+                "override.",
+                self.recognition_threshold_override, bound or "<no model>",
+                Path(str(current)).name)
+        name = Path(str(current)).name
         name = name.replace(".enc", "")
         if name in self.recognizer_thresholds:
             return float(self.recognizer_thresholds[name])
@@ -1013,6 +1108,11 @@ class Settings(BaseSettings):
 
     def model_path(self, name: str) -> Path:
         return self.models_dir / name
+
+    @property
+    def recognizer_key(self) -> str:
+        """`recognizer_key()` of the recognizer in use."""
+        return recognizer_key(self.recognizer_model)
 
 
 def camera_credentials() -> tuple[str, str]:

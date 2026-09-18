@@ -59,12 +59,16 @@ ADDITIONS = {
         ("face_ipd", "FLOAT DEFAULT 0"), ("face_frames", "INTEGER DEFAULT 0"),
         ("pseudo_person_id", "INTEGER"), ("pseudo_score", "FLOAT DEFAULT 0"),
         ("pseudo_by", "VARCHAR(8) DEFAULT ''"),
+        ("face_model", "VARCHAR(128) DEFAULT ''"),
     ],
     "unknown_sighting": [
         ("resolved_employee_id", "INTEGER"), ("resolved_kind", "VARCHAR(16)"),
         ("resolved_by", "VARCHAR(64)"), ("resolved_at", "DATETIME"),
         ("promoted_event_id", "INTEGER"),
+        # Which recognizer wrote `vector`. Backfilled below from the gallery.
+        ("model_name", "VARCHAR(128)"),
     ],
+    "pseudo_person": [("face_model", "VARCHAR(128) DEFAULT ''")],
     # NULL, not a default: an enrolment photograph has no floor of its own and
     # is judged against the global threshold. Only augmented corridor crops
     # carry a value, so backfilling one here would silently re-threshold the
@@ -120,6 +124,8 @@ def migrate_schema():
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {decl}"))
                 print(f"  {table}.{name} added")
 
+    backfill_face_model()
+
     # Existing accounts predate roles. An admin becomes "admin" and everyone
     # else "viewer", which is exactly what they could do yesterday: the new
     # "operator" is opt-in and is never assigned by a migration.
@@ -146,6 +152,62 @@ def migrate_schema():
             conn.execute(text(f"DROP INDEX IF EXISTS {name}"))
         print(f"  {len(INDEXES_REDUNDANT)} redundant index(es) dropped if present")
     print("migration complete")
+
+
+def backfill_face_model() -> dict:
+    """Stamp pre-existing face vectors with the recognizer that wrote them.
+
+    `unknown_sighting.vector`, `reid_pass.face_vector` and
+    `pseudo_person.face_templates` were written without recording which
+    recognizer produced them. Nothing in the bytes says: every recognizer here
+    emits 512 floats of unit length. What IS known is that they were scored
+    against the gallery in this database at the time, and the gallery rows
+    carry `model_name` - so the gallery's model is the sighting's model.
+
+    That holds only while the gallery is still the one those rows were scored
+    against, i.e. BEFORE `scripts/enroll.py` rebuilds it for a new recognizer.
+    `restart.sh` runs this migration before its gallery pre-flight, which is
+    the ordering that keeps the inference true. With an empty gallery nothing
+    is stamped, and an unstamped row is simply never read as evidence.
+    """
+    from app.config import recognizer_key
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    if "face_embedding" not in tables:
+        return {}
+    with engine.begin() as conn:
+        keys = {}
+        for (m,) in conn.execute(text(
+                "SELECT model_name FROM face_embedding WHERE model_name IS NOT NULL")):
+            keys[recognizer_key(m)] = keys.get(recognizer_key(m), 0) + 1
+        if not keys:
+            return {}
+        if len(keys) > 1:
+            # Two models in one gallery is itself the condition load_gallery()
+            # refuses; guessing which one wrote the sightings would be a guess.
+            print(f"  face-vector provenance NOT backfilled: gallery holds "
+                  f"{sorted(keys)} - rebuild it first")
+            return {}
+        (key,) = keys
+        done = {}
+        if "unknown_sighting" in tables:
+            done["unknown_sighting"] = conn.execute(text(
+                "UPDATE unknown_sighting SET model_name = :k "
+                "WHERE model_name IS NULL AND vector IS NOT NULL"), {"k": key}).rowcount
+        if "reid_pass" in tables:
+            done["reid_pass"] = conn.execute(text(
+                "UPDATE reid_pass SET face_model = :k "
+                "WHERE (face_model IS NULL OR face_model = '') AND face_vector IS NOT NULL"),
+                {"k": key}).rowcount
+        if "pseudo_person" in tables:
+            done["pseudo_person"] = conn.execute(text(
+                "UPDATE pseudo_person SET face_model = :k "
+                "WHERE (face_model IS NULL OR face_model = '') AND face_dim > 0"),
+                {"k": key}).rowcount
+    for t, n in done.items():
+        if n:
+            print(f"  {t}: {n} face vector(s) stamped as {key!r}")
+    return done
 
 
 def _backup() -> Path | None:

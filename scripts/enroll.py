@@ -23,6 +23,11 @@ def main():
         if items:
             print(f"\n  {label}:")
             for i in items: print(f"    {i}")
+    if rep.orphans:
+        print("\n  LEFT WITHOUT A FACE - these people will not be recognised until "
+              "re-enrolled (Ro'yxatdan o'tkazish) or given a photo folder:")
+        for i, n in rep.orphans:
+            print(f"    employee {i}: {n}")
     if rep.outliers:
         print("\n  outliers (disagree with their own folder — review these):")
         for name, c in sorted(rep.outliers, key=lambda x: x[1]):

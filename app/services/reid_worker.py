@@ -350,6 +350,7 @@ class ReidWorker:
                              if face is not None else None),
                 face_dim=int(face.shape[0]) if face is not None else 0,
                 face_ipd=face_ipd, face_frames=face_n,
+                face_model=settings.recognizer_key if face is not None else "",
             )
             s.add(row)
             s.flush()
@@ -505,9 +506,12 @@ class ReidWorker:
         """
         if face is None or not settings.reid_match_face_tiebreak:
             return -1
+        # Same recognizer as the query, not merely the same width: a face
+        # vector from a previous recognizer ranks the candidates by noise.
         eligible = [i for i in order
                     if float(sims[i]) >= settings.reid_match_threshold
-                    and rows[i].face_vector and rows[i].face_dim == len(face)]
+                    and rows[i].face_vector and rows[i].face_dim == len(face)
+                    and (rows[i].face_model or "") == settings.recognizer_key]
         if len(eligible) < 2:
             # One candidate with a face and one without is not a tie the face
             # can break: "no face" is not a low score, it is no evidence, and

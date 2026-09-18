@@ -362,9 +362,15 @@ def test_an_override_wins_so_it_can_be_set_from_env():
     editing `recognizer_thresholds` in config.py is not available there. Without
     this the operating point could not be tuned on the deployed machine at all."""
     from app.config import Settings
-    s = Settings(recognition_threshold_override=0.19)
+    s = Settings(recognition_threshold_override=0.19,
+                 recognition_threshold_override_model="adaface_ir101_finetune_fp16.onnx")
     assert s.threshold_for("adaface_ir101_finetune_fp16.onnx") == 0.19
-    assert s.threshold_for("anything_else.onnx") == 0.19
+    # ...but only for the recognizer it was tuned for. A threshold is a number
+    # on one model's scale; on any other model the calibration stands.
+    assert s.threshold_for("adaface_ir101_finetune.onnx.enc") == 0.19
+    assert s.threshold_for("anything_else.onnx") != 0.19
+    assert Settings(recognition_threshold_override=0.19).threshold_for(
+        "adaface_ir101_finetune_fp16.onnx") == 0.215, "unbound: ignored"
 
 
 def test_zero_means_use_the_calibration_not_accept_everything():

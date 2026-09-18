@@ -82,6 +82,10 @@ class TrackState:
     # head reads as the person moving when only the detector flickered.
     head_rel: tuple[float, float] | None = None
     frames_without_head: int = 0
+    # The last DETECTED head, kept across frames where the head was missed, so
+    # a jump is judged against where the head really was and not against a
+    # synthesised point.
+    last_head_box: np.ndarray | None = None
     trajectory: Trajectory = field(default_factory=Trajectory)
     # Live verdict for the overlay. Attendance never reads it: the pass is
     # decided in _prune() from the whole trajectory, once, when it ends.
@@ -320,6 +324,14 @@ def _head_in(person: np.ndarray, heads: np.ndarray) -> np.ndarray | None:
     return heads[idx[np.argmin(cy[idx])]]
 
 
+def _iou(a, b) -> float:
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return float(inter / union) if union > 0 else 0.0
+
+
 def _offset_of(head: np.ndarray, person: np.ndarray) -> tuple[float, float]:
     """Head centre as a fraction of the person box, for later synthesis."""
     pw = max(float(person[2] - person[0]), 1.0)
@@ -453,6 +465,35 @@ class CameraPipeline:
         self.traced_passes = 0
         self.frames_processed = 0
         self.faces_embedded = 0
+        # Tracks whose head flipped to another person mid-pass; see
+        # settings.track_head_jump_iou. Reported in the worker's stats so a
+        # camera where it fires constantly can be noticed.
+        self.head_jumps = 0
+
+    def _new_vote(self) -> TrackVote:
+        return TrackVote(window=settings.vote_window, required=settings.vote_required,
+                         consensus=settings.vote_consensus,
+                         min_recognitions=settings.vote_min_recognitions)
+
+    def _reset_identity(self, st: "TrackState") -> None:
+        """Forget who this track was: its head now belongs to someone else.
+
+        Everything that describes the PERSON restarts - vote, face template,
+        best and display frames, trajectory. What describes the TRACK stays:
+        id, first_seen, the body-crop cadence, the attempt counters.
+        """
+        st.vote = self._new_vote()
+        st.employee_id, st.name, st.score, st.emitted = None, "…", 0.0, False
+        st.embedded = 0
+        st.best_quality, st.best_crop = 0.0, None
+        st.best_face_px, st.nearest_id = 0, None
+        st.best_vector, st.best_seen = None, 0.0
+        st.face_sum, st.face_wsum, st.face_frames, st.best_ipd = None, 0.0, 0, 0.0
+        st.best_native = st.best_context = st.best_box = st.best_quality_obj = None
+        st.disp_quality, st.disp_quality_obj = 0.0, None
+        st.disp_native = st.disp_context = st.disp_box = st.disp_person = None
+        st.trajectory = Trajectory()
+        st.direction, st.direction_reason = Direction.UNKNOWN, ""
 
     # -- helpers ----------------------------------------------------------
     def _prune(self, now: float) -> list["CompletedTrack"]:
@@ -675,9 +716,7 @@ class CameraPipeline:
             if st is None:
                 st = TrackState(
                     track_id=tid, first_seen=now, last_seen=now, box=box,
-                    vote=TrackVote(window=settings.vote_window, required=settings.vote_required,
-                                   consensus=settings.vote_consensus,
-                                   min_recognitions=settings.vote_min_recognitions),
+                    vote=self._new_vote(),
                 )
                 self.tracks[tid] = st
             st.last_seen = now
@@ -724,6 +763,23 @@ class CameraPipeline:
 
                 synth = head is None
                 if head is not None:
+                    # THE HEAD JUMPED: the person box now owns somebody else's
+                    # head. Two people walking together overlap, `_head_in`
+                    # picks the highest head inside the box, and from here on
+                    # every frame is the other person - so the vote, the face
+                    # template and the trajectory would all describe two
+                    # people at once. The track keeps its id (the body is
+                    # still the same tracker object) but its identity
+                    # evidence starts over. Judged only across a short gap:
+                    # after several missed frames a person can legitimately
+                    # be far from where the head was last seen.
+                    if (settings.track_head_jump_iou > 0
+                            and st.last_head_box is not None
+                            and st.frames_without_head <= 3
+                            and _iou(st.last_head_box, head) < settings.track_head_jump_iou):
+                        self.head_jumps += 1
+                        self._reset_identity(st)
+                    st.last_head_box = np.asarray(head, dtype=np.float32).copy()
                     st.face_box = head
                     st.head_offset = _offset_of(head, box)
                     st.head_rel = _rel_size(head, box)

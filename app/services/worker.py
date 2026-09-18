@@ -370,6 +370,7 @@ class CameraWorker:
                     frames=ct.embedded_frames, best_score=ct.best_score,
                     nearest_employee_id=ct.nearest_employee_id,
                     vector=ct.vector.astype("float32").tobytes() if ct.vector is not None else None,
+                    model_name=settings.recognizer_model,
                     snapshot=snap,
                 ))
             for g in groups:
@@ -567,6 +568,7 @@ class CameraWorker:
                 "recognized": self.passes_recognized,
                 "recovered": self.passes_recovered,
                 "unknown": self.passes_unknown,
+                "head_jumps": getattr(self.pipeline, "head_jumps", 0),
                 "by_direction": dict(self.passes_by_direction),
             },
             "timings": res.timings if res else {},

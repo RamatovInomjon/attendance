@@ -68,7 +68,7 @@ from pathlib import Path
 
 import numpy as np
 
-from app.config import settings
+from app.config import recognizer_key, settings
 
 log = logging.getLogger(__name__)
 
@@ -182,15 +182,19 @@ def corridor_probes(days: int = 14, dim: int | None = None):
     with session_scope() as s:
         rows = s.execute(
             select(UnknownSighting.vector, UnknownSighting.nearest_employee_id,
-                   UnknownSighting.resolved_kind, UnknownSighting.resolved_employee_id)
+                   UnknownSighting.resolved_kind, UnknownSighting.resolved_employee_id,
+                   UnknownSighting.model_name)
             .where(UnknownSighting.vector.is_not(None),
                    UnknownSighting.business_date >= cutoff)).all()
-    # A gallery rebuilt on another recognizer leaves older vectors of a
-    # different width behind. Mixing them would not error - numpy would refuse
-    # the stack, or worse, a same-width vector from another model would compare
-    # as though it meant something. Keep only what matches the gallery.
+    # Only vectors the CURRENT recognizer wrote. A recognizer swap leaves the
+    # previous model's sightings behind at the same width, and mixing them
+    # would not error: a same-width vector from another model compares as
+    # though it meant something and floors get set from noise. The width check
+    # stays for the one case a swap changes it.
     want = dim
+    key = settings.recognizer_key
     kept = [r for r in rows if r[0] is not None
+            and recognizer_key(r[4]) == key
             and (want is None or len(r[0]) == want * 4)]
     if not kept:
         return empty
@@ -212,7 +216,7 @@ def _attributed(row) -> int:
     the pipeline came closest to naming, which is exactly the lookalike the
     floor exists to keep out.
     """
-    _vec, nearest, kind, resolved = row
+    _vec, nearest, kind, resolved, _model = row
     if kind == "visitor":
         return -1
     if kind == "employee" and resolved is not None:
@@ -552,11 +556,35 @@ def enrolment_image(embedding_id: int) -> Path | None:
             select(FaceEmbedding.source_file, Employee.folder)
             .join(Employee, Employee.id == FaceEmbedding.employee_id)
             .where(FaceEmbedding.id == int(embedding_id))).first()
+    return _gallery_file(row)
+
+
+def _gallery_file(row) -> Path | None:
+    """`(source_file, folder)` -> the photograph, containment-checked.
+
+    Folder enrolments name the file exactly. A browser enrolment's row keeps
+    the client's capture name (`browser/001.jpg`, `upload/001_x.jpg`) while the
+    saved photograph is `<nn>_<stem>.png` in the person's folder, so the stem
+    is what links them. A resolved path outside `gallery_dir` is refused: the
+    ids arrive from web requests.
+    """
     if not row or not row[0] or not row[1]:
         return None
     root = settings.gallery_dir.resolve()
-    p = (root / row[1] / row[0]).resolve()
-    return p if p.is_file() and p.is_relative_to(root) else None
+    folder = (root / row[1]).resolve()
+    if not folder.is_relative_to(root) or not folder.is_dir():
+        return None
+    exact = (folder / Path(row[0]).name).resolve()
+    if exact.is_file() and exact.is_relative_to(root):
+        return exact
+    stem = Path(row[0]).stem
+    if not stem:
+        return None
+    for cand in sorted(folder.glob(f"[0-9][0-9]_{stem}.png")):
+        cand = cand.resolve()
+        if cand.is_file() and cand.is_relative_to(root):
+            return cand
+    return None
 
 
 def profile_image(employee_id: int) -> Path | None:
@@ -585,11 +613,7 @@ def profile_image(employee_id: int) -> Path | None:
                    FaceEmbedding.source_file.is_not(None),
                    FaceEmbedding.source_file.not_like(f"{TAG}%"))
             .order_by(FaceEmbedding.id)).first()
-    if not row or not row[0] or not row[1]:
-        return None
-    root = settings.gallery_dir.resolve()
-    p = (root / row[1] / row[0]).resolve()
-    return p if p.is_file() and p.is_relative_to(root) else None
+    return _gallery_file(row)
 
 
 def remove_enrolment(ids: list[int]) -> dict:

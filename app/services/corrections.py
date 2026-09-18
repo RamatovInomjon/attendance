@@ -398,15 +398,23 @@ def labelled_probes() -> dict:
     import numpy as np
     from app.db.session import session_scope
 
+    from app.config import recognizer_key, settings
+    key = settings.recognizer_key
     with session_scope() as s:
-        visitors = s.execute(
-            select(UnknownSighting.vector).where(
+        # Labels outlive recognizers; vectors do not. A visitor confirmed under
+        # the previous model is still a visitor, but the vector stored for
+        # them is on that model's scale and cannot be scored against this one.
+        visitors = [v for v, m in s.execute(
+            select(UnknownSighting.vector, UnknownSighting.model_name).where(
                 UnknownSighting.resolved_kind == "visitor",
-                UnknownSighting.vector.is_not(None))).scalars().all()
-        missed = s.execute(
-            select(UnknownSighting.vector, UnknownSighting.resolved_employee_id)
+                UnknownSighting.vector.is_not(None))).all()
+            if recognizer_key(m) == key]
+        missed = [(v, e) for v, e, m in s.execute(
+            select(UnknownSighting.vector, UnknownSighting.resolved_employee_id,
+                   UnknownSighting.model_name)
             .where(UnknownSighting.resolved_kind == "employee",
                    UnknownSighting.vector.is_not(None))).all()
+            if recognizer_key(m) == key]
         # `source != "manual"` matters more than it looks. A voided event is
         # read here as a CONFIRMED FALSE ACCEPT and used with its score. A
         # manual promotion that an admin later voided is neither: nothing was

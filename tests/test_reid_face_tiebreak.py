@@ -66,12 +66,14 @@ def _run(s, *, a_face, b_face, query_face, a_amt=0.020, b_amt=0.0205):
                  business_date=DAY, dim=D, model_name="m",
                  vector=_near(BODY, 3, a_amt).tobytes(),
                  face_vector=None if a_face is None else a_face.tobytes(),
-                 face_dim=0 if a_face is None else D)
+                 face_dim=0 if a_face is None else D,
+                 face_model=settings.recognizer_key)
     b = ReidPass(camera_id=1, track_id=2, first_seen=NOW, last_seen=NOW,
                  business_date=DAY, dim=D, model_name="m",
                  vector=_near(BODY, 4, b_amt).tobytes(),
                  face_vector=None if b_face is None else b_face.tobytes(),
-                 face_dim=0 if b_face is None else D)
+                 face_dim=0 if b_face is None else D,
+                 face_model=settings.recognizer_key)
     q = ReidPass(camera_id=2, track_id=3, first_seen=NOW, last_seen=NOW,
                  business_date=DAY, dim=D, model_name="m",
                  vector=BODY.tobytes())

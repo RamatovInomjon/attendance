@@ -25,6 +25,7 @@ from app.db.models import (
     RecognitionEvent, UnknownSighting,
 )
 from app.db.session import session_scope
+from app.config import settings
 from app.services import corrections
 from app.services.attendance import AttendanceService, business_date
 
@@ -213,7 +214,7 @@ def _sighting(vector=True):
     with session_scope() as s:
         u = UnknownSighting(camera_id=CAM_IN, track_id=7, business_date=business_date(_at(9, 0)),
                             frames=12, best_score=0.19,
-                            vector=v.tobytes() if vector else None)
+                            model_name=settings.recognizer_model, vector=v.tobytes() if vector else None)
         s.add(u); s.flush()
         return u.id
 
@@ -283,33 +284,45 @@ def test_worst_pairs_judges_a_row_by_the_floor_it_actually_answers_to():
         v = rng.standard_normal(512).astype(np.float32)
         return v / np.linalg.norm(v)
 
-    a, far = unit(), unit()
-    # Three DIFFERENT directions away from `a`, so each blend is close to `a`
-    # and not to the others - otherwise the fixture accidentally makes two rows
-    # near-identical and the test measures that instead of the floor.
+    a, far, other = unit(), unit(), unit()
+    # Different directions away from each base, so each blend is close to its
+    # base and not to the others - otherwise the fixture accidentally makes two
+    # rows near-identical and the test measures that instead of the floor.
     twin = blend(a, unit(), (thr + floor) / 2)    # over the threshold, UNDER the floor
-    quiet = blend(a, unit(), (thr + floor) / 2)   # same, as a corridor crop
     hot = blend(a, unit(), min(0.95, floor + 0.4))  # over the floor as well
+    # Two CORRIDOR crops of different people, as close as `twin` is to `a`.
+    # Only a live-vs-live pair is something a floor can suppress: each side
+    # answers to its own floor, so neither can name the other. A crop that
+    # close to an ENROLMENT photograph is a real risk from the photograph's
+    # side - a query resembling the crop names that person at the global
+    # threshold - and is rightly reported however high the crop's floor is.
+    quiet = blend(other, unit(), 0.95)
+    quiet2 = blend(other, unit(), 0.95)           # ~0.9 to `quiet`, over thr
 
     made = []
     with session_scope() as s:
-        for nm, v in (("Pair One", a), ("Pair Two", twin), ("Unrelated", far)):
+        for nm, v in (("Pair One", a), ("Pair Two", twin), ("Unrelated", far),
+                      ("Fourth", unit())):
             e = Employee(full_name=nm, is_active=True); s.add(e); s.flush()
             s.add(FaceEmbedding(employee_id=e.id, source_file="image_01.png",
                                 vector=v.tobytes(), dim=512, model_name="m"))
             made.append(e.id)
-        # Covered by its floor: must NOT be reported.
+        # Covered by their floors: must NOT be reported.
         s.add(FaceEmbedding(employee_id=made[2], source_file="live:quiet",
                             vector=quiet.tobytes(), dim=512, model_name="m",
-                            threshold=floor))
+                            threshold=max(floor, 0.97)))
+        s.add(FaceEmbedding(employee_id=made[3], source_file="live:quiet2",
+                            vector=quiet2.tobytes(), dim=512, model_name="m",
+                            threshold=max(floor, 0.97)))
         # Not covered: must be.
         s.add(FaceEmbedding(employee_id=made[2], source_file="live:loud",
                             vector=hot.tobytes(), dim=512, model_name="m",
                             threshold=floor))
 
-    pairs = augment.worst_pairs(limit=20)
+    pairs = augment.worst_pairs(limit=50)
     files = {p["a"]["file"] for p in pairs} | {p["b"]["file"] for p in pairs}
-    assert "live:quiet" not in files, "a crop under its own floor cannot false-accept"
+    assert "live:quiet" not in files and "live:quiet2" not in files, \
+        "two crops under their own floors cannot false-accept against each other"
     assert "live:loud" in files, "a crop over its own floor still can"
     names = {frozenset((p["a"]["name"], p["b"]["name"])) for p in pairs}
     assert frozenset(("Pair One", "Pair Two")) in names, \
@@ -767,13 +780,13 @@ def test_labelled_sightings_are_attributed_by_the_admin_not_the_pipeline():
     with session_scope() as s:
         s.add_all([
             UnknownSighting(camera_id=CAM_IN, track_id=1, business_date=day,
-                            vector=missed.tobytes(), nearest_employee_id=y,
+                            vector=missed.tobytes(), model_name=settings.recognizer_model, nearest_employee_id=y,
                             resolved_kind="employee", resolved_employee_id=x),
             UnknownSighting(camera_id=CAM_IN, track_id=2, business_date=day,
-                            vector=visitor.tobytes(), nearest_employee_id=x,
+                            vector=visitor.tobytes(), model_name=settings.recognizer_model, nearest_employee_id=x,
                             resolved_kind="visitor"),
             UnknownSighting(camera_id=CAM_IN, track_id=3, business_date=day,
-                            vector=plain.tobytes(), nearest_employee_id=y),
+                            vector=plain.tobytes(), model_name=settings.recognizer_model, nearest_employee_id=y),
         ])
 
     P, who = augment.corridor_probes(days=3650)

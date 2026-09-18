@@ -250,6 +250,13 @@ class UnknownSighting(Base):
     best_score = Column(Float, default=0.0)      # best match that still missed
     nearest_employee_id = Column(Integer, nullable=True)
     vector = Column(LargeBinary, nullable=True)
+    # The recognizer that produced `vector`. Every reader of the column must
+    # refuse rows from another model: two recognizers' embeddings are the same
+    # width and the same norm, so comparing them SUCCEEDS and means nothing -
+    # and these vectors feed the corridor-crop floors and the labelled probes
+    # every threshold is measured from. NULL is "unknown provenance", which
+    # reads as "not this model".
+    model_name = Column(String(128), nullable=True)
     snapshot = Column(String(255), nullable=True)
     # What an admin decided this face actually was. `resolved_kind` carries the
     # weight: "visitor" - a confirmed non-employee - is the single most useful
@@ -320,6 +327,11 @@ class ReidPass(Base):
     # NULL for a pass with no usable face, which is 27% of them.
     face_vector = Column(LargeBinary, nullable=True)
     face_dim = Column(Integer, default=0)
+    # Which recognizer wrote `face_vector`. The dimension alone cannot tell two
+    # 512-d recognizers apart, and the face tie-break compares this row's face
+    # against a live query - a query from a different model would rank the
+    # candidates by noise. '' is "unknown provenance": never eligible.
+    face_model = Column(String(128), default="")
     # Inter-pupil distance of the best frame, source pixels. Below
     # `pseudo_face_ipd_min` the face vector is kept for the record but is NOT
     # used to link anything: a small face links the WRONG people rather than
@@ -408,6 +420,11 @@ class PseudoPerson(Base):
     # reason `reid_pass.model_name` exists.
     face_templates = Column(LargeBinary, nullable=True)
     face_dim = Column(Integer, default=0)
+    # The recognizer the face templates came from - the same guard `body_model`
+    # gives the body templates. A recognizer swap keeps the dimension at 512,
+    # so `face_dim` alone would let templates from the old model keep matching
+    # queries from the new one, successfully and wrongly.
+    face_model = Column(String(128), default="")
     body_templates = Column(LargeBinary, nullable=True)
     body_dim = Column(Integer, default=0)
     # The ReID model the body templates came from. Body features from two

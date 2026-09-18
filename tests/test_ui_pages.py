@@ -39,6 +39,7 @@ warnings.filterwarnings(
 )
 
 from app.api import pages
+from app.config import settings
 from app.api import main as api_main
 from app.api.pages import router
 from app.core.stream import RtspSource
@@ -238,6 +239,8 @@ def _isolated_enrollment_database(monkeypatch, tmp_path):
 
     monkeypatch.setattr(pages, "session_scope", isolated_session_scope)
     monkeypatch.setattr(enrollment_service, "session_scope", isolated_session_scope)
+    # Browser enrolment now writes a photo folder; keep it out of face_id_users.
+    monkeypatch.setattr(settings, "gallery_dir", tmp_path / "gallery")
     return session_factory
 
 
@@ -2303,3 +2306,54 @@ def test_every_signed_in_role_may_see_the_profile_photograph(
 
     for c in (viewer_client, operator_client):
         assert c.get(f"/employees/{emp_id}/photo").status_code == 200
+
+
+def test_browser_enrolment_writes_a_photo_folder_enroll_py_can_rebuild(monkeypatch, tmp_path):
+    """The captures used to exist only as vectors. The first recognizer swap
+    wiped those with the rest of the gallery and scripts/enroll.py had nothing
+    to rebuild them from, so three people became unrecognisable silently."""
+    session_factory = _isolated_enrollment_database(monkeypatch, tmp_path)
+    result = enrollment_service.enroll_employee_captures(
+        full_name="Folder Person", position="", department="", phone_number="",
+        captures=[enrollment_service.EnrollmentImage(
+            source_file="browser/001.jpg",
+            image_bgr=np.full((8, 8, 3), 90, dtype=np.uint8))],
+        enroller=_StubCaptureEnroller(),
+    )
+    folder = tmp_path / "gallery" / result.external_id
+    assert (folder / "01_001.png").is_file(), "index + the client's own capture name"
+    meta = json.loads((folder / "metadata.json").read_text())
+    assert meta["user_id"] == result.external_id and meta["full_name"] == "Folder Person"
+    with session_factory() as session:
+        emp = session.execute(select(Employee)).scalar_one()
+        assert emp.folder == result.external_id, "enroll.py finds people by folder"
+        row = session.execute(select(FaceEmbedding)).scalar_one()
+        assert row.source_file == "browser/001.jpg", "the API contract is unchanged"
+        row_id = row.id
+    from app.services import augment
+    # `enrolment_image` reads the shared database, not this isolated one, so
+    # the resolution step is checked with the row it would have read.
+    assert augment._gallery_file(("browser/001.jpg", result.external_id)) \
+        == (folder / "01_001.png").resolve(), \
+        "the review page finds the saved photograph by stem"
+
+
+def test_a_failed_browser_enrolment_leaves_no_folder_behind(monkeypatch, tmp_path):
+    session_factory = _isolated_enrollment_database(monkeypatch, tmp_path)
+    real_face_embedding = enrollment_service.FaceEmbedding
+
+    def invalid_face_embedding(**values):
+        values["vector"] = None
+        return real_face_embedding(**values)
+
+    monkeypatch.setattr(enrollment_service, "FaceEmbedding", invalid_face_embedding)
+    with pytest.raises(IntegrityError):
+        enrollment_service.enroll_employee_captures(
+            full_name="Rollback Folder", position="", department="", phone_number="",
+            captures=[enrollment_service.EnrollmentImage(
+                source_file="browser/001.jpg",
+                image_bgr=np.full((8, 8, 3), 80, dtype=np.uint8))],
+            enroller=_StubCaptureEnroller(),
+        )
+    assert not any((tmp_path / "gallery").glob("WEB-*")), "no orphan folder on rollback"
+

@@ -175,14 +175,19 @@ class PseudoGallery:
             select(PseudoPerson.id, PseudoPerson.face_templates,
                    PseudoPerson.face_dim, PseudoPerson.body_templates,
                    PseudoPerson.body_dim, PseudoPerson.body_model,
-                   PseudoPerson.body_date)
+                   PseudoPerson.body_date, PseudoPerson.face_model)
             .where(PseudoPerson.last_seen >= cutoff)
         ).all()
 
+        face_model = settings.recognizer_key
         blocks, owners = [], []
         body: dict[int, np.ndarray] = {}
-        for pid, fblob, fdim, bblob, bdim, bmodel, bdate in rows:
-            T = _unpack(fblob, fdim or 0)
+        for pid, fblob, fdim, bblob, bdim, bmodel, bdate, fmodel in rows:
+            # Face templates from another recognizer are the same width and
+            # would match - wrongly. They are not loaded; the pseudo-person is
+            # matched on body alone until it collects new ones.
+            T = _unpack(fblob, fdim or 0) if (fmodel or "") == face_model \
+                else np.zeros((0, 1), np.float32)
             if len(T):
                 blocks.append(T)
                 owners.append(np.full(len(T), pid, np.int64))
@@ -299,7 +304,7 @@ class PseudoGallery:
             p = PseudoPerson(
                 code="",                       # assigned from the id below
                 first_seen=row.first_seen, last_seen=row.last_seen,
-                n_passes=0, face_dim=0, body_dim=0, body_model="",
+                n_passes=0, face_dim=0, body_dim=0, body_model="", face_model="",
             )
             s.add(p)
             s.flush()                          # need the id to mint the code
@@ -327,11 +332,13 @@ class PseudoGallery:
             # A dimension change means the recognizer was swapped, and the
             # stored templates are in a space this vector knows nothing about.
             # Start over rather than concatenate two incomparable geometries.
-            fresh = p.face_dim != int(len(face))
+            fresh = (p.face_dim != int(len(face))
+                     or (p.face_model or "") != settings.recognizer_key)
             p.face_templates = (_pack(np.asarray(face, np.float32).reshape(1, -1))
                                 if fresh else _push(p.face_templates, p.face_dim,
                                                     face, k))
             p.face_dim = int(len(face))
+            p.face_model = settings.recognizer_key
         if body is not None:
             # A different model, or a different day, invalidates what is there:
             # keeping it would leave a stale template able to match tomorrow.

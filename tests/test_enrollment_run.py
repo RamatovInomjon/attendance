@@ -131,3 +131,18 @@ def test_re_enrolment_keeps_the_corridor_crops_and_replaces_the_photographs(
         ["image_01.png", "image_02.png", "image_03.png", CROP]
     assert dict(rows)[CROP] == pytest.approx(0.35), "the crop keeps its floor"
     assert dept == "QA", "the employee record is still upserted from metadata.json"
+
+
+def test_the_rebuild_names_everyone_it_left_without_a_face(monkeypatch, tmp_path, sessions):
+    """The wipe removes every non-corridor row and the rebuild restores only
+    what has a photo folder. Someone enrolled without one is unrecognisable
+    from then on - and was, silently, for three people. Now the report says."""
+    with session_scope() as s:
+        s.add(Employee(external_id="EXT-NOFOLDER", full_name="No Folder Person",
+                       is_active=True))
+    rep = _enroller(monkeypatch, sessions).run(gallery_dir=_gallery(tmp_path))
+    names = [n for _i, n in rep.orphans]
+    assert "No Folder Person" in names
+    assert not any(EXT in n for n in names), "the person with a folder was rebuilt"
+    assert "LEFT WITHOUT A FACE" in rep.summary()
+

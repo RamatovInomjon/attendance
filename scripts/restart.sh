@@ -168,12 +168,38 @@ if "CUDAExecutionProvider" not in p:
 # load_gallery() REFUSES a gallery built by a different recognizer, because
 # comparing one model's vectors against another's succeeds silently and returns
 # plausible nonsense. It is a hard failure at startup; find it here instead.
+from app.config import recognizer_key
 from app.services.enrollment import load_gallery
-g = load_gallery()
+print(f"  recognizer  {settings.recognizer_model}")
+try:
+    g = load_gallery()
+except RuntimeError as e:
+    print(f"  GALLERY     {e}", file=sys.stderr)
+    print("\n  The recognizer changed and the gallery was built by the previous\n"
+          "  one. Rebuild it with THIS recognizer, then restart:\n"
+          "      ~/faceid/venv/bin/python scripts/enroll.py\n"
+          "      ./scripts/restart.sh\n"
+          "  enroll.py lists anyone left without a face; re-enrol those people\n"
+          "  through Ro'yxatdan o'tkazish.", file=sys.stderr)
+    raise SystemExit(1)
 print(f"  gallery     {len(g)} embeddings / {g.n_people} people")
 floored = 0 if getattr(g, "_floor", None) is None else int((g._floor > 0).sum())
-print(f"  floors      {floored} corridor crop(s) with their own threshold")
+print(f"  floors      {floored} corridor crop(s) with their own threshold "
+      f"(live floor {settings.augment_live_floor:.3f})")
 print(f"  threshold   {settings.threshold_for(settings.recognizer_model):.3f}")
+ov = settings.recognition_threshold_override
+if ov > 0:
+    bound = settings.recognition_threshold_override_model
+    if bound and recognizer_key(bound) == settings.recognizer_key:
+        print(f"  override    {ov:.3f} IN FORCE (bound to {bound})")
+    else:
+        # A threshold is a number on one model's scale. The old 0.22 applied to
+        # the S3 IR-101 would admit several times the wrong names.
+        print(f"  override    {ov:.3f} in .env is IGNORED: it is not bound to "
+              f"{settings.recognizer_model}. Remove the line, or add\n"
+              f"      recognition_threshold_override_model="
+              f"{settings.recognizer_model}\n"
+              f"  if it was tuned for this recognizer.", file=sys.stderr)
 
 # Not fatal - the live page falls back to MJPEG - but it must be VISIBLE.
 # `pip install uvicorn` leaves this out; only `uvicorn[standard]` pulls it in,
