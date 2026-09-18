@@ -146,3 +146,76 @@ def test_the_rebuild_names_everyone_it_left_without_a_face(monkeypatch, tmp_path
     assert not any(EXT in n for n in names), "the person with a folder was rebuilt"
     assert "LEFT WITHOUT A FACE" in rep.summary()
 
+
+
+def _gallery_without_metadata(tmp_path, ext_id, n=2):
+    """A folder of photographs and nothing else.
+
+    This is how the enrolment export reached gpu6: the images were copied, the
+    `metadata.json` beside them was not.
+    """
+    folder = tmp_path / f"013_{ext_id}"
+    folder.mkdir()
+    for i in range(n):
+        (folder / f"image_{i + 1:02d}.png").write_bytes(b"not decoded here")
+    return tmp_path
+
+
+def test_a_folder_without_metadata_does_not_overwrite_a_known_person(
+        monkeypatch, tmp_path, sessions):
+    """A rebuild must not degrade a record it knows nothing about.
+
+    `metadata.json` is the master record and still wins where it has a value.
+    A folder WITHOUT one says nothing about the person - but these fields were
+    assigned unconditionally, so on gpu6, where only the photographs had been
+    copied, a gallery rebuild rewrote all 54 full names to the folder suffix
+    ("Xamdamov Rustam" -> "Rustam") and blanked every department, position and
+    phone. The employee ids survived, so attendance still joined and nothing
+    looked broken; the loss showed up only as first names in the UI.
+    """
+    ext = "Rustam"
+    with session_scope() as s:
+        s.add(Employee(external_id=ext, full_name="Xamdamov Rustam",
+                       department="Buxgalteriya", position="Bosh buxgalter",
+                       phone="+998901112233", is_active=True))
+
+    _enroller(monkeypatch, sessions).run(
+        gallery_dir=_gallery_without_metadata(tmp_path, ext))
+
+    with session_scope() as s:
+        emp = s.execute(
+            select(Employee).where(Employee.external_id == ext)).scalar_one()
+        assert emp.full_name == "Xamdamov Rustam"
+        assert emp.department == "Buxgalteriya"
+        assert emp.position == "Bosh buxgalter"
+        assert emp.phone == "+998901112233"
+        assert emp.folder == f"013_{ext}"      # the rebuild still took effect
+
+
+def test_metadata_still_wins_where_it_has_a_value(monkeypatch, tmp_path, sessions):
+    """Preserving the old value must not stop a real update from landing."""
+    with session_scope() as s:
+        s.add(Employee(external_id=EXT, full_name="Stale Name",
+                       department="Stale Dept", is_active=True))
+
+    _enroller(monkeypatch, sessions).run(gallery_dir=_gallery(tmp_path))
+
+    with session_scope() as s:
+        emp = s.execute(
+            select(Employee).where(Employee.external_id == EXT)).scalar_one()
+        assert emp.full_name == "Rerun Person"
+        assert emp.department == "QA"
+
+
+def test_a_person_seen_for_the_first_time_still_falls_back_to_the_folder(
+        monkeypatch, tmp_path, sessions):
+    """With no metadata AND no existing row there is nothing better to use."""
+    ext = "Brand New"
+    _enroller(monkeypatch, sessions).run(
+        gallery_dir=_gallery_without_metadata(tmp_path, ext))
+
+    with session_scope() as s:
+        emp = s.execute(
+            select(Employee).where(Employee.external_id == ext)).scalar_one()
+        assert emp.full_name == ext
+        assert emp.department == ""

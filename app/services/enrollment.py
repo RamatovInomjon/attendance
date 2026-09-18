@@ -464,11 +464,28 @@ class Enroller:
                     emp = Employee(external_id=ext_id)
                     s.add(emp)
                 emp.folder = folder.name
-                emp.full_name = meta.get("full_name") or ext_id
-                emp.department = meta.get("department", "") or ""
-                emp.position = meta.get("position", "") or ""
-                emp.phone = meta.get("phone", "") or ""
-                emp.user_type = meta.get("user_type", "") or ""
+                # A REBUILD MUST NOT DEGRADE A RECORD IT KNOWS NOTHING ABOUT.
+                # `metadata.json` is the master record for a person and wins
+                # where it has a value - but a folder without one says nothing
+                # about them, and these fields used to be assigned
+                # unconditionally. On gpu6, where the enrolment export had been
+                # copied as photographs only, that turned a gallery rebuild
+                # into silent data loss: `meta` was empty for all 54 people, so
+                # every full_name became the folder suffix ("Xamdamov Rustam"
+                # -> "Rustam", because the folder is `013_Rustam`) and every
+                # department, position and phone was blanked. The employee ids
+                # survived, so nothing looked broken - the attendance history
+                # still joined - and the damage showed only as first names in
+                # the UI. Absent metadata now leaves what is already there.
+                emp.full_name = meta.get("full_name") or emp.full_name or ext_id
+                for field, value in (("department", meta.get("department")),
+                                     ("position", meta.get("position")),
+                                     ("phone", meta.get("phone")),
+                                     ("user_type", meta.get("user_type"))):
+                    if value:
+                        setattr(emp, field, value)
+                    elif getattr(emp, field, None) is None:
+                        setattr(emp, field, "")
                 emp.is_active = True
                 s.flush()
 
