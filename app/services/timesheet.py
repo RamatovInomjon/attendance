@@ -52,6 +52,7 @@ from app.config import settings
 from app.db.models import (
     Camera, DailyAttendance, Employee, PresenceStatus, RecognitionEvent,
 )
+from app.services.attendance import business_date
 
 # The transitions that are an arrival or a departure. Everything else in
 # `recognition_event.transition` is a sighting that moved no attendance state -
@@ -104,6 +105,7 @@ class DayVM:
     presence: str
     n_in: int
     n_out: int
+    is_today: bool = False
     passes: list[PassVM] = field(default_factory=list)
 
     @property
@@ -116,7 +118,16 @@ class DayVM:
 
     @property
     def is_open(self) -> bool:
-        return self.presence == PresenceStatus.INSIDE.value
+        """Still in the building - which only a row for TODAY can be.
+
+        142 rows in the live database sit at `presence=INSIDE` on a date long
+        past: the interval never closed, `close_open_intervals` flagged them
+        NO_CHECKOUT but left `entered_at` alone. Reading INSIDE literally on a
+        past date renders "still in the building, 379 hours", which is absurd
+        on its face and takes the whole page's credibility with it. A past day
+        that never closed is INCOMPLETE, not open.
+        """
+        return self.presence == PresenceStatus.INSIDE.value and self.is_today
 
     @property
     def is_incomplete(self) -> bool:
@@ -165,13 +176,20 @@ class PersonTotals:
         return round(self.worked_seconds / 3600.0 / costed, 2)
 
 
-def _open_seconds(row, now: datetime) -> int:
-    """Time since the person was last seen entering, if they never left.
+def _open_seconds(row, now: datetime, today: date) -> int:
+    """Time since the person was last seen entering, if they never left TODAY.
 
     Returned separately from `worked_seconds` and never added to it: see the
     module docstring on why a running total must not enter a monthly figure.
+
+    Bounded to the current business date. An unclosed interval on a past date
+    is not time being worked - nobody has been in the building since the 2nd of
+    September - it is a day that was never closed, and its hours are unknown
+    rather than enormous.
     """
     if row.presence != PresenceStatus.INSIDE or row.entered_at is None:
+        return 0
+    if row.business_date != today:
         return 0
     return max(0, int((now - row.entered_at).total_seconds()))
 
@@ -225,6 +243,7 @@ def totals(s, start: date, end: date, *, query: str | None = None,
     what was observed.
     """
     now = now or datetime.now(settings.tz)
+    today = business_date(now)
     statement = _employee_filter(
         select(DailyAttendance, Employee)
         .join(Employee, Employee.id == DailyAttendance.employee_id)
@@ -249,7 +268,7 @@ def totals(s, start: date, end: date, *, query: str | None = None,
                 days_attended=0, worked_seconds=0, open_seconds=0,
                 n_in=0, n_out=0, incomplete_days=0,
             )
-        opened = _open_seconds(d, now)
+        opened = _open_seconds(d, now, today)
         incomplete = d.status in INCOMPLETE_STATUSES or d.presence == PresenceStatus.INSIDE
         t.days_attended += 1
         t.worked_seconds += int(d.worked_seconds or 0)
@@ -266,6 +285,7 @@ def day_rows(s, employee_id: int, start: date, end: date, *,
              now: datetime | None = None) -> list[DayVM]:
     """Every attended day for one person, newest first, without the passes."""
     now = now or datetime.now(settings.tz)
+    today = business_date(now)
     rows = s.execute(
         select(DailyAttendance)
         .where(DailyAttendance.employee_id == employee_id,
@@ -280,10 +300,10 @@ def day_rows(s, employee_id: int, start: date, end: date, *,
             date=d.business_date,
             check_in=_local(d.check_in_time), check_out=_local(d.check_out_time),
             worked_seconds=int(d.worked_seconds or 0),
-            open_seconds=_open_seconds(d, now),
+            open_seconds=_open_seconds(d, now, today),
             status=d.status or "PRESENT",
             presence=d.presence.value if hasattr(d.presence, "value") else str(d.presence),
-            n_in=n_in, n_out=n_out,
+            n_in=n_in, n_out=n_out, is_today=(d.business_date == today),
         ))
     return out
 

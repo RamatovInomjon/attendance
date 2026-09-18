@@ -124,20 +124,43 @@ class TestAnOpenDayIsReportedSeparately:
     def test_open_interval_is_not_added_to_worked_hours(self, person):
         """168 live rows are INSIDE. A running total must not enter the sum,
         or the page disagrees with the CSV exported a minute earlier."""
+        from app.services.attendance import business_date
         now = datetime.now(timezone.utc)
+        today = business_date(now)
         entered = now - timedelta(hours=3)
         with session_scope() as s:
-            _daily(s, person, DAY, check_in_time=entered, entered_at=entered,
+            _daily(s, person, today, check_in_time=entered, entered_at=entered,
                    worked_seconds=0, status="PRESENT",
                    presence=PresenceStatus.INSIDE)
         with session_scope() as s:
-            (t,) = timesheet.totals(s, DAY, DAY, now=now)
+            (t,) = timesheet.totals(s, today, today, now=now)
             assert t.worked_seconds == 0
             assert t.open_seconds == pytest.approx(3 * 3600, abs=5)
             assert t.incomplete_days == 1
-            days = timesheet.day_rows(s, person, DAY, DAY, now=now)
+            days = timesheet.day_rows(s, person, today, today, now=now)
             assert days[0].is_open is True
             assert days[0].open_hours == pytest.approx(3.0, abs=0.01)
+
+    def test_a_past_day_left_open_is_incomplete_not_still_in_the_building(
+            self, person):
+        """142 live rows sit at INSIDE on a date long past: the interval never
+        closed and `entered_at` was never cleared. Read literally that renders
+        "still in the building, 379 hours", which is absurd on its face and
+        takes the page's credibility with it. Such a day is INCOMPLETE."""
+        now = datetime.now(timezone.utc)
+        entered = _utc(DAY, 9)                       # a fixed date in the past
+        with session_scope() as s:
+            _daily(s, person, DAY, check_in_time=entered, entered_at=entered,
+                   worked_seconds=0, status="NO_CHECKOUT",
+                   presence=PresenceStatus.INSIDE)
+        with session_scope() as s:
+            days = timesheet.day_rows(s, person, DAY, DAY, now=now)
+            assert days[0].is_open is False, "a past date is not 'still here'"
+            assert days[0].open_hours == 0.0, "no running clock on a past day"
+            assert days[0].is_incomplete is True
+            (t,) = timesheet.totals(s, DAY, DAY, now=now)
+            assert t.open_seconds == 0
+            assert t.incomplete_days == 1
 
 
 class TestOnlyRealPassesAreCounted:
