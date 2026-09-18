@@ -95,7 +95,8 @@ def operator_client():
 
 @pytest.mark.parametrize(
     "path",
-    ["/", "/employees", "/attendance", "/recognition", "/attendance/unknown", "/cameras"],
+    ["/", "/employees", "/attendance", "/recognition", "/attendance/unknown",
+     "/cameras", "/attendance/timesheet"],
 )
 def test_page_routes_return_html(client: TestClient, path: str):
     """A missing page context must not stop any primary page from rendering."""
@@ -2357,3 +2358,189 @@ def test_a_failed_browser_enrolment_leaves_no_folder_behind(monkeypatch, tmp_pat
         )
     assert not any((tmp_path / "gallery").glob("WEB-*")), "no orphan folder on rollback"
 
+
+
+# ------------------------------------------------------------- timesheet ---
+# The HR pages. The aggregation rules themselves are pinned in
+# tests/test_timesheet.py; what matters here is that the page SHOWS the honest
+# number rather than the convenient one, because the whole point of separating
+# "hours we can prove" from "days still to fix" is lost if the markup renders
+# an unclosed day as a confident 0.0.
+
+def _timesheet_day(session, employee_id, day, **kw):
+    row = DailyAttendance(employee_id=employee_id, business_date=day, **kw)
+    session.add(row)
+    return row
+
+
+def _timesheet_event(session, employee_id, ts, transition, snapshot):
+    session.add(RecognitionEvent(
+        employee_id=employee_id, camera_id=None, role=CameraRole.IN, ts=ts,
+        business_date=ts.date(), transition=transition, snapshot=snapshot))
+
+
+def test_timesheet_reports_hours_passes_and_never_costs_an_unclosed_day(monkeypatch):
+    """One closed day and one NO_CHECKOUT day: 8 hours, 1 incomplete, not 4."""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    closed, unclosed = date(2026, 4, 6), date(2026, 4, 7)
+    with Session(engine) as session:
+        emp = Employee(full_name="Tabel Xodimi", external_id="TB-1", department="IT")
+        session.add(emp)
+        session.flush()
+        _timesheet_day(session, emp.id, closed,
+                       check_in_time=datetime(2026, 4, 6, 4, 0, tzinfo=timezone.utc),
+                       check_out_time=datetime(2026, 4, 6, 12, 0, tzinfo=timezone.utc),
+                       worked_seconds=8 * 3600, status="PRESENT")
+        _timesheet_day(session, emp.id, unclosed,
+                       check_in_time=datetime(2026, 4, 7, 4, 0, tzinfo=timezone.utc),
+                       worked_seconds=0, status="NO_CHECKOUT")
+        _timesheet_event(session, emp.id,
+                         datetime(2026, 4, 6, 4, 0, tzinfo=timezone.utc),
+                         "CHECK_IN", "snapshots/in.jpg")
+        _timesheet_event(session, emp.id,
+                         datetime(2026, 4, 6, 12, 0, tzinfo=timezone.utc),
+                         "CHECK_OUT", "snapshots/out.jpg")
+        session.flush()
+        _isolated_employee_session(monkeypatch, session)
+        response = pages.timesheet_list(
+            _employee_page_request("/attendance/timesheet"),
+            start_date=closed.isoformat(), end_date=unclosed.isoformat())
+
+    html = response.body.decode()
+    assert 'data-current-view="attendance:timesheet"' in html
+    assert "Tabel Xodimi" in html
+    assert "8.0" in html                      # hours proven, not 4.0 averaged
+    assert "To'liqmas" in unescape(html)
+    # The incomplete day must be surfaced, not silently absorbed into the total.
+    assert "chiqish qayd etilmagan" in unescape(html).lower()
+
+
+def test_timesheet_person_shows_every_pass_with_its_time_and_image(monkeypatch):
+    """HR's third ask: each pass, the minute it happened, and the face kept."""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    day = date(2026, 4, 6)
+    with Session(engine) as session:
+        emp = Employee(full_name="Rasmli Xodim", external_id="TB-2", department="IT")
+        session.add(emp)
+        session.flush()
+        _timesheet_day(session, emp.id, day,
+                       check_in_time=datetime(2026, 4, 6, 4, 0, tzinfo=timezone.utc),
+                       check_out_time=datetime(2026, 4, 6, 12, 0, tzinfo=timezone.utc),
+                       worked_seconds=8 * 3600, status="PRESENT")
+        _timesheet_event(session, emp.id,
+                         datetime(2026, 4, 6, 4, 5, tzinfo=timezone.utc),
+                         "CHECK_IN", "snapshots/in.jpg")
+        _timesheet_event(session, emp.id,
+                         datetime(2026, 4, 6, 9, 0, tzinfo=timezone.utc),
+                         "RE_SIGHTING", "snapshots/seen.jpg")
+        _timesheet_event(session, emp.id,
+                         datetime(2026, 4, 6, 12, 0, tzinfo=timezone.utc),
+                         "CHECK_OUT", "snapshots/out.jpg")
+        session.flush()
+        employee_id = emp.id
+        _isolated_employee_session(monkeypatch, session)
+        response = pages.timesheet_person(
+            _employee_page_request(f"/attendance/timesheet/{employee_id}"),
+            employee_id, start_date=day.isoformat(), end_date=day.isoformat())
+
+    html = unescape(response.body.decode())
+    for name in ("snapshots/in.jpg", "snapshots/out.jpg", "snapshots/seen.jpg"):
+        assert name in html, f"{name} must be on the page"
+    assert "09:05:00" in html and "17:00:00" in html   # local Asia/Tashkent
+    assert "Kirish" in html and "Chiqish" in html
+    # A re-sighting is shown as evidence but must not read as an arrival.
+    assert "Ko'rilgan" in html
+    assert ">1 kirish / 1 chiqish<" in html.replace("\n", " ").replace("  ", " ") \
+        or "1 kirish / 1 chiqish" in html
+
+
+def test_timesheet_media_urls_carry_the_deployment_prefix(monkeypatch):
+    """A bare /media/... resolves against the domain root under /faceid."""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    day = date(2026, 4, 6)
+    monkeypatch.setattr(settings, "url_prefix", "/faceid")
+    with Session(engine) as session:
+        emp = Employee(full_name="Prefiks Xodimi", external_id="TB-3")
+        session.add(emp)
+        session.flush()
+        _timesheet_day(session, emp.id, day, worked_seconds=3600, status="PRESENT")
+        _timesheet_event(session, emp.id,
+                         datetime(2026, 4, 6, 4, 0, tzinfo=timezone.utc),
+                         "CHECK_IN", "snapshots/in.jpg")
+        session.flush()
+        employee_id = emp.id
+        _isolated_employee_session(monkeypatch, session)
+        response = pages.timesheet_person(
+            _employee_page_request(f"/attendance/timesheet/{employee_id}"),
+            employee_id, start_date=day.isoformat(), end_date=day.isoformat())
+
+    html = response.body.decode()
+    assert "/faceid/media/snapshots/in.jpg" in html
+    assert 'src="/media/snapshots' not in html
+
+
+def test_timesheet_range_defaults_to_the_current_month(monkeypatch):
+    """HR reads a month. Defaulting to today would open on one empty date."""
+    start, end, _ = pages._timesheet_range(None, None)
+    assert start.day == 1
+    assert start.month == end.month and start.year == end.year
+    assert end == pages.today()
+
+
+def test_timesheet_csv_keeps_hours_and_incomplete_days_in_separate_columns(monkeypatch):
+    """The spreadsheet HR builds on must not be able to hide an unclosed day.
+
+    Hours and incomplete days are two columns on purpose: summing a single
+    "hours" column across a month where 29% of rows never closed under-reports
+    it badly, and a CSV gives no place to put a footnote.
+    """
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    closed, unclosed = date(2026, 4, 6), date(2026, 4, 7)
+    with Session(engine) as session:
+        emp = Employee(full_name="Eksport Xodimi", external_id="EX-1", department="IT")
+        skip = Employee(full_name="Boshqa Bo'lim", external_id="EX-2", department="Moliya")
+        session.add_all([emp, skip])
+        session.flush()
+        session.add_all([
+            DailyAttendance(employee_id=emp.id, business_date=closed,
+                            worked_seconds=8 * 3600, status="PRESENT"),
+            DailyAttendance(employee_id=emp.id, business_date=unclosed,
+                            worked_seconds=0, status="NO_CHECKOUT"),
+            DailyAttendance(employee_id=skip.id, business_date=closed,
+                            worked_seconds=3600, status="PRESENT"),
+        ])
+        session.flush()
+
+        @contextmanager
+        def isolated_session_scope():
+            yield session
+
+        monkeypatch.setattr(api_main, "session_scope", isolated_session_scope)
+        test_app = FastAPI()
+        test_app.get("/api/attendance/timesheet/export")(api_main.timesheet_export)
+        with TestClient(test_app) as test_client:
+            response = test_client.get("/api/attendance/timesheet/export", params={
+                "start_date": closed.isoformat(), "end_date": unclosed.isoformat(),
+                "department": "IT",
+            })
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    body = response.content.decode("utf-8-sig")
+    assert "Eksport Xodimi" in body
+    assert "Boshqa Bo'lim" not in body            # department filter applied
+    rows = [r for r in body.splitlines() if r.startswith("Eksport")]
+    assert len(rows) == 1
+    cells = rows[0].split(",")
+    assert cells[4] == "8.00"                     # hours proven
+    assert cells[8] == "1"                        # incomplete days, counted apart
+    assert "JAMI" in body
+    # Excel opens a bare UTF-8 CSV as cp1251 and mangles every o' and g'.
+    assert response.content.startswith(b"\xef\xbb\xbf")
+    assert "filename=tabel_2026-04-06_2026-04-07.csv" in response.headers["content-disposition"]

@@ -46,6 +46,9 @@ URL_MAP = {
     "attendance:unknown_attempts": "/attendance/unknown",
     "attendance:unknown": "/attendance/unknown",
     "attendance:employee_detail": "/attendance/employee/{pk}",
+    "attendance:timesheet": "/attendance/timesheet",
+    "attendance:timesheet_person": "/attendance/timesheet/{pk}",
+    "attendance:timesheet_export": "/api/attendance/timesheet/export",
     "attendance:export": "/api/attendance/export",
     "auth:login": "/login", "auth:logout": "/logout", "auth:register": "/register",
 }

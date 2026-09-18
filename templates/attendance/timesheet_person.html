@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block title %}{{ person.name }} — Tabel{% endblock %}
+{% block content %}
+<section class="page-header d-flex flex-column flex-md-row justify-content-between gap-3 align-items-md-end" aria-labelledby="personHeading">
+    <div>
+        <p class="eyebrow">AIRI · Tabel</p>
+        <h1 id="personHeading">{{ person.name }}</h1>
+        <p class="text-muted mb-0">
+            {{ person.department|default('Bo\'lim ko\'rsatilmagan') }}{% if person.position %} · {{ person.position }}{% endif %}
+            {% if person.external_id %} · {{ person.external_id }}{% endif %}
+        </p>
+    </div>
+    <div class="d-flex gap-2">
+        <a href="{{ url('attendance:timesheet') }}?start_date={{ start_date }}&amp;end_date={{ end_date }}" class="btn btn-outline-secondary"><i class="bi bi-arrow-left me-1" aria-hidden="true"></i>Tabelga qaytish</a>
+        <a href="{{ url('employees:detail', person.id) }}" class="btn btn-outline-primary">Profil</a>
+    </div>
+</section>
+
+<section class="airi-card p-3 p-lg-4">
+    <form method="get" class="row g-3 align-items-end">
+        <div class="col-6 col-md-3"><label class="form-label" for="start_date">Boshlanish</label><input class="form-control" type="date" name="start_date" id="start_date" value="{{ start_date }}"></div>
+        <div class="col-6 col-md-3"><label class="form-label" for="end_date">Tugash</label><input class="form-control" type="date" name="end_date" id="end_date" value="{{ end_date }}"></div>
+        <div class="col-12 col-md-6"><button class="btn btn-primary" type="submit"><i class="bi bi-funnel me-1" aria-hidden="true"></i>Qo'llash</button></div>
+    </form>
+    {% if range_notice %}<div class="alert alert-info py-2 mt-3 mb-0" role="status">{{ range_notice }}</div>{% endif %}
+    {% if cap_notice %}<div class="alert alert-warning py-2 mt-3 mb-0" role="status">{{ cap_notice }}</div>{% endif %}
+</section>
+
+{% if totals %}
+<section class="row g-3 mt-1">
+    <div class="col-6 col-lg-3"><div class="airi-card p-3 h-100"><p class="text-muted small mb-1">Kelgan kunlar</p><p class="h3 mb-0">{{ totals.days_attended }}</p></div></div>
+    <div class="col-6 col-lg-3"><div class="airi-card p-3 h-100"><p class="text-muted small mb-1">Ishlangan soat</p><p class="h3 mb-0">{{ '%.1f'|format(totals.worked_hours) }}</p>{% if totals.open_seconds %}<small class="text-info">+{{ '%.1f'|format(totals.open_hours) }} davom etmoqda</small>{% endif %}</div></div>
+    <div class="col-6 col-lg-3"><div class="airi-card p-3 h-100"><p class="text-muted small mb-1">Kirish / chiqish</p><p class="h3 mb-0">{{ totals.n_in }} / {{ totals.n_out }}</p></div></div>
+    <div class="col-6 col-lg-3"><div class="airi-card p-3 h-100"><p class="text-muted small mb-1">To'liqmas kunlar</p><p class="h3 mb-0 {% if totals.incomplete_days %}text-warning{% endif %}">{{ totals.incomplete_days }}</p></div></div>
+</section>
+{% endif %}
+
+<section class="airi-card p-3 p-lg-4 mt-4" aria-labelledby="personDaysHeading">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <div><h2 class="h5 mb-1" id="personDaysHeading">Kunlar va dalil rasmlari</h2><p class="text-muted small mb-0">{{ start_date|date('d.m.Y') }} — {{ end_date|date('d.m.Y') }}</p></div>
+        <span class="text-muted small">{{ days|length }} ta kun</span>
+    </div>
+
+    {% for d in days %}
+    <article class="border rounded-3 p-3 mb-3">
+        <div class="d-flex flex-column flex-lg-row justify-content-between gap-2 mb-3">
+            <div>
+                <h3 class="h6 mb-1">{{ d.date|date('d.m.Y') }}</h3>
+                <p class="text-muted small mb-0">
+                    Kirish {{ d.check_in|date('H:i')|default('—') }} ·
+                    Chiqish {{ d.check_out|date('H:i')|default('—') }} ·
+                    {{ d.n_in }} kirish / {{ d.n_out }} chiqish
+                </p>
+            </div>
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+                {% if d.is_open %}
+                    <span class="status-chip status-chip--warning">Hali binoda · {{ '%.1f'|format(d.open_hours) }} soat</span>
+                {% elif d.is_incomplete %}
+                    <span class="status-chip status-chip--warning" title="Bu kunning soati noma'lum, nol emas">Soat noma'lum</span>
+                {% else %}
+                    <span class="status-chip status-chip--success">{{ '%.2f'|format(d.worked_hours) }} soat</span>
+                {% endif %}
+                {% if d.status == 'NO_CHECKOUT' %}<span class="status-chip status-chip--warning">Chiqish yo'q</span>
+                {% elif d.status == 'NO_CHECKIN' %}<span class="status-chip status-chip--warning">Kelish qayd etilmagan</span>{% endif %}
+                <a class="btn btn-sm btn-outline-secondary" href="{{ PREFIX }}/attendance/day/{{ person.id }}/{{ d.date }}">Hodisalar va tuzatish</a>
+            </div>
+        </div>
+
+        {% if d.passes %}
+        <div class="d-flex flex-wrap gap-3">
+            {% for p in d.passes %}
+            <figure class="text-center mb-0" style="width: 118px;">
+                {% if p.snapshot %}
+                <button type="button" class="btn p-0 border-0 bg-transparent"
+                        data-airi-evidence
+                        data-evidence-src="{{ p.snapshot }}"
+                        data-evidence-title="{% if p.kind == 'IN' %}Kirish{% elif p.kind == 'OUT' %}Chiqish{% else %}Ko'rilgan{% endif %} · {{ p.time }}"
+                        data-evidence-subtitle="{{ person.name }} · {{ d.date|date('d.m.Y') }} · {{ p.camera }}">
+                    <img src="{{ p.snapshot }}" alt="{{ person.name }} · {{ p.time }}" loading="lazy"
+                         class="rounded-2 border" style="width: 118px; height: 118px; object-fit: cover;{% if p.voided %} filter: grayscale(1); opacity: .55;{% endif %}">
+                </button>
+                {% else %}
+                <div class="rounded-2 border d-flex align-items-center justify-content-center text-muted" style="width:118px;height:118px;"><i class="bi bi-image" aria-hidden="true"></i></div>
+                {% endif %}
+                <figcaption class="small mt-1">
+                    {% if p.kind == 'IN' %}<span class="status-chip status-chip--success">Kirish</span>
+                    {% elif p.kind == 'OUT' %}<span class="status-chip status-chip--danger">Chiqish</span>
+                    {% else %}<span class="status-chip">Ko'rilgan</span>{% endif %}
+                    <span class="d-block text-muted">{{ p.time }}</span>
+                    <span class="d-block text-muted">{{ p.camera }}</span>
+                    {% if p.manual %}<span class="d-block text-muted" title="Administrator qo'shgan">qo'lda</span>{% endif %}
+                    {% if p.voided %}<span class="d-block text-danger" title="{{ p.void_reason }}">bekor qilingan</span>{% endif %}
+                </figcaption>
+            </figure>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="text-muted small mb-0">Bu kun uchun saqlangan dalil rasmi yo'q.</p>
+        {% endif %}
+    </article>
+    {% else %}
+    <p class="text-center text-muted py-5 mb-0"><i class="bi bi-calendar-x d-block fs-2 mb-2" aria-hidden="true"></i>Tanlangan davrda davomat qaydlari yo'q.</p>
+    {% endfor %}
+
+    <p class="text-muted small mb-0 mt-2">
+        «Ko'rilgan» — kamera qayd etgan, lekin davomat holatini o'zgartirmagan o'tish
+        (takroriy ko'rinish yoki yo'nalishi aniqlanmagan). U kirish-chiqish soniga qo'shilmaydi.
+        Bekor qilingan qaydlar ko'rinib turadi, ammo hech qayerda sanalmaydi.
+        Dalil rasmlari {{ retention_days|default(90) }} kun saqlanadi.
+    </p>
+</section>
+{% endblock %}

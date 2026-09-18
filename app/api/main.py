@@ -326,6 +326,47 @@ def export(day: str | None = None, query: str | None = None,
         headers={"Content-Disposition": f"attachment; filename=attendance_{suffix}.csv"})
 
 
+@app.get(f"{PREFIX}/api/attendance/timesheet/export")
+def timesheet_export(start_date: str | None = None, end_date: str | None = None,
+                     query: str | None = None, department: str | None = None):
+    """The HR period timesheet as CSV: hours, pass counts, days still open.
+
+    "Ishlangan soat" and "To'liqmas kunlar" are two columns on purpose. The
+    hours are only what closed in/out pairs prove; the unclosed days are
+    counted beside them rather than being averaged in or silently dropped, so
+    a spreadsheet built on this cannot quietly under-report a third of the
+    month. See app/services/timesheet.py.
+    """
+    from app.api.pages import _timesheet_range
+    from app.services import timesheet as ts
+
+    start, end, _ = _timesheet_range(start_date, end_date)
+    with session_scope() as s:
+        rows = ts.totals(s, start, end, query=query, department=department)
+        summary = ts.RangeSummary.of(rows)
+
+    buf = io.StringIO()
+    wr = csv.writer(buf)
+    wr.writerow(["Xodim", "ID", "Bo'lim", "Kelgan kunlar", "Ishlangan soat",
+                 "O'rtacha kunlik soat", "Kirish soni", "Chiqish soni",
+                 "To'liqmas kunlar"])
+    for r in rows:
+        wr.writerow([r.name, r.external_id, r.department, r.days_attended,
+                     f"{r.worked_hours:.2f}", f"{r.avg_hours:.2f}",
+                     r.n_in, r.n_out, r.incomplete_days])
+    wr.writerow([])
+    wr.writerow(["JAMI", "", f"{summary.people} xodim", summary.days_attended,
+                 f"{summary.worked_hours:.2f}", "", summary.n_in, summary.n_out,
+                 summary.incomplete_days])
+    buf.seek(0)
+    return StreamingResponse(
+        # utf-8-sig: Excel opens a bare UTF-8 CSV as cp1251 and turns every
+        # o' and g' in these names into mojibake.
+        iter([buf.getvalue().encode("utf-8-sig")]), media_type="text/csv",
+        headers={"Content-Disposition":
+                 f"attachment; filename=tabel_{start}_{end}.csv"})
+
+
 @app.get(f"{PREFIX}/api/debug/captures")
 def debug_captures():
     """What the debug folder holds, per person."""

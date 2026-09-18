@@ -781,6 +781,103 @@ def attendance_history(request: Request):
     return attendance_list(request)
 
 
+# ------------------------------------------------------------- timesheet ---
+# What HR asks for, which the daily list cannot answer: hours over a PERIOD,
+# how many times each person came and went, and the face behind every one of
+# those passes. The rules that keep those numbers honest - unclosed days are
+# not zero hours, an open day is not folded into a monthly total, only
+# CHECK_IN/CHECK_OUT are passes, a voided event is not evidence - live in
+# app/services/timesheet.py with the measurements that motivate each.
+
+def _timesheet_range(start_date: str | None, end_date: str | None
+                     ) -> tuple[date, date, str]:
+    """The filtered period, defaulting to the current month.
+
+    HR reads a month, not a day: defaulting to `today` the way the daily list
+    does would open this page on a single date and make the totals look empty.
+    """
+    start = _parse_attendance_date(start_date, "start_date")
+    end = _parse_attendance_date(end_date, "end_date")
+    if start is None and end is None:
+        end = today()
+        start = end.replace(day=1)
+    elif start is None:
+        start = end.replace(day=1)
+    elif end is None:
+        end = today() if start <= today() else start
+
+    notice = ""
+    if start > end:
+        start, end = end, start
+        notice = "Sana oralig'i tartibga keltirildi."
+    if (end - start).days >= MAX_ATTENDANCE_RANGE_DAYS:
+        raise HTTPException(422, "Sana oralig'i 366 kundan oshmasligi kerak")
+    return start, end, notice
+
+
+@router.get("/attendance/timesheet", response_class=HTMLResponse)
+def timesheet_list(request: Request, start_date: str | None = None,
+                   end_date: str | None = None, query: str | None = None,
+                   department: str | None = None):
+    """One row per person for the whole period — the HR table."""
+    from app.services import timesheet as ts
+
+    start, end, range_notice = _timesheet_range(start_date, end_date)
+    with session_scope() as s:
+        rows = ts.totals(s, start, end, query=query, department=department)
+        summary = ts.RangeSummary.of(rows)
+        departments = [v for (v,) in s.execute(
+            select(Employee.department)
+            .where(Employee.is_active.is_(True))
+            .distinct().order_by(Employee.department)
+        ) if v]
+
+    return render(
+        "attendance/timesheet.html", request=request,
+        current_view="attendance:timesheet", rows=rows, summary=summary,
+        start_date=start.isoformat(), end_date=end.isoformat(),
+        query=query or "", department=department or "",
+        departments=departments, range_notice=range_notice,
+    )
+
+
+@router.get("/attendance/timesheet/{employee_id}", response_class=HTMLResponse)
+def timesheet_person(request: Request, employee_id: int,
+                     start_date: str | None = None, end_date: str | None = None):
+    """One person, day by day, with every pass and the face behind it."""
+    from app.services import timesheet as ts
+
+    start, end, range_notice = _timesheet_range(start_date, end_date)
+    # The evidence strip is an image per pass - roughly eight a day - so a
+    # year-long range would put thousands of thumbnails on one page. The table
+    # above keeps the full range; this drill-down keeps a month of it.
+    cap_notice = ""
+    if (end - start).days > MAX_ATTENDANCE_HTML_DAYS:
+        start = end - timedelta(days=MAX_ATTENDANCE_HTML_DAYS)
+        cap_notice = (f"Dalil rasmlari ko'pi bilan {MAX_ATTENDANCE_HTML_DAYS} kun "
+                      f"uchun ko'rsatiladi: {start.isoformat()} — {end.isoformat()}.")
+
+    with session_scope() as s:
+        emp = s.get(Employee, employee_id)
+        if emp is None:
+            raise HTTPException(404, "Employee not found")
+        person = {"id": emp.id, "name": emp.full_name,
+                  "department": emp.department or "",
+                  "position": emp.position or "",
+                  "external_id": emp.external_id or ""}
+        days = ts.day_rows_with_passes(s, employee_id, start, end)
+        totals = ts.totals(s, start, end, query=None, department=None)
+    mine = next((t for t in totals if t.employee_id == employee_id), None)
+
+    return render(
+        "attendance/timesheet_person.html", request=request,
+        current_view="attendance:timesheet", person=person, days=days,
+        totals=mine, start_date=start.isoformat(), end_date=end.isoformat(),
+        range_notice=range_notice, cap_notice=cap_notice,
+        retention_days=settings.snapshot_retention_days,
+    )
+
+
 def _pseudo_for(s, sightings) -> dict[int, dict]:
     """Which pseudo-person each unknown sighting belongs to, if any.
 

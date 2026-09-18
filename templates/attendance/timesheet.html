@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block title %}Tabel{% endblock %}
+{% block content %}
+<section class="page-header d-flex flex-column flex-md-row justify-content-between gap-3 align-items-md-end" aria-labelledby="timesheetHeading">
+    <div>
+        <p class="eyebrow">AIRI · Tabel</p>
+        <h1 id="timesheetHeading">Ishlangan vaqt hisoboti</h1>
+        <p class="text-muted mb-0">Davr bo'yicha ishlangan soat, kirish-chiqish soni va dalil rasmlari.</p>
+    </div>
+</section>
+
+<section class="airi-card p-3 p-lg-4" aria-labelledby="timesheetFiltersHeading">
+    <div class="d-flex flex-column flex-lg-row justify-content-between gap-3 mb-3">
+        <div>
+            <h2 class="h5 mb-1" id="timesheetFiltersHeading">Davr</h2>
+            <p class="text-muted small mb-0">Sana oralig'i, bo'lim va xodim bo'yicha.</p>
+        </div>
+        <a href="{{ url('attendance:timesheet_export') }}?{{ request.query_params }}" class="btn btn-outline-primary align-self-lg-start"><i class="bi bi-download me-1" aria-hidden="true"></i>CSV eksport</a>
+    </div>
+    {% if range_notice %}<div class="alert alert-info py-2" role="status">{{ range_notice }}</div>{% endif %}
+    <form method="get" class="row g-3">
+        <div class="col-12 col-md-6 col-xl-3"><label class="form-label" for="query">Xodim qidirish</label><input class="form-control" type="search" name="query" id="query" value="{{ query }}" placeholder="Ism yoki ID"></div>
+        <div class="col-12 col-md-6 col-xl-3"><label class="form-label" for="department">Bo'lim</label><select class="form-select" name="department" id="department"><option value="">Barcha bo'limlar</option>{% for value in departments %}<option value="{{ value }}" {% if department == value %}selected{% endif %}>{{ value }}</option>{% endfor %}</select></div>
+        <div class="col-6 col-xl-2"><label class="form-label" for="start_date">Boshlanish</label><input class="form-control" type="date" name="start_date" id="start_date" value="{{ start_date }}"></div>
+        <div class="col-6 col-xl-2"><label class="form-label" for="end_date">Tugash</label><input class="form-control" type="date" name="end_date" id="end_date" value="{{ end_date }}"></div>
+        <div class="col-12 d-flex flex-wrap gap-2 align-items-center"><button class="btn btn-primary" type="submit"><i class="bi bi-funnel me-1" aria-hidden="true"></i>Qo'llash</button><a class="btn btn-outline-secondary" href="{{ url('attendance:timesheet') }}">Shu oy</a></div>
+    </form>
+</section>
+
+<section class="row g-3 mt-1">
+    <div class="col-6 col-lg-3"><div class="airi-card p-3 h-100"><p class="text-muted small mb-1">Xodimlar</p><p class="h3 mb-0">{{ summary.people }}</p></div></div>
+    <div class="col-6 col-lg-3"><div class="airi-card p-3 h-100"><p class="text-muted small mb-1">Jami ishlangan soat</p><p class="h3 mb-0">{{ '%.1f'|format(summary.worked_hours) }}</p></div></div>
+    <div class="col-6 col-lg-3"><div class="airi-card p-3 h-100"><p class="text-muted small mb-1">Kirish / chiqish</p><p class="h3 mb-0">{{ summary.n_in }} / {{ summary.n_out }}</p></div></div>
+    <div class="col-6 col-lg-3"><div class="airi-card p-3 h-100"><p class="text-muted small mb-1">To'liqmas kunlar</p><p class="h3 mb-0 {% if summary.incomplete_days %}text-warning{% endif %}">{{ summary.incomplete_days }}</p></div></div>
+</section>
+
+{% if summary.incomplete_days %}
+<div class="alert alert-warning mt-3 mb-0" role="status">
+    <i class="bi bi-exclamation-triangle me-1" aria-hidden="true"></i>
+    <strong>{{ summary.incomplete_days }} ta kunda chiqish qayd etilmagan.</strong>
+    Bu kunlarning soati <em>nol emas, noma'lum</em> — u yuqoridagi jamiga qo'shilmagan.
+    Xodim sahifasida kunni ochib, yetishmayotgan o'tishni qo'lda qo'shish mumkin.
+</div>
+{% endif %}
+
+<section class="airi-card p-3 p-lg-4 mt-4" aria-labelledby="timesheetTableHeading">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <div><h2 class="h5 mb-1" id="timesheetTableHeading">Xodimlar bo'yicha</h2><p class="text-muted small mb-0">{{ start_date|date('d.m.Y') }} — {{ end_date|date('d.m.Y') }}</p></div>
+        <span class="text-muted small">{{ rows|length }} ta xodim</span>
+    </div>
+    <div class="data-table"><table class="table table-hover align-middle">
+        <thead><tr>
+            <th>Xodim</th><th>Bo'lim</th>
+            <th class="text-end">Kelgan kunlar</th>
+            <th class="text-end">Ishlangan soat</th>
+            <th class="text-end">O'rtacha kunlik</th>
+            <th class="text-end">Kirish</th>
+            <th class="text-end">Chiqish</th>
+            <th class="text-end">To'liqmas</th>
+            <th>Detal</th>
+        </tr></thead>
+        <tbody>
+        {% for r in rows %}
+            <tr>
+                <td><a class="fw-semibold text-decoration-none" href="{{ url('attendance:timesheet_person', r.employee_id) }}?start_date={{ start_date }}&amp;end_date={{ end_date }}">{{ r.name }}</a><small class="d-block text-muted">{{ r.external_id|default('ID berilmagan') }}</small></td>
+                <td>{{ r.department|default('—') }}</td>
+                <td class="text-end">{{ r.days_attended }}</td>
+                <td class="text-end fw-semibold">{{ '%.1f'|format(r.worked_hours) }}{% if r.open_seconds %} <small class="text-info d-block">+{{ '%.1f'|format(r.open_hours) }} davom etmoqda</small>{% endif %}</td>
+                <td class="text-end">{{ '%.1f'|format(r.avg_hours) }}</td>
+                <td class="text-end">{{ r.n_in }}</td>
+                <td class="text-end">{{ r.n_out }}</td>
+                <td class="text-end">{% if r.incomplete_days %}<span class="status-chip status-chip--warning">{{ r.incomplete_days }}</span>{% else %}<span class="text-muted">0</span>{% endif %}</td>
+                <td class="text-nowrap"><a class="btn btn-sm btn-link" href="{{ url('attendance:timesheet_person', r.employee_id) }}?start_date={{ start_date }}&amp;end_date={{ end_date }}">Kunlar va rasmlar</a></td>
+            </tr>
+        {% else %}
+            <tr><td colspan="9" class="text-center text-muted py-5"><i class="bi bi-calendar-x d-block fs-2 mb-2" aria-hidden="true"></i>Tanlangan davrda davomat qaydlari yo'q.</td></tr>
+        {% endfor %}
+        </tbody>
+        {% if rows %}
+        <tfoot><tr class="fw-semibold border-top">
+            <td>JAMI</td><td>—</td>
+            <td class="text-end">{{ summary.days_attended }}</td>
+            <td class="text-end">{{ '%.1f'|format(summary.worked_hours) }}</td>
+            <td class="text-end">—</td>
+            <td class="text-end">{{ summary.n_in }}</td>
+            <td class="text-end">{{ summary.n_out }}</td>
+            <td class="text-end">{{ summary.incomplete_days }}</td>
+            <td></td>
+        </tr></tfoot>
+        {% endif %}
+    </table></div>
+    <p class="text-muted small mb-0 mt-3">
+        Soat faqat yopilgan kirish-chiqish juftlaridan hisoblanadi. Chiqishi qayd etilmagan kun
+        jamiga kirmaydi va «To'liqmas» ustunida sanaladi. Hali binoda bo'lgan xodimning vaqti
+        alohida ko'rsatiladi.
+    </p>
+</section>
+{% endblock %}

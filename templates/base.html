@@ -48,6 +48,7 @@
                 <li class="nav-item"><a class="nav-link {% if current_view == 'dashboard:home' %}active{% endif %}" href="{{ url('dashboard:home') }}"><i class="bi bi-grid-1x2" aria-hidden="true"></i><span>Boshqaruv</span></a></li>
                 <li class="nav-item"><a class="nav-link {% if current_view == 'employees:list' %}active{% endif %}" href="{{ url('employees:list') }}"><i class="bi bi-people" aria-hidden="true"></i><span>Xodimlar</span></a></li>
                 <li class="nav-item"><a class="nav-link {% if current_view == 'attendance:list' %}active{% endif %}" href="{{ url('attendance:list') }}"><i class="bi bi-calendar2-check" aria-hidden="true"></i><span>Davomat</span></a></li>
+                <li class="nav-item"><a class="nav-link {% if current_view == 'attendance:timesheet' %}active{% endif %}" href="{{ url('attendance:timesheet') }}"><i class="bi bi-clock-history" aria-hidden="true"></i><span>Tabel</span></a></li>
                 {% if current_user and current_user.r == 'admin' %}
                 <li class="nav-item"><a class="nav-link {% if current_view == 'recognition:live' %}active{% endif %}" href="{{ url('recognition:live') }}"><i class="bi bi-broadcast-pin" aria-hidden="true"></i><span>Jonli kuzatuv</span></a></li>
                 {% endif %}
