@@ -1037,6 +1037,34 @@ class Settings(BaseSettings):
     debug_trace_limit: int = 10       # recognised passes, then tracing stops
     save_all_min_free_gb: float = 8.0
 
+    # ---- recovering a missing check-out ---------------------------------
+    # About 2.2 person-days a day end with a check-in and no check-out, and on
+    # three quarters of them the face path saw nothing later. The walk still
+    # happened and still left a `reid_pass`, so the departure is OFFERED for a
+    # human to confirm - never written. See app/services/checkout_recovery.py
+    # for why suggesting is the only safe form of this, and
+    # bench/missing_checkout_eval.py for the measurement.
+    #
+    # THE MARGIN IS THE GATE, NOT THE SCORE. Held out over 386 complete days
+    # against a median of 266 candidates, the fused ranker names the right
+    # PERSON 78.2% of the time ungated and 95.4% when the best candidate beats
+    # the runner-up by this much - on the 45% of days where it does. Coverage
+    # is the price; a wrong check-out is invisible once written and a missing
+    # one is not, so it is the right price.
+    #
+    #   ranker   right person   at margin >= 0.05
+    #   body            54.7%   57.3% on 62% of days
+    #   face            54.7%   98.0% on 39% of days
+    #   fused           78.2%   95.4% on 45% of days
+    #
+    # Those are an OPTIMISTIC bound - they come from days where the exit WAS
+    # captured, and the days needing repair are the ones where it was not.
+    checkout_suggest_margin: float = 0.05
+    # A floor under the score itself, so a day whose candidates are all poor
+    # does not produce a confident-looking suggestion merely because one is
+    # slightly less poor than the rest.
+    checkout_suggest_min_score: float = 0.45
+
     # ---- retention ------------------------------------------------------
     snapshot_retention_days: int = 90
 

@@ -1064,9 +1064,53 @@ def attendance_day(request: Request, employee_id: int, day: str, msg: str = "",
                 "status": daily.status, "presence": daily.presence.value
                 if hasattr(daily.presence, "value") else str(daily.presence),
             }
+        # A day that never recorded a departure: offer the best EXIT pass the
+        # body/face features point at, for a human to confirm. Suggestion only,
+        # and only for whoever may already correct the record - see
+        # app/services/checkout_recovery.py.
+        suggestion, alternatives = None, []
+        if me is not None:
+            from app.services import checkout_recovery
+            alternatives = checkout_recovery.suggest(s, employee_id, bdate)
+            suggestion = checkout_recovery.confident(alternatives)
+
     return render("attendance/day.html", request=request, current_view="attendance:list",
                   employee=vm, day=bdate, events=events, summary=summary,
-                  can_correct=bool(me), msg=msg, error=error)
+                  can_correct=bool(me), msg=msg, error=error,
+                  suggestion=suggestion, alternatives=alternatives)
+
+
+@router.post("/attendance/day/{employee_id}/{day}/recover")
+async def attendance_day_recover(request: Request, employee_id: int, day: str):
+    """Confirm an offered departure as this person's check-out."""
+    from app.services import checkout_recovery
+
+    me = _can_correct(request)
+    if not me:
+        return JSONResponse({"detail": "Not permitted"}, status_code=403)
+    bdate = _parse_attendance_date(day, "day")
+    if bdate is None:
+        raise HTTPException(400, "bad date")
+    form = await request.form()
+    try:
+        pass_id = int(form.get("pass_id") or 0)
+    except (TypeError, ValueError):
+        pass_id = 0
+    if not pass_id:
+        return RedirectResponse(_back(request, form,
+            f"/attendance/day/{employee_id}/{bdate}") + "?error=Tanlov+topilmadi",
+            status_code=303)
+
+    res = checkout_recovery.confirm(pass_id, employee_id=employee_id,
+                                    by=str(me.get("u") or me.get("uid") or ""))
+    back = _back(request, form, f"/attendance/day/{employee_id}/{bdate}")
+    sep = "&" if "?" in back else "?"
+    if res.get("ok"):
+        return RedirectResponse(
+            f"{back}{sep}msg=Chiqish+tasdiqlandi+({res['transition']})",
+            status_code=303)
+    return RedirectResponse(f"{back}{sep}error={_quote(str(res.get('error')))}",
+                            status_code=303)
 
 
 @router.get("/attendance/event/{event_id}/evidence/{kind}")

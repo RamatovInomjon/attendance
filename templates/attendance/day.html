@@ -99,6 +99,57 @@
     {% endfor %}
   </div>
   {% endif %}
+  {% if can_correct and (suggestion or alternatives) %}
+  <div class="airi-card p-3 p-lg-4 mt-4">
+    <h2 class="h6 mb-1">Chiqish qayd etilmagan</h2>
+    <p class="text-muted small">
+      Bu kun chiqishsiz yopilgan. Quyidagi o'tish{% if suggestion %} tana va yuz
+      belgilariga ko'ra shu xodimga eng mos keladi{% else %}lar topildi, ammo
+      ularning hech biri ishonchli emas{% endif %}. Tasdiqlansa, chiqish
+      sifatida yoziladi va kun qaytadan hisoblanadi.
+      <strong>Avval rasmga qarang</strong> &mdash; tizim taklif qiladi, qaror sizniki.
+    </p>
+    <div class="d-flex flex-wrap gap-3">
+      {% for c in alternatives %}
+      <div class="border rounded-3 p-2 text-center{% if suggestion and c.pass_id == suggestion.pass_id %} border-primary border-2{% endif %}" style="width: 160px;">
+        {% if c.snapshot %}
+        <button type="button" class="btn p-0 border-0 bg-transparent"
+                data-airi-evidence data-evidence-src="{{ c.snapshot }}"
+                data-evidence-title="Taklif: {{ c.time }}"
+                data-evidence-subtitle="{{ employee.name }} · {{ c.camera }}">
+          <img src="{{ c.snapshot }}" alt="{{ c.time }}" loading="lazy" class="rounded-2"
+               style="width:144px;height:144px;object-fit:cover;">
+        </button>
+        {% else %}
+        <div class="rounded-2 border d-flex align-items-center justify-content-center text-muted"
+             style="width:144px;height:144px;"><i class="bi bi-person-bounding-box"></i></div>
+        {% endif %}
+        <p class="small mb-1 mt-2">
+          <strong>{{ c.time }}</strong><span class="d-block text-muted">{{ c.camera }}</span>
+          <span class="d-block text-muted">
+            {% if c.face_sim is not none %}yuz {{ '%.2f'|format(c.face_sim) }}{% endif %}
+            {% if c.body_sim is not none %}tana {{ '%.2f'|format(c.body_sim) }}{% endif %}
+          </span>
+          {% if suggestion and c.pass_id == suggestion.pass_id %}
+          <span class="status-chip status-chip--success">tavsiya · farq {{ '%.2f'|format(c.margin) }}</span>
+          {% endif %}
+        </p>
+        <form method="post" action="{{ PREFIX }}/attendance/day/{{ employee.id }}/{{ day }}/recover"
+              onsubmit="return confirm('{{ c.time }} dagi o\'tish {{ employee.name|escapejs }} ning chiqishi sifatida yozilsinmi?')">
+          <input type="hidden" name="pass_id" value="{{ c.pass_id }}">
+          <input type="hidden" name="next" value="{{ PREFIX }}/attendance/day/{{ employee.id }}/{{ day }}">
+          <button class="btn btn-sm {{ 'btn-primary' if suggestion and c.pass_id == suggestion.pass_id else 'btn-outline-secondary' }}" type="submit">Chiqish deb tasdiqlash</button>
+        </form>
+      </div>
+      {% endfor %}
+    </div>
+    <p class="text-muted small mb-0 mt-3">
+      Tasdiqlangan chiqish <code>source=body</code> bilan yoziladi: uni keyin
+      ajratib ko'rish mumkin va u chegaralarni o'lchashda ishlatilmaydi, chunki
+      bu yuz tanishi emas &mdash; odam tasdig'i.
+    </p>
+  </div>
+  {% endif %}
   {% if can_correct %}
   <p class="text-muted small mb-0 mt-3">
     Bekor qilingan hodisa <strong>o'chirilmaydi</strong> &mdash; kim va nima

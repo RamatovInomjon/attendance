@@ -2544,3 +2544,90 @@ def test_timesheet_csv_keeps_hours_and_incomplete_days_in_separate_columns(monke
     # Excel opens a bare UTF-8 CSV as cp1251 and mangles every o' and g'.
     assert response.content.startswith(b"\xef\xbb\xbf")
     assert "filename=tabel_2026-04-06_2026-04-07.csv" in response.headers["content-disposition"]
+
+
+# --------------------------------------------------- checkout recovery UI ---
+
+def _recovery_day_fixture(session, employee_id, day):
+    """An open day, an anchor pass the face named, and one good candidate."""
+    import numpy as np
+    from app.config import settings as _s
+    from app.db.models import PresenceStatus, ReidPass
+
+    rng = np.random.default_rng(3)
+    me = rng.standard_normal(512).astype(np.float32)
+    me /= np.linalg.norm(me)
+    near = 0.95 * me + 0.05 * rng.standard_normal(512).astype(np.float32)
+    near /= np.linalg.norm(near)
+
+    ci = datetime(day.year, day.month, day.day, 4, 0, tzinfo=timezone.utc)
+    out = datetime(day.year, day.month, day.day, 13, 0, tzinfo=timezone.utc)
+    session.add(DailyAttendance(
+        employee_id=employee_id, business_date=day, check_in_time=ci,
+        entered_at=ci, worked_seconds=0, status="NO_CHECKOUT",
+        presence=PresenceStatus.INSIDE))
+    for track, ts, emp, vec in ((1, ci, employee_id, me), (2, out, None, near)):
+        session.add(ReidPass(
+            camera_id=2, camera_name="Exit", track_id=track,
+            first_seen=ts, last_seen=ts, business_date=day,
+            direction="ENTER" if emp else "EXIT", employee_id=emp,
+            vector=vec.tobytes(), dim=512, model_name="osnet-test",
+            face_vector=vec.tobytes(), face_dim=512,
+            face_model=_s.recognizer_model))
+    session.flush()
+
+
+def test_the_day_page_offers_a_departure_when_the_check_out_is_missing(monkeypatch):
+    """A missing check-out is the one gap a human can close in a click - but
+    only after seeing the crop. The page must show the candidate, not apply it."""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    day = date(2026, 6, 15)
+    with Session(engine) as session:
+        emp = Employee(full_name="Tiklash Xodimi", external_id="RC-UI")
+        session.add(emp)
+        session.flush()
+        _recovery_day_fixture(session, emp.id, day)
+        _isolated_employee_session(monkeypatch, session)
+        # The bare request carries no session, so the correcting role that
+        # gates this block has to be stood in for - exactly as _app_as() does
+        # for the routes driven through TestClient.
+        monkeypatch.setattr(pages, "_can_correct",
+                            lambda request: {"uid": 1, "u": "admin", "r": "admin"})
+        response = pages.attendance_day(
+            _employee_page_request(f"/attendance/day/{emp.id}/{day}"),
+            emp.id, day.isoformat())
+        # Checked in THIS session: the fixture rows were never committed, so a
+        # fresh one would not see them at all.
+        after = session.execute(select(DailyAttendance)).scalar_one()
+        still_open = after.check_out_time is None
+
+    html = unescape(response.body.decode())
+    assert "Chiqish qayd etilmagan" in html
+    assert "Chiqish deb tasdiqlash" in html
+    assert "/recover" in html
+    assert "tavsiya" in html, "the confident candidate should be marked"
+    # Rendering the offer must not apply it.
+    assert still_open
+
+
+def test_a_viewer_is_never_offered_a_departure_to_confirm(monkeypatch):
+    """Confirming one authors attendance, so it belongs behind the same gate
+    as voiding. A viewer must not even be shown the control."""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    day = date(2026, 6, 15)
+    with Session(engine) as session:
+        emp = Employee(full_name="Faqat Ko'ruvchi", external_id="RC-VIEW")
+        session.add(emp)
+        session.flush()
+        _recovery_day_fixture(session, emp.id, day)
+        _isolated_employee_session(monkeypatch, session)
+        monkeypatch.setattr(pages, "_can_correct", lambda request: None)
+        response = pages.attendance_day(
+            _employee_page_request(f"/attendance/day/{emp.id}/{day}"),
+            emp.id, day.isoformat())
+
+    html = unescape(response.body.decode())
+    assert "Chiqish deb tasdiqlash" not in html
+    assert "/recover" not in html
