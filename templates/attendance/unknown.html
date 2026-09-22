@@ -29,10 +29,26 @@
         <div class="d-flex gap-2 align-items-center">
             <span class="status-chip status-chip--warning">{{ unknown_attempts|length }} ta trek</span>
             <a class="btn btn-outline-secondary btn-sm"
-               href="{{ PREFIX }}/attendance/unknown?show={{ 'open' if show == 'all' else 'all' }}">
+               href="{{ PREFIX }}/attendance/unknown?show={{ 'open' if show == 'all' else 'all' }}{% if day %}&amp;day={{ day }}{% endif %}">
                {{ "Faqat ko'rilmaganlar" if show == 'all' else "Belgilanganlarni ham" }}</a>
         </div>
     </div>
+    {# The queue shows the newest 100 and hundreds are written a day, so
+       without these nothing older than a few hours can be reached. #}
+    <form method="get" class="row g-2 align-items-end mb-3" data-unknown-filter>
+        <input type="hidden" name="show" value="{{ show }}">
+        <div class="col-6 col-md-3"><label class="form-label small mb-1" for="unknownDay">Sana</label>
+            <input class="form-control form-control-sm" type="date" id="unknownDay" name="day" value="{{ day }}"></div>
+        <div class="col-6 col-md-4"><label class="form-label small mb-1" for="unknownIds">Noma'lum # raqami</label>
+            <input class="form-control form-control-sm" type="text" id="unknownIds" name="ids" value="{{ ids }}"
+                   placeholder="masalan: 15502, 15390" inputmode="numeric"></div>
+        <div class="col-12 col-md-5 d-flex gap-2">
+            <button class="btn btn-primary btn-sm" type="submit">Ko'rsatish</button>
+            {% if day or ids %}<a class="btn btn-outline-secondary btn-sm" href="{{ PREFIX }}/attendance/unknown?show={{ show }}">Tozalash</a>{% endif %}
+        </div>
+    </form>
+    {% if ids %}<p class="text-muted small">Faqat tanlangan raqamlar ko'rsatilmoqda: {{ ids }}.</p>
+    {% elif day %}<p class="text-muted small">{{ day }} sanasi, eng yangi 100 tasi.</p>{% endif %}
 
     {% if unknown_attempts %}
     <div class="unknown-review__grid">
@@ -103,7 +119,7 @@
                 {% if can_correct %}
                 <form method="post" class="mt-2 vstack gap-1"
                       action="{{ PREFIX }}/attendance/unknown/{{ attempt.id }}/resolve">
-                    <input type="hidden" name="next" value="{{ PREFIX }}/attendance/unknown?show={{ show }}">
+                    <input type="hidden" name="next" value="{{ PREFIX }}/attendance/unknown?{{ back_query }}">
                     <div class="d-flex gap-1">
                         <select class="form-select form-select-sm js-employee-picker"
                                 name="employee_id" aria-label="Xodimni tanlang"

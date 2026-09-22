@@ -934,20 +934,40 @@ def _pseudo_for(s, sightings) -> dict[int, dict]:
     return out
 
 
+def _sighting_ids(value: str | None) -> list[int]:
+    """`#15502, 15390 15322` -> [15502, 15390, 15322]; anything else ignored."""
+    import re
+    return [int(x) for x in re.findall(r"\d+", value or "")][:100]
+
+
 @router.get("/attendance/unknown", response_class=HTMLResponse)
 def attendance_unknown(request: Request, show: str = "open", msg: str = "",
-                       error: str = ""):
+                       error: str = "", day: str | None = None,
+                       ids: str | None = None):
     """The review queue, and - for an admin - the place labels come from.
 
     `show=open` hides what has already been decided, because a queue that never
     shrinks stops being reviewed. `show=all` brings the decisions back so they
     can be corrected.
+
+    `day` and `ids` exist because the queue shows the newest 100 and the service
+    writes several hundred unknowns a day: without them anything older than a
+    few hours could not be reached at all, so a named sighting - "confirm #15502"
+    - pointed at a card nobody could open. `ids` shows exactly those sightings,
+    decided or not; `day` narrows the queue to one business date.
     """
     me = _can_correct(request)
+    wanted = _sighting_ids(ids)
+    bdate = _parse_attendance_date(day, "day") if day else None
     with session_scope() as s:
         q = select(UnknownSighting).order_by(UnknownSighting.last_seen.desc())
-        if show != "all":
-            q = q.where(UnknownSighting.resolved_kind.is_(None))
+        if wanted:
+            q = q.where(UnknownSighting.id.in_(wanted))
+        else:
+            if show != "all":
+                q = q.where(UnknownSighting.resolved_kind.is_(None))
+            if bdate is not None:
+                q = q.where(UnknownSighting.business_date == bdate)
         rows = s.execute(q.limit(100)).scalars().all()
         names = dict(s.execute(
             select(Employee.id, Employee.full_name)
@@ -976,7 +996,14 @@ def attendance_unknown(request: Request, show: str = "open", msg: str = "",
                   unknown_attempts=attempts, page_obj=Page(attempts), is_paginated=False,
                   employees=sorted(names.items(), key=lambda kv: kv[1]),
                   can_correct=bool(me), can_admin=bool(_admin_only(request)),
-                  show=show, msg=msg, error=error)
+                  show=show, msg=msg, error=error,
+                  day=bdate.isoformat() if bdate else "",
+                  ids=", ".join(map(str, wanted)),
+                  # Where each card's form returns to: THIS view, filters and
+                  # all, or confirming one of six named cards drops the
+                  # reviewer back into the newest-100 queue.
+                  back_query=("ids=" + ",".join(map(str, wanted))) if wanted else
+                  (f"show={show}" + (f"&day={bdate.isoformat()}" if bdate else "")))
 
 
 def _capture_index() -> dict[str, str]:
@@ -1097,19 +1124,18 @@ async def attendance_day_recover(request: Request, employee_id: int, day: str):
     except (TypeError, ValueError):
         pass_id = 0
     if not pass_id:
-        return RedirectResponse(_back(request, form,
-            f"/attendance/day/{employee_id}/{bdate}") + "?error=Tanlov+topilmadi",
+        return RedirectResponse(_then(_back(request, form,
+            f"/attendance/day/{employee_id}/{bdate}"), "error", "Tanlov topilmadi"),
             status_code=303)
 
     res = checkout_recovery.confirm(pass_id, employee_id=employee_id,
                                     by=str(me.get("u") or me.get("uid") or ""))
     back = _back(request, form, f"/attendance/day/{employee_id}/{bdate}")
-    sep = "&" if "?" in back else "?"
     if res.get("ok"):
         return RedirectResponse(
-            f"{back}{sep}msg=Chiqish+tasdiqlandi+({res['transition']})",
+            _then(back, "msg", f"Chiqish tasdiqlandi ({res['transition']})"),
             status_code=303)
-    return RedirectResponse(f"{back}{sep}error={_quote(str(res.get('error')))}",
+    return RedirectResponse(_then(back, "error", str(res.get("error"))),
                             status_code=303)
 
 
@@ -1147,6 +1173,17 @@ def event_evidence(request: Request, event_id: int, kind: str):
 # face actually was. Both fix the record AND leave a label behind - see
 # app/services/corrections.py for why the labels are the more valuable half.
 
+def _then(url: str, key: str, value: str) -> str:
+    """`url` with one more query parameter, whether or not it already has some.
+
+    The correction forms send back a `next` that usually carries its own query -
+    `?show=open`, `?ids=15502,15390` - and appending `?msg=` to that produced
+    `?show=open?msg=...`: the message was swallowed into `show` and never shown,
+    and on an `ids=` view its digits would have been read as sighting numbers.
+    """
+    return f"{url}{'&' if '?' in url else '?'}{key}={_quote(value)}"
+
+
 def _back(request: Request, form, default: str) -> str:
     """Where to return to after a correction.
 
@@ -1178,9 +1215,9 @@ async def event_void(request: Request, event_id: int):
                  if out.get("gallery_rows_removed") else "")
         note = (f"{out['name']} uchun {out['business_date']} kuni qayta "
                 f"hisoblandi ({out['replayed']} hodisa).{extra}")
-        target = f"{_back(request, form, '/')}?msg={_quote(note)}"
+        target = _then(_back(request, form, '/'), "msg", note)
     else:
-        target = f"{_back(request, form, '/')}?error={_quote(out.get('error', ''))}"
+        target = _then(_back(request, form, '/'), "error", out.get('error', ''))
     return RedirectResponse(target, status_code=303)
 
 
@@ -1217,21 +1254,21 @@ async def unknown_resolve(request: Request, sighting_id: int):
         from app.services import auth as auth_svc
         if not auth_svc.can_admin(me):
             return RedirectResponse(
-                f"{back}?error={_quote('Davomatga yozish uchun administrator huquqi kerak')}",
+                _then(back, "error", 'Davomatga yozish uchun administrator huquqi kerak'),
                 status_code=303)
         out = await run_in_threadpool(
             corrections.promote_sighting, sighting_id,
             employee_id=int(emp) if emp.isdigit() else 0,
             direction=direction, by=str(me.get("u") or ""))
         if not out.get("ok"):
-            return RedirectResponse(f"{back}?error={_quote(out.get('error', ''))}",
+            return RedirectResponse(_then(back, "error", out.get('error', '')),
                                     status_code=303)
         moved = {"CHECK_IN": "kelish", "CHECK_OUT": "ketish"}.get(
             out["transition"], out["transition"] or "qayd")
         note = (f"{out['name']} - {out['direction']} sifatida davomatga "
                 f"yozildi ({moved}). Qo'lda kiritilgan deb belgilangan; "
                 f"xato bo'lsa, kun sahifasidan bekor qiling.")
-        return RedirectResponse(f"{back}?msg={_quote(note)}", status_code=303)
+        return RedirectResponse(_then(back, "msg", note), status_code=303)
 
     out = await run_in_threadpool(
         corrections.resolve_sighting,
@@ -1239,7 +1276,7 @@ async def unknown_resolve(request: Request, sighting_id: int):
         employee_id=int(emp) if emp.isdigit() else None,
         by=str(me.get("u") or ""))
     if not out.get("ok"):
-        return RedirectResponse(f"{back}?error={_quote(out.get('error', ''))}",
+        return RedirectResponse(_then(back, "error", out.get('error', '')),
                                 status_code=303)
     if out["kind"] == "employee":
         # Say the part the operator cannot see. Naming the face looks like it
@@ -1256,7 +1293,7 @@ async def unknown_resolve(request: Request, sighting_id: int):
                 "uchun eng qimmatli ma'lumot.")
     else:
         note = "Belgilandi."
-    return RedirectResponse(f"{back}?msg={_quote(note)}", status_code=303)
+    return RedirectResponse(_then(back, "msg", note), status_code=303)
 
 
 # ------------------------------------------------------------------ cameras --

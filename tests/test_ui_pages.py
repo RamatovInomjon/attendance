@@ -2631,3 +2631,80 @@ def test_a_viewer_is_never_offered_a_departure_to_confirm(monkeypatch):
     html = unescape(response.body.decode())
     assert "Chiqish deb tasdiqlash" not in html
     assert "/recover" not in html
+
+
+# ------------------------------------------------ reaching an old sighting ---
+# The queue shows the newest 100 unknowns and production writes several hundred
+# a day, so a sighting named in a report - "confirm #15502" - could not be found
+# on the page at all. These pin the way back to it.
+
+def _unknown_rows(session, n_recent=120):
+    from app.db.models import UnknownSighting
+    old_day = date(2026, 9, 21)
+    olds = []
+    for k in range(3):
+        u = UnknownSighting(camera_id=1, track_id=k, business_date=old_day,
+                            first_seen=datetime(2026, 9, 21, 4, k, tzinfo=timezone.utc),
+                            last_seen=datetime(2026, 9, 21, 4, k, tzinfo=timezone.utc),
+                            best_score=0.2, snapshot=f"snapshots/body_0_1_{k}_1.jpg")
+        session.add(u); olds.append(u)
+    for k in range(n_recent):   # enough newer rows to push the old ones off page 1
+        session.add(UnknownSighting(camera_id=2, track_id=1000 + k, business_date=date(2026, 9, 22),
+                                    first_seen=datetime(2026, 9, 22, 8, 0, tzinfo=timezone.utc) + timedelta(seconds=k),
+                                    last_seen=datetime(2026, 9, 22, 8, 0, tzinfo=timezone.utc) + timedelta(seconds=k),
+                                    best_score=0.1))
+    session.flush()
+    return [u.id for u in olds]
+
+
+def test_an_old_sighting_is_unreachable_without_the_filter_and_reachable_with_it(monkeypatch):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        old_ids = _unknown_rows(session)
+        _isolated_employee_session(monkeypatch, session)
+        monkeypatch.setattr(pages, "_can_correct", lambda r: {"uid": 1, "u": "admin", "r": "admin"})
+        plain = pages.attendance_unknown(_employee_page_request("/attendance/unknown")).body.decode()
+        by_ids = pages.attendance_unknown(
+            _employee_page_request("/attendance/unknown"),
+            ids=f"#{old_ids[0]}, {old_ids[2]}").body.decode()
+        by_day = pages.attendance_unknown(
+            _employee_page_request("/attendance/unknown"), day="2026-09-21").body.decode()
+
+    import re
+    card = lambda html, i: re.search(rf"Noma'lum #{i}\b", html) is not None   # #1 is not #123
+    assert not card(unescape(plain), old_ids[0]), "the newest-100 queue hides it"
+    html = unescape(by_ids)
+    assert card(html, old_ids[0]) and card(html, old_ids[2])
+    assert not card(html, old_ids[1]), "ids= shows exactly the ones asked for"
+    day_html = unescape(by_day)
+    assert all(card(day_html, i) for i in old_ids)
+    # Each card must return to THIS filtered view after a confirmation.
+    assert f'/attendance/unknown?ids={old_ids[0]},{old_ids[2]}"' in html
+
+
+def test_ids_shows_an_already_decided_sighting_too(monkeypatch):
+    """A sighting named in a report may have been decided since; hiding it
+    would make the link look broken rather than done."""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        from app.db.models import UnknownSighting
+        (first, *_rest) = _unknown_rows(session, n_recent=0)
+        session.get(UnknownSighting, first).resolved_kind = "visitor"
+        session.flush()
+        _isolated_employee_session(monkeypatch, session)
+        html = unescape(pages.attendance_unknown(
+            _employee_page_request("/attendance/unknown"), ids=str(first)).body.decode())
+    import re
+    assert re.search(rf"Noma'lum #{first}\b", html)
+
+
+def test_sighting_ids_parsing_and_query_joining():
+    assert pages._sighting_ids("#15502, 15390 15322") == [15502, 15390, 15322]
+    assert pages._sighting_ids("") == [] and pages._sighting_ids(None) == []
+    # The bug this replaces: "?show=open" + "?msg=..." swallowed the message.
+    assert pages._then("/x/attendance/unknown?show=open", "msg", "Saqlandi") == \
+        "/x/attendance/unknown?show=open&msg=Saqlandi"
+    assert pages._then("/x/attendance/day/1/2026-09-21", "error", "a b") == \
+        "/x/attendance/day/1/2026-09-21?error=a%20b"
