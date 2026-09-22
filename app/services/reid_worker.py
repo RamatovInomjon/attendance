@@ -133,6 +133,8 @@ class ReidWorker:
         self.crops_seen = 0
         self.crops_dropped = 0
         self.passes_written = 0
+        self.passes_merged = 0
+        self.names_attached = 0
         self.matches_found = 0
         self.errors = 0
         self.last_error = ""
@@ -252,6 +254,12 @@ class ReidWorker:
             if cand:
                 p = self._open.pop(max(cand, key=lambda x: x[2]))
         if p is None or not p.crops:
+            # The body half of this pass may already be in the table: a pass
+            # whose crops paused for longer than the stale limit is written by
+            # `_close_stale` as UNKNOWN, and the completion that arrives
+            # afterwards - carrying the name, the direction and the face
+            # template - used to find nothing open and be dropped in silence.
+            self._label_existing(cam_id, ct)
             return
         self._flush(p, ct, ts, ct.direction)
 
@@ -334,36 +342,62 @@ class ReidWorker:
         face_ipd = float(getattr(ct, "best_ipd", 0.0) or 0.0) if ct else 0.0
         face_n = int(getattr(ct, "face_frames", 0) or 0) if ct else 0
 
+        first = datetime.fromtimestamp(p.first_seen, tz=timezone.utc)
+        last = datetime.fromtimestamp(p.last_seen, tz=timezone.utc)
         with session_scope() as s:
-            row = ReidPass(
-                camera_id=p.camera_id, camera_name=p.camera_name,
-                track_id=p.track_id,
-                first_seen=datetime.fromtimestamp(p.first_seen, tz=timezone.utc),
-                last_seen=datetime.fromtimestamp(p.last_seen, tz=timezone.utc),
-                business_date=business_date(when), direction=direction or "UNKNOWN",
-                employee_id=ct.employee_id if named else None,
-                name=ct.name if named else "",
-                folder=str(folder), crops=kept,
-                vector=feat.astype("float32").tobytes(), dim=int(feat.shape[0]),
-                model_name=self.reid.model_name,
-                face_vector=(face.astype("float32").tobytes()
-                             if face is not None else None),
-                face_dim=int(face.shape[0]) if face is not None else 0,
-                face_ipd=face_ipd, face_frames=face_n,
-                face_model=settings.recognizer_key if face is not None else "",
-            )
-            s.add(row)
+            # ONE ROW PER PASS, however many times it is flushed. A pass whose
+            # crops pause past the stale limit is written by `_close_stale`
+            # and dropped from `_open`; the same track's next crop then opens
+            # a fresh `_Pass` under the SAME (camera, track, first_seen), and
+            # writing that as a second row broke the UNIQUE key - 2,102 times
+            # in production between 3 and 22 September, ~5% of all passes.
+            # The half that failed was the one worth keeping: `_on_pass`
+            # flushes the completed track, with the name, the direction and
+            # the face template, and 5.1% of named recognitions were left
+            # with an unnamed, directionless row. So the halves are merged.
+            row = self._existing(s, p.camera_id, p.track_id, first)
+            grouped_before = False
+            if row is None:
+                row = ReidPass(
+                    camera_id=p.camera_id, camera_name=p.camera_name,
+                    track_id=p.track_id, first_seen=first, last_seen=last,
+                    business_date=business_date(when), direction=direction or "UNKNOWN",
+                    employee_id=ct.employee_id if named else None,
+                    name=ct.name if named else "",
+                    folder=str(folder), crops=kept,
+                    vector=feat.astype("float32").tobytes(), dim=int(feat.shape[0]),
+                    model_name=self.reid.model_name,
+                    face_vector=(face.astype("float32").tobytes()
+                                 if face is not None else None),
+                    face_dim=int(face.shape[0]) if face is not None else 0,
+                    face_ipd=face_ipd, face_frames=face_n,
+                    face_model=settings.recognizer_key if face is not None else "",
+                )
+                s.add(row)
+                self.passes_written += 1
+            else:
+                grouped_before = row.pseudo_person_id is not None
+                feat = self._merge(row, feat=feat, kept=kept, named=named, ct=ct,
+                                   direction=direction, folder=folder, last=last,
+                                   face=face, face_ipd=face_ipd, face_n=face_n)
+                self.passes_merged += 1
             s.flush()
             hit = None
-            enough = kept >= settings.reid_min_crops
-            if not named and enough:
+            enough = (row.crops or 0) >= settings.reid_min_crops
+            if row.employee_id is None and enough and row.matched_pass_id is None:
                 hit = self._match(s, row, feat, face)
             # A tracklet feature built from one blurred crop is not worth a
             # cross-camera claim, and it is not worth a body LINK either - the
             # same argument, against a far larger candidate set. Such a pass is
             # still grouped, but only by its face.
-            group = self._group(s, row, feat if enough else None,
-                                face, face_ipd, ct, named)
+            #
+            # A row the earlier half already placed is NOT placed again:
+            # `place()` counts every call as a pass, and one walk would become
+            # two visits of the same pseudo-person.
+            group = None
+            if not grouped_before:
+                group = self._group(s, row, feat if enough else None,
+                                    face, face_ipd, ct, named)
             pass_id, folder_str = row.id, row.folder
             pseudo_code = group.code if group is not None else None
 
@@ -383,11 +417,92 @@ class ReidWorker:
             "pseudo_person": pseudo_code,
         }, indent=2, ensure_ascii=False))
 
-        self.passes_written += 1
         if hit:
             self.matches_found += 1
             log.info("[reid] %s t%d matched pass %d  score=%.3f margin=%.3f",
                      p.camera_name, p.track_id, hit[0], hit[1], hit[2])
+
+    @staticmethod
+    def _existing(s, camera_id, track_id, first_seen):
+        """The row already written for this pass, if any - by its unique key."""
+        from sqlalchemy import select
+        from app.db.models import ReidPass
+        return s.execute(select(ReidPass).where(
+            ReidPass.camera_id == camera_id, ReidPass.track_id == track_id,
+            ReidPass.first_seen == first_seen)).scalar_one_or_none()
+
+    def _merge(self, row, *, feat, kept, named, ct, direction, folder, last,
+               face, face_ipd, face_n):
+        """Fold a later flush of the same pass into its row; returns the body
+        feature the row now holds.
+
+        Nothing the earlier half established is thrown away. The body feature
+        is re-averaged, weighted by crop count - the halves are the same person
+        in the same clothes, minutes apart. A name, a decided direction and a
+        better face template come from the later half, because the later half
+        is the completed track; an unnamed or undecided later half never
+        overwrites what the earlier one already had.
+        """
+        old_n = int(row.crops or 0)
+        if (row.vector is not None and row.model_name == self.reid.model_name
+                and int(row.dim or 0) == int(feat.shape[0]) and old_n + kept > 0):
+            v = np.frombuffer(row.vector, np.float32) * old_n + feat * kept
+            n = float(np.linalg.norm(v))
+            if n > 1e-9:
+                feat = (v / n).astype(np.float32)
+        row.vector = feat.astype("float32").tobytes()
+        row.dim = int(feat.shape[0])
+        row.model_name = self.reid.model_name
+        row.crops = old_n + kept
+        if row.last_seen is None or last > row.last_seen:
+            row.last_seen = last
+        if direction and direction != "UNKNOWN":
+            row.direction = direction
+        if named:
+            row.employee_id, row.name, row.folder = ct.employee_id, ct.name, str(folder)
+        if face is not None and (row.face_vector is None
+                                 or face_n >= int(row.face_frames or 0)):
+            row.face_vector = face.astype("float32").tobytes()
+            row.face_dim = int(face.shape[0])
+            row.face_ipd, row.face_frames = face_ipd, face_n
+            row.face_model = settings.recognizer_key
+        return feat
+
+    def _label_existing(self, cam_id, ct) -> bool:
+        """Give an already-written row the identity its completion carries.
+
+        No crops arrive with this, so nothing is re-embedded, matched or
+        grouped: it is the label, and only the label, that would otherwise be
+        lost. Returns whether a row was found.
+        """
+        from app.db.session import session_scope
+        first = datetime.fromtimestamp(float(ct.first_seen), tz=timezone.utc)
+        named = ct.employee_id is not None
+        with session_scope() as s:
+            row = self._existing(s, cam_id, ct.track_id, first)
+            if row is None:
+                return False
+            changed = attached = False
+            if named and row.employee_id is None:
+                row.employee_id, row.name = ct.employee_id, ct.name
+                changed = attached = True
+            direction = getattr(ct, "direction", "") or ""
+            if direction and direction != "UNKNOWN" and row.direction in (None, "", "UNKNOWN"):
+                row.direction = direction
+                changed = True
+            face = getattr(ct, "face_template", None)
+            face_n = int(getattr(ct, "face_frames", 0) or 0)
+            if face is not None and (row.face_vector is None
+                                     or face_n >= int(row.face_frames or 0)):
+                row.face_vector = face.astype("float32").tobytes()
+                row.face_dim = int(face.shape[0])
+                row.face_ipd = float(getattr(ct, "best_ipd", 0.0) or 0.0)
+                row.face_frames = face_n
+                row.face_model = settings.recognizer_key
+                changed = True
+        if attached:
+            self.names_attached += 1
+        return True
 
     def _group(self, s, row, body, face, face_ipd, ct, named):
         """Attach this pass to a pseudo-identity, so one visitor is one person.
@@ -532,7 +647,8 @@ class ReidWorker:
     def stats(self) -> dict:
         return {"enabled": self.enabled, "queued": self.q.qsize(),
                 "crops_seen": self.crops_seen, "crops_dropped": self.crops_dropped,
-                "passes": self.passes_written, "matches": self.matches_found,
+                "passes": self.passes_written, "merged": self.passes_merged,
+                "names_attached": self.names_attached, "matches": self.matches_found,
                 "errors": self.errors, "last_error": self.last_error,
                 "pseudo": self.pseudo.stats() if self.pseudo else None,
                 "model": Path(str(self.model_path)).name if self.model_path else None}
