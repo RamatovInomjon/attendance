@@ -113,7 +113,21 @@ class Settings(BaseSettings):
     # every one of the 143 passes correctly where the old one missed 5. Drop-in
     # at the pipeline's own alignment. Same size and speed after fp16
     # conversion. models/README.md has the full table.
-    recognizer_model: str = "ir101S3v2s_sr10final_fp16.onnx"
+    #
+    # SWAPPED 2026-11-24 to IR-200 S5 epoch 23 (insightface/TopoFR iresnet200,
+    # 119M parameters, Glint360K -> S4 -> S5 on 3.1M identities). Same input
+    # contract, so no code change. Same fair test as above, paired over passes
+    # (bench/fair_ab.py, 95% bootstrap CI): TAR 0.953 vs 0.879 at 1e-4
+    # (+0.077 [+0.048, +0.108]), 0.972 vs 0.936 at 1e-3, 0.985 vs 0.971 at
+    # 1e-2; 141/143 passes right against 140, none wrong for either. Drop-in at
+    # the pipeline's own alignment - its training aligner adds nothing
+    # significant. fp16 is indistinguishable from fp32 on every measure (all
+    # deltas within +-0.001). On a second camera (faceid.airi.uz lobby frames,
+    # 1,757 photos) it ties: no gain, no loss. Costs 1.75x the GPU time per
+    # face (9.3 vs 5.3 ms at batch 8 on an RTX 3070 Laptop). INT8 was tried
+    # and rejected: static QDQ collapsed the embedding (mean cosine 0.10 to
+    # fp32) and ran 2.8x slower than fp16 on the CUDA provider.
+    recognizer_model: str = "ir200s5ep23_fp16.onnx"
 
     # ---- person re-identification ---------------------------------------
     # Body ReID: it links one unrecognised person across the two cameras, and
@@ -825,6 +839,24 @@ class Settings(BaseSettings):
         # recognition_threshold_override_model.
         "ir101S3v2s_sr10final_fp16.onnx": 0.28,
         "ir101S3v2s_sr10final.onnx": 0.28,
+        # CALIBRATED 2026-11-24 the same way, against production's model at
+        # 0.28 (pair FAR 4.37e-5 on this corridor, 0.23% wrong-name frames):
+        #
+        #   rule                            thr    TAR   wrong-name/frame
+        #   same pair-FAR as production   0.251  0.937        0.0023   <- this
+        #   pair-FAR 1e-4                 0.234  0.952        0.0054
+        #   pair-FAR 1e-3                 0.197  0.972        0.0513
+        #   max impostor + 0.01           0.282  0.902        0.0000
+        #
+        # Same safety, 0.937 of frames identified against 0.848. Its impostor
+        # tail sits LOWER than the IR-101's (p99.99 0.233 vs 0.262) while
+        # genuine scores sit higher (median 0.452 vs 0.420), so the other
+        # face-scale cut-offs below - tracklet_face_threshold,
+        # pseudo_face_threshold, checkout_suggest_min_score - were left as they
+        # were: on this scale each is slightly stricter than before, never
+        # looser. Re-derive them once a week of live data exists.
+        "ir200s5ep23_fp16.onnx": 0.25,
+        "ir200s5ep23.onnx": 0.25,
     }
 
     # -- augmentation: per-crop acceptance floors ----------------------------
@@ -880,7 +912,11 @@ class Settings(BaseSettings):
     # are no corridor crops in the new gallery yet, so nothing to measure the
     # floor against until admins add some and unknown sightings accumulate.
     # Re-measure with bench/far_live_rows.py after the first week.
-    augment_live_floor: float = 0.44
+    #
+    # 2026-11-24, recognizer swap to IR-200: carried over the same way. 0.44
+    # sat 1.14 gaps up on the IR-101 scale, which is 0.481 on this one. Same
+    # caveat: a starting point until corridor crops exist under the new model.
+    augment_live_floor: float = 0.48
     # Still used, but only to REFUSE a crop: one whose worst corridor impostor
     # plus this margin exceeds the floor above is a known lookalike and is not
     # offered at all, rather than being given a bespoke floor of its own.
